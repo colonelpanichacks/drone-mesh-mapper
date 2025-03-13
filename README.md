@@ -35,7 +35,7 @@ This project is a minimal scanner for WiFi-based Drone Remote ID, supporting bot
      - **UAV MAC Address & RSSI**
      - **Location Data:** Latitude and longitude (if available)
      - **Flight Data:** Speed, altitude, and heading (if applicable)
-   - Transmits the message over the custom UART to integrate with a mesh network.
+   - Transmits the message over the custom UART to integrate with your Meshtastic network.
    - Debug information is printed over USB serial for local monitoring.
 
 4. **Heartbeat Mechanism:**
@@ -45,7 +45,7 @@ This project is a minimal scanner for WiFi-based Drone Remote ID, supporting bot
 
 ## Hardware Requirements 🛠️
 
-- **ESP32 Development Board:** Must be based on ESP32 (e.g., Mesh-Detect boards like Xiao ESP32-C3).
+- **ESP32 Development Board:** Xiao ESP32-C3
 - **Custom UART Wiring:** 
   - **TX:** GPIO6  
   - **RX:** GPIO7
