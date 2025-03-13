@@ -1,2 +1,2 @@
 Build and Flash in Platform.io in VSCode. 
-Thanks for the underlying code dev to Cemaxacutor and Luke Switzer. 
+Thanks to Cemaxacutor and Luke Switzer for the underlying code. I only modded it to suit the needs of my board. 
