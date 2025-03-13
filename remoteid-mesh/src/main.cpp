@@ -1,32 +1,10 @@
 /* -*- tab-width: 2; mode: c++; -*-
- *
- * Scanner for WiFi direct remote id.
- * Handles both opendroneid and French formats.
- *
- * Copyright (c) 2020-2021, Steve Jack.
- *
- * MIT licence.
- *
- * Nov. '21     Added option to dump ODID frame to serial output.
- * Oct. '21     Updated for opendroneid release 1.0.
- * June '21     Added an option to log to an SD card.
- * May '21      Fixed a bug that presented when handing packed ODID data from multiple sources.
- * April '21    Added support for EN 4709-002 WiFi beacons.
- * March '21    Added BLE scan. Doesn't work very well.
- * January '21  Added support for ANSI/CTA 2063 French IDs.
- *
- * Notes
- *
- * May need a semaphore.
- *
- */
 
-/*
- * CEMAXECUTER
+ * Thank you CEMAXECUTER and Luke Switzer! this is a version of the file that works with Mesh-Detect boards (xiao esp32-c3)
  * Minimal scanner for WiFi direct remote ID (OpenDroneID and French formats).
  * Prints results in the same JSON format as originally shown, immediately upon decode.
- *
- * MIT License.
+ * Sends results over serial Uart to Meshtastic
+
  */
 
  #if !defined(ARDUINO_ARCH_ESP32)
