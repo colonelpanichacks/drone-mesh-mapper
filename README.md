@@ -76,8 +76,7 @@ This project is a minimal scanner for WiFi-based Drone Remote ID, supporting bot
 
 
 Thanks to Cemaxacutor and Luke Switzer for the underlying code! 
-<a href="https://github.com/alphafox02">
-<a href="https://github.com/lukeswitz">
+
 
 ## Order a PCB for this project
 <a href="https://www.tindie.com/stores/colonel_panic/?ref=offsite_badges&utm_source=sellers_colonel_panic&utm_medium=badges&utm_campaign=badge_large">
