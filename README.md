@@ -12,7 +12,7 @@ This project is a minimal scanner for WiFi-based Drone Remote ID, supporting bot
 - **Protocol Support:** Decodes both **OpenDroneID** and **French Remote ID** packets.
 - **Mesh Integration:** Sends compact, formatted messages via custom UART (TX: GPIO6, RX: GPIO7) to a mesh network.
 - **Efficient & Lightweight:** Minimal scanning and parsing for real-time UAV data.
-- **Heartbeat Logging:** Prints periodic heartbeat messages to ensure the device is active.
+- **Heartbeat Logging:** Prints periodic heartbeat messages to USB serail to ensure the device is active.
 
 ---
 
