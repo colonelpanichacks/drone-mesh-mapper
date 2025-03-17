@@ -72,7 +72,7 @@ This project is a minimal scanner for WiFi-based Drone Remote ID, supporting bot
    git clone https://github.com/yourusername/drone-remote-id-scanner.git
    cd drone-remote-id-scanner
 
-   Build and Flash in Platform.io via VSCode. 
+   Build and Flash in Platform.io via VSCode or run ./flasher.sh to download and flash binary.
 
 
 Thanks to Cemaxacutor and Luke Switzer for the underlying code! 
