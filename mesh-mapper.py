@@ -116,7 +116,7 @@ HTML_PAGE = '''
       border: none;
       padding: 3px;
     }
-    /* Upper Right: Filter box for drone/pilot combos */
+    /* Upper Right: Scrollable list of detected drone MAC addresses */
     #filterBox {
       position: absolute;
       top: 10px;
@@ -130,19 +130,6 @@ HTML_PAGE = '''
       max-height: 80vh;
       overflow-y: auto;
       z-index: 1000;
-    }
-    #filterBox button {
-      margin-top: 5px;
-      background: lime;
-      color: black;
-      border: none;
-      padding: 5px;
-      cursor: pointer;
-      font-family: monospace;
-    }
-    .selected-combo {
-      background-color: #ff00ff !important;  /* Hot cyberpunk purple */
-      color: lime !important;
     }
   </style>
 </head>
@@ -162,10 +149,8 @@ HTML_PAGE = '''
   </select>
 </div>
 <div id="filterBox">
-  <h3>Drone Pilot Combinatinos</h3>
+  <h3>Detected Drone MAC Addresses</h3>
   <ul id="comboList"></ul>
-  <button id="filterButton">Filter by Selected Combo</button>
-  <button id="clearFilterButton">Clear Filter</button>
 </div>
 <script>
 // Define tile layers.
@@ -247,16 +232,10 @@ function updateComboList(data, currentTime) {
     if (!data[mac].last_update || (currentTime - data[mac].last_update > 300)) continue;
     let li = document.createElement("li");
     li.textContent = mac;
-    li.style.cursor = "pointer";
+    li.style.cursor = "default";
     li.style.marginBottom = "5px";
     li.style.padding = "3px";
     li.style.border = "1px solid lime";
-    li.addEventListener("click", function() {
-      let items = comboList.getElementsByTagName("li");
-      for (let item of items) { item.classList.remove("selected-combo"); }
-      li.classList.add("selected-combo");
-      filterMAC = mac;
-    });
     comboList.appendChild(li);
   }
 }
@@ -351,14 +330,6 @@ async function updateData() {
                                 .bindPopup(generatePopupContent(det))
                                 .addTo(map);
           droneMarkers[mac].on("click", function() {
-            let items = comboList.getElementsByTagName("li");
-            for (let item of items) { item.classList.remove("selected-combo"); }
-            for (let item of items) {
-              if (item.textContent === mac) {
-                item.classList.add("selected-combo");
-                break;
-              }
-            }
             filterMAC = mac;
           });
         }
@@ -387,14 +358,6 @@ async function updateData() {
                               .bindPopup(generatePopupContent(det))
                               .addTo(map);
           pilotMarkers[mac].on("click", function() {
-            let items = comboList.getElementsByTagName("li");
-            for (let item of items) { item.classList.remove("selected-combo"); }
-            for (let item of items) {
-              if (item.textContent === mac) {
-                item.classList.add("selected-combo");
-                break;
-              }
-            }
             filterMAC = mac;
           });
         }
