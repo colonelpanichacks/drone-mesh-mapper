@@ -1,8 +1,7 @@
 /* -*- tab-width: 2; mode: c++; -*-
 
  * Minimal scanner for WiFi direct remote ID 
- * Sends mesh detection messages over UART (Serial1) exactly as before,
- * and also sends a minimal JSON payload over USB Serial (Serial) for the Flask API.
+
  */
 
 #if !defined(ARDUINO_ARCH_ESP32)
@@ -12,7 +11,7 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 #include <esp_wifi.h>
-#include <esp_event_loop.h>
+#include <esp_event_loop.h>   // Still using the legacy header (warnings will be generated)
 #include <nvs_flash.h>
 #include "opendroneid.h"
 #include "odid_wifi.h"
@@ -74,7 +73,7 @@ esp_err_t event_handler(void *, system_event_t *);
 void callback(void *, wifi_promiscuous_pkt_type_t);
 void parse_odid(struct uav_data *, ODID_UAS_Data *);
 void store_mac(struct uav_data *uav, uint8_t *payload);
-void send_json_detection(struct uav_data *UAV);
+void send_json_detection(struct uav_data *UAV); // existing function
 
 // Global packet counter
 static int packetCount = 0;
@@ -87,24 +86,21 @@ esp_err_t event_handler(void *ctx, system_event_t *event) {
   return ESP_OK;
 }
 
-// Initialize USB Serial (for JSON output) and Serial1 (UART output remains unchanged)
+// Initialize USB Serial (for JSON output) and Serial1 (UART messages remain unchanged)
 void initializeSerial() {
-  // Initialize USB Serial: used exclusively for sending the minimal JSON payload.
+  // Initialize USB Serial for JSON payloads.
   Serial.begin(115200);
-  
-  // Initialize Serial1 for your mesh detection messages (unchanged).
+  // Initialize Serial1 for mesh detection messages.
   Serial1.begin(115200, SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
+  Serial.println("USB Serial (for JSON) and UART (Serial1) initialized.");
 }
 
 void setup() {
   setCpuFrequencyMhz(160);
   nvs_flash_init();
-  tcpip_adapter_init();
-  
+  tcpip_adapter_init();  // Deprecated but still used here
   initializeSerial();
-  
-  esp_event_loop_init(event_handler, NULL);
-  
+  esp_event_loop_init(event_handler, NULL);  // Deprecated warning appears here
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   esp_wifi_init(&cfg);
   esp_wifi_set_storage(WIFI_STORAGE_RAM);
@@ -125,27 +121,37 @@ void loop() {
   }
 }
 
-// Sends the minimal JSON payload over USB Serial (Serial)
+// Sends the minimal JSON payload over USB Serial (unchanged).
 void send_json_detection(struct uav_data *UAV) {
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
-  
   char json_msg[256];
   snprintf(json_msg, sizeof(json_msg),
     "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f}",
     mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d);
-  
-  // Send only the JSON payload over USB Serial
   Serial.println(json_msg);
 }
 
-// Sends your original UART messages over Serial1, then sends the JSON payload over USB Serial.
+// New function: sends JSON payload as fast as possible over USB Serial.
+void send_json_fast(struct uav_data *UAV) {
+  char mac_str[18];
+  snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+           UAV->mac[0], UAV->mac[1], UAV->mac[2],
+           UAV->mac[3], UAV->mac[4], UAV->mac[5]);
+  char json_msg[256];
+  snprintf(json_msg, sizeof(json_msg),
+    "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f}",
+    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d);
+  Serial.println(json_msg);
+}
+
+// Sends UART messages over Serial1 exactly as before.
 void print_compact_message(struct uav_data *UAV) {
   static unsigned long lastSendTime = 0;
-  const unsigned long sendInterval = 5000;  // 5-second interval
-  const int MAX_MESH_SIZE = 230;            // Maximum message size
+  const unsigned long sendInterval = 5000;  // 5-second interval for UART messages
+  const int MAX_MESH_SIZE = 230;
   
   if (millis() - lastSendTime < sendInterval) return;
   lastSendTime = millis();
@@ -157,8 +163,6 @@ void print_compact_message(struct uav_data *UAV) {
   
   char mesh_msg[MAX_MESH_SIZE];
   int msg_len = 0;
-  
-  // Build and send Drone message over Serial1 (UART) exactly as before.
   msg_len += snprintf(mesh_msg + msg_len, sizeof(mesh_msg) - msg_len,
                       "Drone: %s RSSI:%d", mac_str, UAV->rssi);
   if (msg_len < MAX_MESH_SIZE && UAV->lat_d != 0.0 && UAV->long_d != 0.0) {
@@ -170,7 +174,6 @@ void print_compact_message(struct uav_data *UAV) {
     Serial1.println(mesh_msg);
   }
   
-  // Pause briefly then send Pilot message over Serial1 (UART) exactly as before.
   delay(1000);
   if (UAV->base_lat_d != 0.0 && UAV->base_long_d != 0.0) {
     char pilot_msg[MAX_MESH_SIZE];
@@ -181,13 +184,12 @@ void print_compact_message(struct uav_data *UAV) {
       Serial1.println(pilot_msg);
     }
   }
-  
-  // Now send the minimal JSON detection over USB Serial.
-  send_json_detection(UAV);
+  // Do not call send_json_detection() here; JSON is now sent separately via send_json_fast().
 }
 
+// WiFi promiscuous callback: processes packets and sends both UART and fast JSON.
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
-  if (type != WIFI_PKT_MGMT) return; // Process only management frames
+  if (type != WIFI_PKT_MGMT) return;
   
   wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)buffer;
   uint8_t *payload = packet->payload;
@@ -207,7 +209,8 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
                                                           payload, length) == 0) {
       parse_odid(currentUAV, &UAS_data);
       packetCount++;
-      print_compact_message(currentUAV);
+      print_compact_message(currentUAV); // Send UART messages (throttled).
+      send_json_fast(currentUAV);         // Send JSON messages as fast as possible.
     }
   }
   else if (payload[0] == 0x80) {
@@ -227,6 +230,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
             parse_odid(currentUAV, &UAS_data);
             packetCount++;
             print_compact_message(currentUAV);
+            send_json_fast(currentUAV);
             printed = true;
           }
         }
