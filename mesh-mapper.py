@@ -85,8 +85,6 @@ def update_detection(detection):
     generate_kml()
 
 # --- HTML Page with Layer Dropdown and Drone/Pilot Mapping ---
-# This HTML contains the layer dropdown (top left) and a filter box (upper right).
-# The detection mapping logic (markers, paths, zooming) remains unchanged.
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -99,10 +97,10 @@ HTML_PAGE = '''
   <style>
     #map { height: 100vh; }
     body, html { margin: 0; padding: 0; }
-    /* Top Left: Layer dropdown control */
+    /* Bottom Left: Layer dropdown control */
     #layerControl {
       position: absolute;
-      top: 10px;
+      bottom: 10px;
       left: 10px;
       background: rgba(0,0,0,0.8);
       padding: 5px;
@@ -135,7 +133,6 @@ HTML_PAGE = '''
     }
     #filterBox button {
       margin-top: 5px;
-      /* Buttons now size to their text */
       background: lime;
       color: black;
       border: none;
@@ -143,7 +140,6 @@ HTML_PAGE = '''
       cursor: pointer;
       font-family: monospace;
     }
-    /* Highlight for selected drone/pilot combo in the list */
     .selected-combo {
       background-color: #ff00ff !important;  /* Hot cyberpunk purple */
       color: lime !important;
@@ -163,11 +159,10 @@ HTML_PAGE = '''
     <option value="esriWorldTopo">Esri World TopoMap</option>
     <option value="esriDarkGray">Esri Dark Gray Canvas</option>
     <option value="openTopoMap">OpenTopoMap</option>
-    <!-- Add more layers here if desired -->
   </select>
 </div>
 <div id="filterBox">
-  <h3>Drone/Pilot Combos</h3>
+  <h3>Drone Pilot Combinatinos</h3>
   <ul id="comboList"></ul>
   <button id="filterButton">Filter by Selected Combo</button>
   <button id="clearFilterButton">Clear Filter</button>
@@ -191,15 +186,15 @@ const cartoDarkMatter = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/
   maxZoom: 19
 });
 const esriWorldImagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-  attribution: 'Tiles © Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+  attribution: 'Tiles © Esri',
   maxZoom: 19
 });
 const esriWorldTopo = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {
-  attribution: 'Tiles © Esri — Source: USGS, NOAA, NAVTEQ, and Esri',
+  attribution: 'Tiles © Esri',
   maxZoom: 19
 });
 const esriDarkGray = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-  attribution: 'Tiles © Esri — Esri, DeLorme, NAVTEQ',
+  attribution: 'Tiles © Esri',
   maxZoom: 16
 });
 const openTopoMap = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
@@ -232,7 +227,7 @@ document.getElementById("layerSelect").addEventListener("change", function() {
     }
   });
   newLayer.addTo(map);
-  // Visual feedback for selection.
+  // Visual feedback.
   this.style.backgroundColor = "purple";
   this.style.color = "lime";
   setTimeout(() => {
@@ -241,12 +236,12 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   }, 500);
 });
 
-// --- Filtering Logic ---
+// Global filter variable.
 let filterMAC = null;
-let comboList = document.getElementById("comboList");
 
-// Update the combo list based on current detections.
+// Update the combo list.
 function updateComboList(data, currentTime) {
+  const comboList = document.getElementById("comboList");
   comboList.innerHTML = "";
   for (const mac in data) {
     if (!data[mac].last_update || (currentTime - data[mac].last_update > 300)) continue;
@@ -257,7 +252,6 @@ function updateComboList(data, currentTime) {
     li.style.padding = "3px";
     li.style.border = "1px solid lime";
     li.addEventListener("click", function() {
-      // Remove highlight from other items.
       let items = comboList.getElementsByTagName("li");
       for (let item of items) { item.classList.remove("selected-combo"); }
       li.classList.add("selected-combo");
@@ -356,11 +350,9 @@ async function updateData() {
           droneMarkers[mac] = L.marker([droneLat, droneLng], {icon: createIcon('🛸', color)})
                                 .bindPopup(generatePopupContent(det))
                                 .addTo(map);
-          // Add click event to marker to select combo.
           droneMarkers[mac].on("click", function() {
             let items = comboList.getElementsByTagName("li");
             for (let item of items) { item.classList.remove("selected-combo"); }
-            // Find the li corresponding to this MAC.
             for (let item of items) {
               if (item.textContent === mac) {
                 item.classList.add("selected-combo");
@@ -432,7 +424,7 @@ updateData();
 </html>
 '''
 
-# HTML for the port selection page.
+# --- HTML for the Port Selection Page ---
 PORT_SELECTION_PAGE = '''
 <!DOCTYPE html>
 <html lang="en">
