@@ -116,7 +116,7 @@ HTML_PAGE = '''
       border: none;
       padding: 3px;
     }
-    /* Upper Right: Scrollable list of detected drone MAC addresses */
+    /* Upper Right: Persistent scrollable list of detected drone MAC addresses */
     #filterBox {
       position: absolute;
       top: 10px;
@@ -223,21 +223,25 @@ document.getElementById("layerSelect").addEventListener("change", function() {
 
 // Global filter variable.
 let filterMAC = null;
+// Global persistent MAC list.
+let persistentMACs = [];
 
-// Update the combo list.
-function updateComboList(data, currentTime) {
+// Update the combo list with all persistent MAC addresses.
+function updateComboList() {
   const comboList = document.getElementById("comboList");
   comboList.innerHTML = "";
-  for (const mac in data) {
-    if (!data[mac].last_update || (currentTime - data[mac].last_update > 300)) continue;
-    let li = document.createElement("li");
+  persistentMACs.forEach(mac => {
+    const li = document.createElement("li");
     li.textContent = mac;
     li.style.cursor = "default";
     li.style.marginBottom = "5px";
     li.style.padding = "3px";
-    li.style.border = "1px solid lime";
+    // Set border and text color based on the computed color.
+    const color = colorFromMac(mac);
+    li.style.border = "1px solid " + color;
+    li.style.color = color;
     comboList.appendChild(li);
-  }
+  });
 }
 
 // Utility to compute a unique color based on the MAC string.
@@ -287,7 +291,13 @@ async function updateData() {
     const data = await response.json();
     const currentTime = Date.now() / 1000;
     
-    updateComboList(data, currentTime);
+    // Add any new MAC addresses to the persistent list.
+    for (const mac in data) {
+      if (!persistentMACs.includes(mac)) {
+        persistentMACs.push(mac);
+      }
+    }
+    updateComboList();
     
     for (const mac in data) {
       const det = data[mac];
