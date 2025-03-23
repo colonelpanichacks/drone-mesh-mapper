@@ -111,12 +111,12 @@ HTML_PAGE = '''
       z-index: 1000;
     }
     #layerControl select {
-      background-color: purple;
+      background-color: rgba(0,0,0,0.8);
       color: lime;
       border: none;
       padding: 3px;
     }
-    /* Upper Right: Persistent scrollable list of detected drone MAC addresses */
+    /* Upper Right: Persistent scrollable list split into Active and Inactive drones */
     #filterBox {
       position: absolute;
       top: 10px;
@@ -130,6 +130,26 @@ HTML_PAGE = '''
       max-height: 80vh;
       overflow-y: auto;
       z-index: 1000;
+    }
+    /* Styling for drone items: display only as wide as needed */
+    .drone-item {
+      display: inline-block;
+      border: 1px solid;
+      margin: 2px;
+      padding: 3px;
+      cursor: pointer;
+    }
+    /* Placeholder boxes that now will be populated with drones */
+    .placeholder {
+      border: 1px solid lime;
+      min-height: 100px;
+      margin-top: 10px;
+      overflow-y: auto;
+      max-height: 200px;
+    }
+    /* Highlighted inactive drone in historical view */
+    .selected {
+      background-color: rgba(255,255,255,0.2);
     }
   </style>
 </head>
@@ -149,8 +169,10 @@ HTML_PAGE = '''
   </select>
 </div>
 <div id="filterBox">
-  <h3>Detected Drone MAC Addresses</h3>
-  <ul id="comboList"></ul>
+  <h3>Active Drones</h3>
+  <div id="activePlaceholder" class="placeholder"></div>
+  <h3>Inactive Drones</h3>
+  <div id="inactivePlaceholder" class="placeholder"></div>
 </div>
 <script>
 // Define tile layers.
@@ -213,35 +235,101 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   });
   newLayer.addTo(map);
   // Visual feedback.
-  this.style.backgroundColor = "purple";
+  this.style.backgroundColor = "rgba(0,0,0,0.8)";
   this.style.color = "lime";
   setTimeout(() => {
-    this.style.backgroundColor = "purple";
+    this.style.backgroundColor = "rgba(0,0,0,0.8)";
     this.style.color = "lime";
   }, 500);
 });
 
-// Global filter variable.
-let filterMAC = null;
 // Global persistent MAC list.
 let persistentMACs = [];
 
-// Update the combo list with all persistent MAC addresses.
-function updateComboList() {
-  const comboList = document.getElementById("comboList");
-  comboList.innerHTML = "";
-  persistentMACs.forEach(mac => {
-    const li = document.createElement("li");
-    li.textContent = mac;
-    li.style.cursor = "default";
-    li.style.marginBottom = "5px";
-    li.style.padding = "3px";
-    // Set border and text color based on the computed color.
-    const color = colorFromMac(mac);
-    li.style.border = "1px solid " + color;
-    li.style.color = color;
-    comboList.appendChild(li);
-  });
+// Global marker and path storage.
+const droneMarkers = {};
+const pilotMarkers = {};
+const droneCircles = {};
+const pilotCircles = {};
+const dronePolylines = {};
+const pilotPolylines = {};
+const dronePathCoords = {};
+const pilotPathCoords = {};
+// Storage for the broadcast rings.
+const droneBroadcastRings = {};
+// Global storage for drones in historical view.
+let historicalDrones = {};
+
+let firstDetectionZoomed = false;
+
+// Function to zoom to a drone's location.
+function zoomToDrone(mac, detection) {
+  if (detection && detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
+    map.setView([detection.lat, detection.long], 14);
+  } else {
+    alert("No valid drone location for " + mac);
+  }
+}
+
+// Function to show an inactive drone in historical view.
+// It draws the historical markers, paths, and a purple ring.
+function showHistoricalDrone(mac, detection) {
+  const color = colorFromMac(mac);
+  // Drone marker and circle.
+  if (!droneMarkers[mac]) {
+    droneMarkers[mac] = L.marker([detection.lat, detection.long], {icon: createIcon('🛸', color)})
+                           .bindPopup(generatePopupContent(detection))
+                           .addTo(map);
+  } else {
+    droneMarkers[mac].setLatLng([detection.lat, detection.long]);
+    droneMarkers[mac].setPopupContent(generatePopupContent(detection));
+  }
+  if (!droneCircles[mac]) {
+    droneCircles[mac] = L.circleMarker([detection.lat, detection.long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+                           .addTo(map);
+  } else {
+    droneCircles[mac].setLatLng([detection.lat, detection.long]);
+  }
+  if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
+  const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
+  if (!lastDrone || lastDrone[0] !== detection.lat || lastDrone[1] !== detection.long) {
+    dronePathCoords[mac].push([detection.lat, detection.long]);
+  }
+  if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
+  dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
+
+  // Pilot marker and circle.
+  if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
+    if (!pilotMarkers[mac]) {
+      pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {icon: createIcon('👤', color)})
+                             .bindPopup(generatePopupContent(detection))
+                             .addTo(map);
+    } else {
+      pilotMarkers[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
+      pilotMarkers[mac].setPopupContent(generatePopupContent(detection));
+    }
+    if (!pilotCircles[mac]) {
+      pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+                             .addTo(map);
+    } else {
+      pilotCircles[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
+    }
+    if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
+    const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
+    if (!lastPilot || lastPilot[0] !== detection.pilot_lat || lastPilot[1] !== detection.pilot_long) {
+      pilotPathCoords[mac].push([detection.pilot_lat, detection.pilot_long]);
+    }
+    if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
+    pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
+  }
+  // Historical purple ring.
+  if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); }
+  droneBroadcastRings[mac] = L.circleMarker([detection.lat, detection.long], {
+    radius: 16,
+    color: "purple",
+    fill: false,
+    weight: 3
+  }).addTo(map);
 }
 
 // Utility to compute a unique color based on the MAC string.
@@ -254,7 +342,178 @@ function colorFromMac(mac) {
   return 'hsl(' + h + ', 70%, 50%)';
 }
 
-// Create a custom icon using a div with an emoji.
+// Update the placeholders (active and inactive drones).
+function updateComboList(data) {
+  const activePlaceholder = document.getElementById("activePlaceholder");
+  const inactivePlaceholder = document.getElementById("inactivePlaceholder");
+  activePlaceholder.innerHTML = "";
+  inactivePlaceholder.innerHTML = "";
+  const currentTime = Date.now() / 1000;
+  persistentMACs.forEach(mac => {
+    const item = document.createElement("div");
+    item.textContent = mac;
+    const color = colorFromMac(mac);
+    item.style.borderColor = color;
+    item.style.color = color;
+    item.className = "drone-item";
+    
+    let detection = data[mac];
+    // Active drones (detected within staleThreshold)
+    if (detection && (currentTime - detection.last_update <= 300)) {
+      // Active drone: single click to zoom.
+      item.addEventListener("click", () => {
+        zoomToDrone(mac, detection);
+      });
+      activePlaceholder.appendChild(item);
+    } else {
+      // Inactive drone: single click to show historical view.
+      item.addEventListener("click", () => {
+        if (!historicalDrones[mac]) {
+          historicalDrones[mac] = Object.assign({}, detection);
+          showHistoricalDrone(mac, historicalDrones[mac]);
+        }
+        // Highlight this item.
+        item.classList.add("selected");
+      });
+      inactivePlaceholder.appendChild(item);
+    }
+  });
+}
+
+async function updateData() {
+  try {
+    const response = await fetch('/api/detections');
+    const data = await response.json();
+    const currentTime = Date.now() / 1000;
+    
+    // Add any new MAC addresses to the persistent list.
+    for (const mac in data) {
+      if (!persistentMACs.includes(mac)) {
+        persistentMACs.push(mac);
+      }
+    }
+    
+    // For each drone, check if it's in historical view.
+    for (const mac in data) {
+      if (historicalDrones[mac]) {
+        // If a new detection has arrived that is more recent than the historical snapshot,
+        // remove it from historical view to resume live updates.
+        if (data[mac].last_update > historicalDrones[mac].last_update) {
+          delete historicalDrones[mac];
+          if (droneBroadcastRings[mac]) {
+            map.removeLayer(droneBroadcastRings[mac]);
+            delete droneBroadcastRings[mac];
+          }
+        } else {
+          // Still in historical mode; skip live updates.
+          continue;
+        }
+      }
+      
+      const det = data[mac];
+      if (!det.last_update || (currentTime - det.last_update > 300)) {
+        if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
+        if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
+        if (droneCircles[mac]) { map.removeLayer(droneCircles[mac]); delete droneCircles[mac]; }
+        if (pilotCircles[mac]) { map.removeLayer(pilotCircles[mac]); delete pilotCircles[mac]; }
+        if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); delete dronePolylines[mac]; }
+        if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); delete pilotPolylines[mac]; }
+        if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
+        delete dronePathCoords[mac];
+        delete pilotPathCoords[mac];
+        continue;
+      }
+      
+      const droneLat = det.lat, droneLng = det.long;
+      const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
+      
+      const validDrone = (droneLat !== 0 && droneLng !== 0);
+      const validPilot = (pilotLat !== 0 && pilotLng !== 0);
+      if (!validDrone && !validPilot) continue;
+      
+      const color = colorFromMac(mac);
+      
+      if (!firstDetectionZoomed && validDrone) {
+        firstDetectionZoomed = true;
+        map.setView([droneLat, droneLng], 14);
+      }
+      
+      // Active drone marker and circle.
+      if (validDrone) {
+        if (droneMarkers[mac]) {
+          droneMarkers[mac].setLatLng([droneLat, droneLng]);
+          droneMarkers[mac].setPopupContent(generatePopupContent(det));
+        } else {
+          droneMarkers[mac] = L.marker([droneLat, droneLng], {icon: createIcon('🛸', color)})
+                                .bindPopup(generatePopupContent(det))
+                                .addTo(map);
+        }
+        if (droneCircles[mac]) {
+          droneCircles[mac].setLatLng([droneLat, droneLng]);
+        } else {
+          droneCircles[mac] = L.circleMarker([droneLat, droneLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+                              .addTo(map);
+        }
+        if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
+        const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
+        if (!lastDrone || lastDrone[0] !== droneLat || lastDrone[1] !== droneLng) {
+          dronePathCoords[mac].push([droneLat, droneLng]);
+        }
+        if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
+        dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
+        
+        // Broadcast ring for active drones: lime green if detected within 15 seconds.
+        if (currentTime - det.last_update <= 15) {
+          if (droneBroadcastRings[mac]) {
+            droneBroadcastRings[mac].setLatLng([droneLat, droneLng]);
+          } else {
+            droneBroadcastRings[mac] = L.circleMarker([droneLat, droneLng], {
+              radius: 16,
+              color: "lime",
+              fill: false,
+              weight: 3
+            }).addTo(map);
+          }
+        } else {
+          if (droneBroadcastRings[mac]) {
+            map.removeLayer(droneBroadcastRings[mac]);
+            delete droneBroadcastRings[mac];
+          }
+        }
+      }
+      
+      // Pilot marker and circle.
+      if (validPilot) {
+        if (pilotMarkers[mac]) {
+          pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
+          pilotMarkers[mac].setPopupContent(generatePopupContent(det));
+        } else {
+          pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {icon: createIcon('👤', color)})
+                              .bindPopup(generatePopupContent(det))
+                              .addTo(map);
+        }
+        if (pilotCircles[mac]) {
+          pilotCircles[mac].setLatLng([pilotLat, pilotLng]);
+        } else {
+          pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+                              .addTo(map);
+        }
+        if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
+        const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
+        if (!lastPilot || lastPilot[0] !== pilotLat || lastPilot[1] !== pilotLng) {
+          pilotPathCoords[mac].push([pilotLat, pilotLng]);
+        }
+        if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
+        pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
+      }
+    }
+    updateComboList(data);
+  } catch (error) {
+    console.error("Error fetching detection data:", error);
+  }
+}
+
+// Utility to create a custom icon.
 function createIcon(emoji, color) {
   return L.divIcon({
     html: '<div style="font-size: 24px; color:' + color + ';">' + emoji + '</div>',
@@ -273,123 +532,6 @@ function generatePopupContent(detection) {
   return content;
 }
 
-// Global marker and path storage.
-const droneMarkers = {};
-const pilotMarkers = {};
-const droneCircles = {};
-const pilotCircles = {};
-const dronePolylines = {};
-const pilotPolylines = {};
-const dronePathCoords = {};
-const pilotPathCoords = {};
-
-let firstDetectionZoomed = false;
-
-async function updateData() {
-  try {
-    const response = await fetch('/api/detections');
-    const data = await response.json();
-    const currentTime = Date.now() / 1000;
-    
-    // Add any new MAC addresses to the persistent list.
-    for (const mac in data) {
-      if (!persistentMACs.includes(mac)) {
-        persistentMACs.push(mac);
-      }
-    }
-    updateComboList();
-    
-    for (const mac in data) {
-      const det = data[mac];
-      if (!det.last_update || (currentTime - det.last_update > 300)) {
-        if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
-        if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
-        if (droneCircles[mac]) { map.removeLayer(droneCircles[mac]); delete droneCircles[mac]; }
-        if (pilotCircles[mac]) { map.removeLayer(pilotCircles[mac]); delete pilotCircles[mac]; }
-        if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); delete dronePolylines[mac]; }
-        if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); delete pilotPolylines[mac]; }
-        delete dronePathCoords[mac];
-        delete pilotPathCoords[mac];
-        continue;
-      }
-      
-      if (filterMAC && mac !== filterMAC) continue;
-      
-      const droneLat = det.lat, droneLng = det.long;
-      const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
-      
-      const validDrone = (droneLat !== 0 && droneLng !== 0);
-      const validPilot = (pilotLat !== 0 && pilotLng !== 0);
-      if (!validDrone && !validPilot) continue;
-      
-      const color = colorFromMac(mac);
-      
-      if (!firstDetectionZoomed && validDrone) {
-        firstDetectionZoomed = true;
-        map.setView([droneLat, droneLng], 14);
-      }
-      
-      // Drone marker and circle.
-      if (validDrone) {
-        if (droneMarkers[mac]) {
-          droneMarkers[mac].setLatLng([droneLat, droneLng]);
-          droneMarkers[mac].setPopupContent(generatePopupContent(det));
-        } else {
-          // Use UFO emoji for drone.
-          droneMarkers[mac] = L.marker([droneLat, droneLng], {icon: createIcon('🛸', color)})
-                                .bindPopup(generatePopupContent(det))
-                                .addTo(map);
-          droneMarkers[mac].on("click", function() {
-            filterMAC = mac;
-          });
-        }
-        if (droneCircles[mac]) {
-          droneCircles[mac].setLatLng([droneLat, droneLng]);
-        } else {
-          droneCircles[mac] = L.circleMarker([droneLat, droneLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
-                              .addTo(map);
-        }
-        if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
-        const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
-        if (!lastDrone || lastDrone[0] !== droneLat || lastDrone[1] !== droneLng) {
-          dronePathCoords[mac].push([droneLat, droneLng]);
-        }
-        if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
-        dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
-      }
-      
-      // Pilot marker and circle.
-      if (validPilot) {
-        if (pilotMarkers[mac]) {
-          pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
-          pilotMarkers[mac].setPopupContent(generatePopupContent(det));
-        } else {
-          pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {icon: createIcon('👤', color)})
-                              .bindPopup(generatePopupContent(det))
-                              .addTo(map);
-          pilotMarkers[mac].on("click", function() {
-            filterMAC = mac;
-          });
-        }
-        if (pilotCircles[mac]) {
-          pilotCircles[mac].setLatLng([pilotLat, pilotLng]);
-        } else {
-          pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
-                              .addTo(map);
-        }
-        if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
-        const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
-        if (!lastPilot || lastPilot[0] !== pilotLat || lastPilot[1] !== pilotLng) {
-          pilotPathCoords[mac].push([pilotLat, pilotLng]);
-        }
-        if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
-        pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
-      }
-    }
-  } catch (error) {
-    console.error("Error fetching detection data:", error);
-  }
-}
 setInterval(updateData, 1000);
 updateData();
 </script>
@@ -442,8 +584,6 @@ PORT_SELECTION_PAGE = '''
 </body>
 </html>
 '''
-
-from flask import render_template_string
 
 ASCII_ART = r"""
   \  |              |             __ \         |                |           
@@ -508,6 +648,15 @@ def api_detections_history():
         "type": "FeatureCollection",
         "features": features
     })
+
+@app.route('/api/reactivate/<mac>', methods=['POST'])
+def reactivate(mac):
+    if mac in tracked_pairs:
+        tracked_pairs[mac]['last_update'] = time.time()
+        print(f"Reactivated {mac}")
+        return jsonify({"status": "reactivated", "mac": mac})
+    else:
+        return jsonify({"status": "error", "message": "MAC not found"}), 404
 
 def serial_reader():
     try:
