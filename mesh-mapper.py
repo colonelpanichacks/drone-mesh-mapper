@@ -131,7 +131,7 @@ HTML_PAGE = '''
       overflow-y: auto;
       z-index: 1000;
     }
-    /* Styling for drone items: display only as wide as needed */
+    /* Styling for drone items: inline-block so they only take as much width as needed */
     .drone-item {
       display: inline-block;
       border: 1px solid;
@@ -366,14 +366,22 @@ function updateComboList(data) {
       });
       activePlaceholder.appendChild(item);
     } else {
-      // Inactive drone: single click to show historical view.
-      item.addEventListener("click", () => {
-        if (!historicalDrones[mac]) {
-          historicalDrones[mac] = Object.assign({}, detection);
+      // Inactive drone: double-click to toggle historical view.
+      item.addEventListener("dblclick", () => {
+        if (historicalDrones[mac]) {
+          // Toggle off historical view.
+          delete historicalDrones[mac];
+          if (droneBroadcastRings[mac]) {
+            map.removeLayer(droneBroadcastRings[mac]);
+            delete droneBroadcastRings[mac];
+          }
+          item.classList.remove("selected");
+        } else {
+          // Turn on historical view and lock it.
+          historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
           showHistoricalDrone(mac, historicalDrones[mac]);
+          item.classList.add("selected");
         }
-        // Highlight this item.
-        item.classList.add("selected");
       });
       inactivePlaceholder.appendChild(item);
     }
@@ -393,12 +401,13 @@ async function updateData() {
       }
     }
     
-    // For each drone, check if it's in historical view.
+    // For each drone, check if it's in historical mode.
     for (const mac in data) {
       if (historicalDrones[mac]) {
-        // If a new detection has arrived that is more recent than the historical snapshot,
-        // remove it from historical view to resume live updates.
-        if (data[mac].last_update > historicalDrones[mac].last_update) {
+        // If a new detection arrives that's more recent than when the user locked historical mode,
+        // or if the historical view has been active for more than 5 minutes, exit historical mode.
+        if (data[mac].last_update > historicalDrones[mac].lockTime ||
+            (currentTime - historicalDrones[mac].lockTime) > 300) {
           delete historicalDrones[mac];
           if (droneBroadcastRings[mac]) {
             map.removeLayer(droneBroadcastRings[mac]);
