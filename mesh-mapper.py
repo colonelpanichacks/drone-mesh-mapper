@@ -26,9 +26,13 @@ KML_FILENAME = f"detections_{startup_timestamp}.kml"
 
 # Write CSV header.
 with open(CSV_FILENAME, mode='w', newline='') as csvfile:
-    fieldnames = ['timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long', 'drone_altitude', 'pilot_lat', 'pilot_long']
+    fieldnames = [
+        'timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long',
+        'drone_altitude', 'pilot_lat', 'pilot_long'
+    ]
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
+
 
 def generate_kml():
     kml_lines = [
@@ -39,50 +43,119 @@ def generate_kml():
     ]
     for mac, det in tracked_pairs.items():
         kml_lines.append(f'<Placemark><name>Drone {mac}</name>')
-        kml_lines.append('<Style><IconStyle><scale>1.2</scale>'
-                         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon>'
-                         '</IconStyle></Style>')
-        kml_lines.append(f'<Point><coordinates>{det.get("drone_long",0)},{det.get("drone_lat",0)},0</coordinates></Point>')
+        kml_lines.append(
+            '<Style><IconStyle><scale>1.2</scale>'
+            '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon>'
+            '</IconStyle></Style>'
+        )
+        kml_lines.append(
+            f'<Point><coordinates>{det.get("drone_long",0)},'
+            f'{det.get("drone_lat",0)},0</coordinates></Point>'
+        )
         kml_lines.append('</Placemark>')
         kml_lines.append(f'<Placemark><name>Pilot {mac}</name>')
-        kml_lines.append('<Style><IconStyle><scale>1.2</scale>'
-                         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon>'
-                         '</IconStyle></Style>')
-        kml_lines.append(f'<Point><coordinates>{det.get("pilot_long",0)},{det.get("pilot_lat",0)},0</coordinates></Point>')
+        kml_lines.append(
+            '<Style><IconStyle><scale>1.2</scale>'
+            '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon>'
+            '</IconStyle></Style>'
+        )
+        kml_lines.append(
+            f'<Point><coordinates>{det.get("pilot_long",0)},'
+            f'{det.get("pilot_lat",0)},0</coordinates></Point>'
+        )
         kml_lines.append('</Placemark>')
     kml_lines.append('</Document></kml>')
     with open(KML_FILENAME, "w") as f:
         f.write("\n".join(kml_lines))
     print("Updated KML file:", KML_FILENAME)
 
+
 def update_detection(detection):
+    """
+    Update a detection in tracked_pairs and detection_history.
+
+    IMPORTANT FIX:
+    Instead of overwriting lat/long with 0 if missing, we preserve existing
+    lat/long from the previously stored detection. This ensures the drone
+    icon/path won't disappear simply because the next packet lacked location.
+    """
     mac = detection.get("mac")
     if not mac:
         return
-    # Map incoming fields.
-    detection["lat"] = detection.get("drone_lat", 0)
-    detection["long"] = detection.get("drone_long", 0)
-    detection["altitude"] = detection.get("drone_altitude", 0)
-    detection["pilot_lat"] = detection.get("pilot_lat", 0)
-    detection["pilot_long"] = detection.get("pilot_long", 0)
-    detection["last_update"] = time.time()
-    tracked_pairs[mac] = detection
-    detection_history.append(detection.copy())
+
+    # Fetch the old record if it exists, otherwise empty dict.
+    old_record = tracked_pairs.get(mac, {})
+
+    # Update fields only if the new data is present. Otherwise keep the old value.
+    # For convenience, store them in the "drone_*" keys as well as a direct lat/long if needed.
+    if "drone_lat" in detection:
+        old_record["drone_lat"] = detection["drone_lat"]
+    if "drone_long" in detection:
+        old_record["drone_long"] = detection["drone_long"]
+    if "drone_altitude" in detection:
+        old_record["drone_altitude"] = detection["drone_altitude"]
+    if "pilot_lat" in detection:
+        old_record["pilot_lat"] = detection["pilot_lat"]
+    if "pilot_long" in detection:
+        old_record["pilot_long"] = detection["pilot_long"]
+
+    # Also store a simpler lat/long for easier usage on the frontend (mirrors "drone_*").
+    if "drone_lat" in detection:
+        old_record["lat"] = detection["drone_lat"]
+    elif "lat" not in old_record:
+        # If old_record never had lat, fallback to 0
+        old_record["lat"] = 0
+
+    if "drone_long" in detection:
+        old_record["long"] = detection["drone_long"]
+    elif "long" not in old_record:
+        old_record["long"] = 0
+
+    # Retain or update the RSSI if present
+    if "rssi" in detection:
+        old_record["rssi"] = detection["rssi"]
+
+    # Always update last_update
+    old_record["last_update"] = time.time()
+
+    # Overwrite with the new data
+    tracked_pairs[mac] = old_record
+
+    # Also keep in detection_history
+    detection_for_history = {
+        "mac": mac,
+        "rssi": old_record.get("rssi", ""),
+        "drone_lat": old_record.get("drone_lat", 0),
+        "drone_long": old_record.get("drone_long", 0),
+        "drone_altitude": old_record.get("drone_altitude", 0),
+        "pilot_lat": old_record.get("pilot_lat", 0),
+        "pilot_long": old_record.get("pilot_long", 0),
+        "last_update": old_record["last_update"]
+    }
+    detection_history.append(detection_for_history)
+
     print("Updated tracked_pairs:", tracked_pairs)
+
     # Append detection to CSV.
     with open(CSV_FILENAME, mode='a', newline='') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=['timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long', 'drone_altitude', 'pilot_lat', 'pilot_long'])
+        writer = csv.DictWriter(csvfile, fieldnames=[
+            'timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long',
+            'drone_altitude', 'pilot_lat', 'pilot_long'
+        ])
         writer.writerow({
             'timestamp': datetime.now().isoformat(),
             'mac': mac,
-            'rssi': detection.get('rssi', ''),
-            'drone_lat': detection.get('drone_lat', ''),
-            'drone_long': detection.get('drone_long', ''),
-            'drone_altitude': detection.get('drone_altitude', ''),
-            'pilot_lat': detection.get('pilot_lat', ''),
-            'pilot_long': detection.get('pilot_long', '')
+            'rssi': detection_for_history.get('rssi', ''),
+            'drone_lat': detection_for_history.get('drone_lat', ''),
+            'drone_long': detection_for_history.get('drone_long', ''),
+            'drone_altitude': detection_for_history.get('drone_altitude', ''),
+            'pilot_lat': detection_for_history.get('pilot_lat', ''),
+            'pilot_long': detection_for_history.get('pilot_long', '')
         })
+
+    # Update the KML with the new/updated info
     generate_kml()
+
 
 # --- HTML Page with Layer Dropdown and Drone/Pilot Mapping ---
 HTML_PAGE = '''
@@ -175,6 +248,9 @@ HTML_PAGE = '''
   <div id="inactivePlaceholder" class="placeholder"></div>
 </div>
 <script>
+// Configurable stale threshold in seconds (matching your server's setting).
+const STALE_THRESHOLD = 300;
+
 // Define tile layers.
 const osmStandard = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap contributors',
@@ -228,6 +304,7 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   else if (value === "esriWorldTopo") newLayer = esriWorldTopo;
   else if (value === "esriDarkGray") newLayer = esriDarkGray;
   else if (value === "openTopoMap") newLayer = openTopoMap;
+
   map.eachLayer(function(layer) {
     if (layer.options && layer.options.attribution) {
       map.removeLayer(layer);
@@ -278,15 +355,15 @@ function showHistoricalDrone(mac, detection) {
   // Drone marker and circle.
   if (!droneMarkers[mac]) {
     droneMarkers[mac] = L.marker([detection.lat, detection.long], {icon: createIcon('🛸', color)})
-                           .bindPopup(generatePopupContent(detection))
-                           .addTo(map);
+      .bindPopup(generatePopupContent(detection))
+      .addTo(map);
   } else {
     droneMarkers[mac].setLatLng([detection.lat, detection.long]);
     droneMarkers[mac].setPopupContent(generatePopupContent(detection));
   }
   if (!droneCircles[mac]) {
     droneCircles[mac] = L.circleMarker([detection.lat, detection.long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
-                           .addTo(map);
+      .addTo(map);
   } else {
     droneCircles[mac].setLatLng([detection.lat, detection.long]);
   }
@@ -302,15 +379,15 @@ function showHistoricalDrone(mac, detection) {
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
     if (!pilotMarkers[mac]) {
       pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {icon: createIcon('👤', color)})
-                             .bindPopup(generatePopupContent(detection))
-                             .addTo(map);
+        .bindPopup(generatePopupContent(detection))
+        .addTo(map);
     } else {
       pilotMarkers[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
       pilotMarkers[mac].setPopupContent(generatePopupContent(detection));
     }
     if (!pilotCircles[mac]) {
       pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
-                             .addTo(map);
+        .addTo(map);
     } else {
       pilotCircles[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
     }
@@ -358,15 +435,15 @@ function updateComboList(data) {
     item.className = "drone-item";
     
     let detection = data[mac];
-    // Active drones (detected within staleThreshold)
-    if (detection && (currentTime - detection.last_update <= 300)) {
-      // Active drone: single click to zoom.
+    // Active if last_update <= STALE_THRESHOLD
+    if (detection && (currentTime - detection.last_update <= STALE_THRESHOLD)) {
+      // Single click to zoom.
       item.addEventListener("click", () => {
         zoomToDrone(mac, detection);
       });
       activePlaceholder.appendChild(item);
     } else {
-      // Inactive drone: double-click to toggle historical view.
+      // Inactive: double-click to toggle historical.
       item.addEventListener("dblclick", () => {
         if (historicalDrones[mac]) {
           // Toggle off historical view.
@@ -378,7 +455,11 @@ function updateComboList(data) {
           item.classList.remove("selected");
         } else {
           // Turn on historical view and lock it.
-          historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
+          // We'll store the "lockTime" to allow ignoring new data if it arrives after toggling.
+          historicalDrones[mac] = Object.assign({}, detection, {
+            userLocked: true,
+            lockTime: currentTime
+          });
           showHistoricalDrone(mac, historicalDrones[mac]);
           item.classList.add("selected");
         }
@@ -403,24 +484,27 @@ async function updateData() {
     
     // For each drone, check if it's in historical mode.
     for (const mac in data) {
+      const det = data[mac];
       if (historicalDrones[mac]) {
-        // If a new detection arrives that's more recent than when the user locked historical mode,
-        // or if the historical view has been active for more than 5 minutes, exit historical mode.
-        if (data[mac].last_update > historicalDrones[mac].lockTime ||
-            (currentTime - historicalDrones[mac].lockTime) > 300) {
+        // If new detection arrives after user locked historical, or if >5 min from lock
+        if (
+          det.last_update > historicalDrones[mac].lockTime ||
+          (currentTime - historicalDrones[mac].lockTime) > 300
+        ) {
+          // Stop historical mode so real data is used or it vanishes if stale
           delete historicalDrones[mac];
           if (droneBroadcastRings[mac]) {
             map.removeLayer(droneBroadcastRings[mac]);
             delete droneBroadcastRings[mac];
           }
         } else {
-          // Still in historical mode; skip live updates.
+          // Still in historical mode; skip updating from live data
           continue;
         }
       }
-      
-      const det = data[mac];
-      if (!det.last_update || (currentTime - det.last_update > 300)) {
+
+      // If stale, remove from map entirely (unless user locked it above).
+      if (!det.last_update || (currentTime - det.last_update > STALE_THRESHOLD)) {
         if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
         if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
         if (droneCircles[mac]) { map.removeLayer(droneCircles[mac]); delete droneCircles[mac]; }
@@ -435,33 +519,33 @@ async function updateData() {
       
       const droneLat = det.lat, droneLng = det.long;
       const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
-      
       const validDrone = (droneLat !== 0 && droneLng !== 0);
       const validPilot = (pilotLat !== 0 && pilotLng !== 0);
       if (!validDrone && !validPilot) continue;
-      
+
       const color = colorFromMac(mac);
-      
+
       if (!firstDetectionZoomed && validDrone) {
         firstDetectionZoomed = true;
         map.setView([droneLat, droneLng], 14);
       }
-      
-      // Active drone marker and circle.
+
+      // Active drone marker & circle
       if (validDrone) {
         if (droneMarkers[mac]) {
           droneMarkers[mac].setLatLng([droneLat, droneLng]);
           droneMarkers[mac].setPopupContent(generatePopupContent(det));
         } else {
           droneMarkers[mac] = L.marker([droneLat, droneLng], {icon: createIcon('🛸', color)})
-                                .bindPopup(generatePopupContent(det))
-                                .addTo(map);
+            .bindPopup(generatePopupContent(det))
+            .addTo(map);
         }
         if (droneCircles[mac]) {
           droneCircles[mac].setLatLng([droneLat, droneLng]);
         } else {
-          droneCircles[mac] = L.circleMarker([droneLat, droneLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
-                              .addTo(map);
+          droneCircles[mac] = L.circleMarker([droneLat, droneLng], {
+            radius: 12, color: color, fillColor: color, fillOpacity: 0.7
+          }).addTo(map);
         }
         if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
         const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
@@ -470,8 +554,8 @@ async function updateData() {
         }
         if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
         dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
-        
-        // Broadcast ring for active drones: lime green if detected within 15 seconds.
+
+        // Broadcast ring for active drones: lime if detected within 15s
         if (currentTime - det.last_update <= 15) {
           if (droneBroadcastRings[mac]) {
             droneBroadcastRings[mac].setLatLng([droneLat, droneLng]);
@@ -490,22 +574,23 @@ async function updateData() {
           }
         }
       }
-      
-      // Pilot marker and circle.
+
+      // Active pilot marker & circle
       if (validPilot) {
         if (pilotMarkers[mac]) {
           pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
           pilotMarkers[mac].setPopupContent(generatePopupContent(det));
         } else {
           pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {icon: createIcon('👤', color)})
-                              .bindPopup(generatePopupContent(det))
-                              .addTo(map);
+            .bindPopup(generatePopupContent(det))
+            .addTo(map);
         }
         if (pilotCircles[mac]) {
           pilotCircles[mac].setLatLng([pilotLat, pilotLng]);
         } else {
-          pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
-                              .addTo(map);
+          pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng], {
+            radius: 12, color: color, fillColor: color, fillOpacity: 0.7
+          }).addTo(map);
         }
         if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
         const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
@@ -541,6 +626,7 @@ function generatePopupContent(detection) {
   return content;
 }
 
+// Poll the server every second
 setInterval(updateData, 1000);
 updateData();
 </script>
@@ -638,19 +724,21 @@ def post_detection():
 def api_detections_history():
     features = []
     for det in detection_history:
-        if det.get("lat", 0) == 0 and det.get("long", 0) == 0:
+        # If you only want historical features with actual lat/long:
+        if det.get("drone_lat", 0) == 0 and det.get("drone_long", 0) == 0:
             continue
         features.append({
             "type": "Feature",
             "properties": {
                 "mac": det.get("mac"),
                 "rssi": det.get("rssi"),
-                "time": datetime.fromtimestamp(det.get("last_update")).isoformat(),
+                "time": datetime.fromtimestamp(det.get("last_update")).isoformat() \
+                        if det.get("last_update") else None,
                 "details": det
             },
             "geometry": {
                 "type": "Point",
-                "coordinates": [det.get("long"), det.get("lat")]
+                "coordinates": [det.get("drone_long", 0), det.get("drone_lat", 0)]
             }
         })
     return jsonify({
