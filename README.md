@@ -64,7 +64,7 @@ This project is a minimal scanner for WiFi-based Drone Remote ID based on cemaxa
    - The map automatically zooms to the first valid detection for a clear view.
 
 5. **Real-Time Updates:**  
-   The map refreshes every 5 seconds, continuously updating with new GPS data and tracking movements. If no valid data is received for over 5 minutes, markers and paths for that device are removed.
+   The map refreshes every second continuously updating with new GPS data and tracking movements. If no valid data is received for over 5 minutes, markers and paths for that device are removed.
 
 6. **Logging & Export:**  
    All detections are logged to a CSV file and a KML file is generated for post-flight analysis. Each run creates new log files with a timestamp in the filename.
@@ -73,7 +73,7 @@ This project is a minimal scanner for WiFi-based Drone Remote ID based on cemaxa
 
 ## API Usage & Functionality 🚀
 
-Our Flask API provides a real-time map along with powerful logging and export features:
+The Flask API provides a real-time map along with powerful logging and export features:
 
 - **GET `/api/detections`:**  
   Retrieves the current detection data in JSON format. This is used by the map to update marker positions and paths.
