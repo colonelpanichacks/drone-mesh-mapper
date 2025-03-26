@@ -58,7 +58,7 @@ This project is a minimal scanner for WiFi-based Drone Remote ID based on cemaxa
    - Once a port is selected, the map loads automatically.
    - The map uses OpenStreetMap tiles (supporting zoom up to 19).
    - As your device picks up drone and pilot signals, markers will appear:
-     - A drone icon (🚁) for the drone’s location.
+     - A drone icon (🛸) for the drone’s location.
      - A person icon (👤) for the pilot’s location.
    - Each pair is shown with matching colored circle markers and dynamic movement paths.
    - The map automatically zooms to the first valid detection for a clear view.
