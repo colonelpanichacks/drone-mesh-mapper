@@ -19,6 +19,9 @@ BAUD_RATE = 115200
 # Global stale threshold in seconds (default 5 minutes = 300 seconds).
 staleThreshold = 300
 
+# Global variable for serial connection status.
+serial_connected = False
+
 # Create CSV and KML filenames using the current timestamp at startup.
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_FILENAME = f"detections_{startup_timestamp}.csv"
@@ -84,7 +87,7 @@ def update_detection(detection):
         })
     generate_kml()
 
-# --- HTML Page with Layer Dropdown and Drone/Pilot Mapping ---
+# --- HTML Page with Layer Dropdown, Drone/Pilot Mapping, Serial Status, and Toggle ---
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -116,7 +119,7 @@ HTML_PAGE = '''
       border: none;
       padding: 3px;
     }
-    /* Upper Right: Persistent scrollable list split into Active and Inactive drones */
+    /* Upper Right: Persistent scrollable list split into Active and Inactive drones with toggle */
     #filterBox {
       position: absolute;
       top: 10px;
@@ -129,6 +132,25 @@ HTML_PAGE = '''
       font-family: monospace;
       max-height: 80vh;
       overflow-y: auto;
+      z-index: 1000;
+    }
+    /* Header for the filter box toggle */
+    #filterHeader {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    /* Bottom Right: Serial connection status display moved directly above the bottom banner */
+    #serialStatus {
+      position: absolute;
+      bottom: 30px;
+      right: 10px;
+      background: rgba(0,0,0,0.8);
+      padding: 5px;
+      border: 1px solid lime;
+      border-radius: 10px;
+      color: red;
+      font-family: monospace;
       z-index: 1000;
     }
     /* Styling for drone items: inline-block so they only take as much width as needed */
@@ -169,11 +191,19 @@ HTML_PAGE = '''
   </select>
 </div>
 <div id="filterBox">
-  <h3>Active Drones</h3>
-  <div id="activePlaceholder" class="placeholder"></div>
-  <h3>Inactive Drones</h3>
-  <div id="inactivePlaceholder" class="placeholder"></div>
+  <div id="filterHeader">
+    <h3 style="margin: 0;">Drones</h3>
+    <span id="filterToggle" style="cursor: pointer; font-size: 20px;">[-]</span>
+  </div>
+  <div id="filterContent">
+    <h3>Active Drones</h3>
+    <div id="activePlaceholder" class="placeholder"></div>
+    <h3>Inactive Drones</h3>
+    <div id="inactivePlaceholder" class="placeholder"></div>
+  </div>
 </div>
+<!-- Serial connection status display -->
+<div id="serialStatus">Disconnected</div>
 <script>
 // Define tile layers.
 const osmStandard = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -541,8 +571,39 @@ function generatePopupContent(detection) {
   return content;
 }
 
+async function updateSerialStatus() {
+  try {
+    const response = await fetch('/api/serial_status');
+    const data = await response.json();
+    const statusDiv = document.getElementById('serialStatus');
+    if (data.connected) {
+      statusDiv.textContent = 'Connected';
+      statusDiv.style.color = 'lime';
+    } else {
+      statusDiv.textContent = 'Disconnected';
+      statusDiv.style.color = 'red';
+    }
+  } catch (error) {
+    console.error("Error fetching serial status:", error);
+  }
+}
+setInterval(updateSerialStatus, 1000);
+updateSerialStatus();
+
 setInterval(updateData, 1000);
 updateData();
+
+// Add toggle functionality for the filter box.
+document.getElementById("filterToggle").addEventListener("click", function() {
+  const content = document.getElementById("filterContent");
+  if (content.style.display === "none") {
+    content.style.display = "block";
+    this.textContent = "[-]";
+  } else {
+    content.style.display = "none";
+    this.textContent = "[+]";
+  }
+});
 </script>
 </body>
 </html>
@@ -620,7 +681,7 @@ def set_port():
 
 @app.route('/')
 def index():
-    if SELECTED_PORT is None:
+    if (SELECTED_PORT is None):
         return redirect(url_for('select_port'))
     return HTML_PAGE
 
@@ -667,14 +728,25 @@ def reactivate(mac):
     else:
         return jsonify({"status": "error", "message": "MAC not found"}), 404
 
+@app.route('/api/serial_status', methods=['GET'])
+def api_serial_status():
+    return jsonify({"connected": serial_connected})
+
 def serial_reader():
-    try:
-        ser = serial.Serial(SELECTED_PORT, BAUD_RATE, timeout=1)
-        print(f"Opened serial port {SELECTED_PORT} at {BAUD_RATE} baud.")
-    except Exception as e:
-        print(f"Error opening serial port {SELECTED_PORT}: {e}")
-        return
+    global serial_connected
+    ser = None
     while True:
+        if ser is None or not ser.is_open:
+            try:
+                ser = serial.Serial(SELECTED_PORT, BAUD_RATE, timeout=1)
+                serial_connected = True
+                print(f"Opened serial port {SELECTED_PORT} at {BAUD_RATE} baud.")
+            except Exception as e:
+                serial_connected = False
+                print(f"Error opening serial port {SELECTED_PORT}: {e}")
+                time.sleep(1)
+                continue
+
         try:
             if ser.in_waiting:
                 line = ser.readline().decode('utf-8').strip()
@@ -691,8 +763,25 @@ def serial_reader():
                     print("Failed to decode JSON from line:", line)
             else:
                 time.sleep(0.1)
+        except (serial.SerialException, OSError) as e:
+            serial_connected = False
+            print(f"SerialException/OSError: {e}")
+            try:
+                if ser and ser.is_open:
+                    ser.close()
+            except Exception as close_error:
+                print(f"Error closing serial port: {close_error}")
+            ser = None
+            time.sleep(1)
         except Exception as e:
+            serial_connected = False
             print(f"Error reading serial: {e}")
+            try:
+                if ser and ser.is_open:
+                    ser.close()
+            except Exception as close_error:
+                print(f"Error closing serial port: {close_error}")
+            ser = None
             time.sleep(1)
 
 def start_serial_thread():
