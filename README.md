@@ -1,4 +1,4 @@
-# Drone Remote ID to Meshtastic with MeshMapper API 📡
+# Drone Remote ID to Meshtastic with Mesh-Mapper API 📡
 Minimal WiFi-based Drone Remote ID Scanner  
 This project is a minimal scanner for WiFi-based Drone Remote ID based on cemaxacutoer's wifi remote id detection firmware, supporting both OpenDroneI.  It runs on ESP32 (tested with Mesh-Detect boards like the Xiao ESP32-C3) and sends parsed messages over a custom UART to a serial mesh network.
 
