@@ -173,6 +173,17 @@ HTML_PAGE = '''
     .selected {
       background-color: rgba(255,255,255,0.2);
     }
+    /* Custom Leaflet Popup Styling for dark mode */
+    .leaflet-popup-content-wrapper {
+      background-color: black;
+      color: lime;
+      font-family: monospace;
+      border: 2px solid lime;
+      border-radius: 10px;
+    }
+    .leaflet-popup-tip {
+      background: lime;
+    }
   </style>
 </head>
 <body>
@@ -562,11 +573,17 @@ function createIcon(emoji, color) {
   });
 }
 
-// Generate popup content from detection JSON.
+// Generate popup content from detection JSON and add Google Maps links for drone and pilot.
 function generatePopupContent(detection) {
   let content = '';
   for (const key in detection) {
     content += key + ': ' + detection[key] + '<br>';
+  }
+  if (detection.drone_lat && detection.drone_long && (detection.drone_lat != 0 || detection.drone_long != 0)) {
+    content += `<a href="https://www.google.com/maps/search/?api=1&query=${detection.drone_lat},${detection.drone_long}" target="_blank">Drone Location on Google Maps</a><br>`;
+  }
+  if (detection.pilot_lat && detection.pilot_long && (detection.pilot_lat != 0 || detection.pilot_long != 0)) {
+    content += `<a href="https://www.google.com/maps/search/?api=1&query=${detection.pilot_lat},${detection.pilot_long}" target="_blank">Pilot Location on Google Maps</a><br>`;
   }
   return content;
 }
