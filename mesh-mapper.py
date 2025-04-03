@@ -87,7 +87,10 @@ def update_detection(detection):
         })
     generate_kml()
 
-# --- HTML Page with Layer Dropdown, Drone/Pilot Mapping, Serial Status, and Toggle ---
+# --- Global Follow Lock Variable ---
+followLock = {"type": None, "id": None, "enabled": False}
+
+# --- HTML Page with Layer Dropdown, Drone/Pilot Mapping, Serial Status, and Buttons ---
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -98,9 +101,9 @@ HTML_PAGE = '''
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <style>
+    body, html { margin: 0; padding: 0; background-color: black; }
     #map { height: 100vh; }
-    body, html { margin: 0; padding: 0; }
-    /* Bottom Left: Layer dropdown control */
+    /* Basemap control styling */
     #layerControl {
       position: absolute;
       bottom: 10px;
@@ -114,12 +117,12 @@ HTML_PAGE = '''
       z-index: 1000;
     }
     #layerControl select {
-      background-color: rgba(0,0,0,0.8);
+      background-color: #333;
       color: lime;
       border: none;
       padding: 3px;
     }
-    /* Upper Right: Persistent scrollable list split into Active and Inactive drones with toggle */
+    /* Filter box styling */
     #filterBox {
       position: absolute;
       top: 10px;
@@ -134,13 +137,12 @@ HTML_PAGE = '''
       overflow-y: auto;
       z-index: 1000;
     }
-    /* Header for the filter box toggle */
     #filterHeader {
       display: flex;
       justify-content: space-between;
       align-items: center;
     }
-    /* Bottom Right: Serial connection status display moved directly above the bottom banner */
+    /* Serial connection status styling */
     #serialStatus {
       position: absolute;
       bottom: 30px;
@@ -153,7 +155,7 @@ HTML_PAGE = '''
       font-family: monospace;
       z-index: 1000;
     }
-    /* Styling for drone items: inline-block so they only take as much width as needed */
+    /* Drone item styling */
     .drone-item {
       display: inline-block;
       border: 1px solid;
@@ -161,7 +163,6 @@ HTML_PAGE = '''
       padding: 3px;
       cursor: pointer;
     }
-    /* Placeholder boxes that now will be populated with drones */
     .placeholder {
       border: 1px solid lime;
       min-height: 100px;
@@ -169,11 +170,10 @@ HTML_PAGE = '''
       overflow-y: auto;
       max-height: 200px;
     }
-    /* Highlighted inactive drone in historical view */
     .selected {
       background-color: rgba(255,255,255,0.2);
     }
-    /* Custom Leaflet Popup Styling for dark mode */
+    /* Leaflet popup dark mode styling */
     .leaflet-popup-content-wrapper {
       background-color: black;
       color: lime;
@@ -183,6 +183,22 @@ HTML_PAGE = '''
     }
     .leaflet-popup-tip {
       background: lime;
+    }
+    /* Button dark mode styling */
+    button {
+      margin-top: 5px;
+      padding: 5px;
+      border: none;
+      background-color: #333;
+      color: lime;
+      cursor: pointer;
+    }
+    /* General select styling for dark mode */
+    select {
+      background-color: #333;
+      color: lime;
+      border: none;
+      padding: 3px;
     }
   </style>
 </head>
@@ -216,7 +232,126 @@ HTML_PAGE = '''
 <!-- Serial connection status display -->
 <div id="serialStatus">Disconnected</div>
 <script>
-// Define tile layers.
+// Helper function to set the map view without zooming out.
+function safeSetView(latlng, minZoom) {
+  var currentZoom = map.getZoom();
+  var targetZoom = currentZoom < minZoom ? minZoom : currentZoom;
+  map.setView(latlng, targetZoom);
+}
+
+// Global followLock variable shared among all markers.
+var followLock = { type: null, id: null, enabled: false };
+
+// --- Observer Popup Functions ---
+function generateObserverPopup() {
+  var observerLocked = (followLock.enabled && followLock.type === 'observer');
+  return `
+  <div>
+    <strong>Observer Location</strong><br>
+    <label for="observerEmoji">Select Observer Icon:</label>
+    <select id="observerEmoji" onchange="updateObserverEmoji()">
+       <option value="😎">😎</option>
+       <option value="👽">👽</option>
+       <option value="🤖">🤖</option>
+       <option value="🏎️">🏎️</option>
+       <option value="🕵️‍♂️">🕵️‍♂️</option>
+       <option value="🥷">🥷</option>
+       <option value="👁️">👁️</option>
+    </select><br>
+    <button id="lock-observer" onclick="lockObserver()" style="background-color: ${observerLocked ? 'green' : ''};">
+      ${observerLocked ? 'Locked on Observer' : 'Lock on Observer'}
+    </button>
+    <button id="unlock-observer" onclick="unlockObserver()" style="background-color: ${observerLocked ? '' : 'green'};">
+      ${observerLocked ? 'Unlock Observer' : 'Unlocked Observer'}
+    </button>
+  </div>
+  `;
+}
+
+function updateObserverEmoji() {
+  var select = document.getElementById("observerEmoji");
+  var selectedEmoji = select.value;
+  if(observerMarker) {
+    observerMarker.setIcon(createIcon(selectedEmoji, 'blue'));
+  }
+}
+
+function lockObserver() {
+  followLock = { type: 'observer', id: 'observer', enabled: true };
+  updateObserverPopupButtons();
+}
+
+function unlockObserver() {
+  followLock = { type: null, id: null, enabled: false };
+  updateObserverPopupButtons();
+}
+
+function updateObserverPopupButtons() {
+  var observerLocked = (followLock.enabled && followLock.type === 'observer');
+  var lockBtn = document.getElementById("lock-observer");
+  var unlockBtn = document.getElementById("unlock-observer");
+  if(lockBtn) {
+    lockBtn.style.backgroundColor = observerLocked ? "green" : "";
+    lockBtn.textContent = observerLocked ? "Locked on Observer" : "Lock on Observer";
+  }
+  if(unlockBtn) {
+    unlockBtn.style.backgroundColor = observerLocked ? "" : "green";
+    unlockBtn.textContent = observerLocked ? "Unlock Observer" : "Unlocked Observer";
+  }
+}
+
+// --- Marker Popup Functions ---
+function generatePopupContent(detection, markerType) {
+  var isLocked = (followLock.enabled && followLock.type === markerType && followLock.id === detection.mac);
+  var lockButton = `<button id="lock-${markerType}-${detection.mac}" onclick="lockMarker('${markerType}', '${detection.mac}')" style="background-color: ${isLocked ? 'green' : ''};">
+                      ${isLocked ? 'Locked on ' + markerType.charAt(0).toUpperCase() + markerType.slice(1) : 'Lock on ' + markerType.charAt(0).toUpperCase() + markerType.slice(1)}
+                    </button>`;
+  var unlockButton = `<button id="unlock-${markerType}-${detection.mac}" onclick="unlockMarker('${markerType}', '${detection.mac}')" style="background-color: ${isLocked ? '' : 'green'};">
+                      ${isLocked ? 'Unlock ' + markerType.charAt(0).toUpperCase() + markerType.slice(1) : 'Unlocked ' + markerType.charAt(0).toUpperCase() + markerType.slice(1)}
+                    </button>`;
+  let content = '';
+  for (const key in detection) {
+    content += key + ': ' + detection[key] + '<br>';
+  }
+  if (detection.drone_lat && detection.drone_long && (detection.drone_lat != 0 || detection.drone_long != 0)) {
+    content += `<a href="https://www.google.com/maps/search/?api=1&query=${detection.drone_lat},${detection.drone_long}" target="_blank">Drone Location on Google Maps</a><br>`;
+  }
+  if (detection.pilot_lat && detection.pilot_long && (detection.pilot_lat != 0 || detection.pilot_long != 0)) {
+    content += `<a href="https://www.google.com/maps/search/?api=1&query=${detection.pilot_lat},${detection.pilot_long}" target="_blank">Pilot Location on Google Maps</a><br>`;
+  }
+  if (markerType === 'drone' || markerType === 'pilot') {
+    content += lockButton + unlockButton;
+  }
+  return content;
+}
+
+function lockMarker(markerType, id) {
+  followLock = { type: markerType, id: id, enabled: true };
+  updateMarkerButtons(markerType, id);
+}
+
+function unlockMarker(markerType, id) {
+  if (followLock.enabled && followLock.type === markerType && followLock.id === id) {
+    followLock = { type: null, id: null, enabled: false };
+    updateMarkerButtons(markerType, id);
+  }
+}
+
+function updateMarkerButtons(markerType, id) {
+  var isLocked = (followLock.enabled && followLock.type === markerType && followLock.id === id);
+  var lockBtn = document.getElementById("lock-" + markerType + "-" + id);
+  var unlockBtn = document.getElementById("unlock-" + markerType + "-" + id);
+  if(lockBtn) {
+    lockBtn.style.backgroundColor = isLocked ? "green" : "";
+    lockBtn.textContent = isLocked ? "Locked on " + markerType.charAt(0).toUpperCase() + markerType.slice(1) : "Lock on " + markerType.charAt(0).toUpperCase() + markerType.slice(1);
+  }
+  if(unlockBtn) {
+    unlockBtn.style.backgroundColor = isLocked ? "" : "green";
+    unlockBtn.textContent = isLocked ? "Unlock " + markerType.charAt(0).toUpperCase() + markerType.slice(1) : "Unlocked " + markerType.charAt(0).toUpperCase() + markerType.slice(1);
+  }
+}
+
+// --- Tile Layers Definition ---
 const osmStandard = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap contributors',
   maxZoom: 19
@@ -250,14 +385,14 @@ const openTopoMap = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.pn
   maxZoom: 17
 });
 
-// Initialize the map with the default layer.
+// --- Initialize the Map ---
 const map = L.map('map', {
   center: [0, 0],
   zoom: 2,
   layers: [osmStandard]
 });
 
-// Handle basemap selection.
+// --- Basemap Selection Handling ---
 document.getElementById("layerSelect").addEventListener("change", function() {
   let value = this.value;
   let newLayer;
@@ -275,7 +410,6 @@ document.getElementById("layerSelect").addEventListener("change", function() {
     }
   });
   newLayer.addTo(map);
-  // Visual feedback.
   this.style.backgroundColor = "rgba(0,0,0,0.8)";
   this.style.color = "lime";
   setTimeout(() => {
@@ -284,10 +418,8 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   }, 500);
 });
 
-// Global persistent MAC list.
+// --- Global Variables for Markers and Paths ---
 let persistentMACs = [];
-
-// Global marker and path storage.
 const droneMarkers = {};
 const pilotMarkers = {};
 const droneCircles = {};
@@ -296,34 +428,62 @@ const dronePolylines = {};
 const pilotPolylines = {};
 const dronePathCoords = {};
 const pilotPathCoords = {};
-// Storage for the broadcast rings.
 const droneBroadcastRings = {};
-// Global storage for drones in historical view.
 let historicalDrones = {};
-
 let firstDetectionZoomed = false;
 
-// Function to zoom to a drone's location.
+// Observer marker.
+let observerMarker = null;
+
+// --- Observer Geolocation and Tracking ---
+if (navigator.geolocation) {
+  navigator.geolocation.watchPosition(function(position) {
+    const lat = position.coords.latitude;
+    const lng = position.coords.longitude;
+    const observerIcon = createIcon('😎', 'blue');
+    if (!observerMarker) {
+      observerMarker = L.marker([lat, lng], {icon: observerIcon})
+                        .bindPopup(generateObserverPopup())
+                        .addTo(map)
+                        .on('popupopen', function() {
+                          updateObserverPopupButtons();
+                        })
+                        .on('click', function() {
+                          safeSetView(observerMarker.getLatLng(), 14);
+                        });
+      safeSetView([lat, lng], 14);
+    } else {
+      observerMarker.setLatLng([lat, lng]);
+    }
+    if (followLock.enabled && followLock.type === 'observer') {
+      map.setView([lat, lng], map.getZoom());
+    }
+  }, function(error) {
+    console.error("Error watching location:", error);
+  }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 });
+} else {
+  console.error("Geolocation is not supported by this browser.");
+}
+
+// --- Functions to Zoom and Display Historical Drones ---
 function zoomToDrone(mac, detection) {
   if (detection && detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
-    map.setView([detection.lat, detection.long], 14);
-  } else {
-    alert("No valid drone location for " + mac);
+    safeSetView([detection.lat, detection.long], 14);
   }
 }
 
-// Function to show an inactive drone in historical view.
-// It draws the historical markers, paths, and a purple ring.
 function showHistoricalDrone(mac, detection) {
   const color = colorFromMac(mac);
-  // Drone marker and circle.
   if (!droneMarkers[mac]) {
     droneMarkers[mac] = L.marker([detection.lat, detection.long], {icon: createIcon('🛸', color)})
-                           .bindPopup(generatePopupContent(detection))
-                           .addTo(map);
+                           .bindPopup(generatePopupContent(detection, 'drone'))
+                           .addTo(map)
+                           .on('click', function(){
+                              safeSetView(this.getLatLng(), 14);
+                           });
   } else {
     droneMarkers[mac].setLatLng([detection.lat, detection.long]);
-    droneMarkers[mac].setPopupContent(generatePopupContent(detection));
+    droneMarkers[mac].setPopupContent(generatePopupContent(detection, 'drone'));
   }
   if (!droneCircles[mac]) {
     droneCircles[mac] = L.circleMarker([detection.lat, detection.long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
@@ -338,32 +498,19 @@ function showHistoricalDrone(mac, detection) {
   }
   if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
   dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
-
-  // Pilot marker and circle.
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
     if (!pilotMarkers[mac]) {
       pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {icon: createIcon('👤', color)})
-                             .bindPopup(generatePopupContent(detection))
-                             .addTo(map);
+                             .bindPopup(generatePopupContent(detection, 'pilot'))
+                             .addTo(map)
+                             .on('click', function(){
+                                 safeSetView(this.getLatLng(), 14);
+                             });
     } else {
       pilotMarkers[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
-      pilotMarkers[mac].setPopupContent(generatePopupContent(detection));
+      pilotMarkers[mac].setPopupContent(generatePopupContent(detection, 'pilot'));
     }
-    if (!pilotCircles[mac]) {
-      pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
-                             .addTo(map);
-    } else {
-      pilotCircles[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
-    }
-    if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
-    const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
-    if (!lastPilot || lastPilot[0] !== detection.pilot_lat || lastPilot[1] !== detection.pilot_long) {
-      pilotPathCoords[mac].push([detection.pilot_lat, detection.pilot_long]);
-    }
-    if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
-    pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
   }
-  // Historical purple ring.
   if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); }
   droneBroadcastRings[mac] = L.circleMarker([detection.lat, detection.long], {
     radius: 16,
@@ -373,7 +520,7 @@ function showHistoricalDrone(mac, detection) {
   }).addTo(map);
 }
 
-// Utility to compute a unique color based on the MAC string.
+// --- Utility Functions ---
 function colorFromMac(mac) {
   let hash = 0;
   for (let i = 0; i < mac.length; i++) {
@@ -383,7 +530,7 @@ function colorFromMac(mac) {
   return 'hsl(' + h + ', 70%, 50%)';
 }
 
-// Update the placeholders (active and inactive drones).
+// Update the active/inactive drone lists.
 function updateComboList(data) {
   const activePlaceholder = document.getElementById("activePlaceholder");
   const inactivePlaceholder = document.getElementById("inactivePlaceholder");
@@ -391,6 +538,7 @@ function updateComboList(data) {
   inactivePlaceholder.innerHTML = "";
   const currentTime = Date.now() / 1000;
   persistentMACs.forEach(mac => {
+    // Create the list item.
     const item = document.createElement("div");
     item.textContent = mac;
     const color = colorFromMac(mac);
@@ -399,18 +547,16 @@ function updateComboList(data) {
     item.className = "drone-item";
     
     let detection = data[mac];
-    // Active drones (detected within staleThreshold)
+    // Active drones: detected within staleThreshold.
     if (detection && (currentTime - detection.last_update <= 300)) {
-      // Active drone: single click to zoom.
       item.addEventListener("click", () => {
         zoomToDrone(mac, detection);
       });
       activePlaceholder.appendChild(item);
     } else {
-      // Inactive drone: double-click to toggle historical view.
+      // Inactive drone: double-click toggles historical view.
       item.addEventListener("dblclick", () => {
         if (historicalDrones[mac]) {
-          // Toggle off historical view.
           delete historicalDrones[mac];
           if (droneBroadcastRings[mac]) {
             map.removeLayer(droneBroadcastRings[mac]);
@@ -418,7 +564,6 @@ function updateComboList(data) {
           }
           item.classList.remove("selected");
         } else {
-          // Turn on historical view and lock it.
           historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
           showHistoricalDrone(mac, historicalDrones[mac]);
           item.classList.add("selected");
@@ -434,19 +579,13 @@ async function updateData() {
     const response = await fetch('/api/detections');
     const data = await response.json();
     const currentTime = Date.now() / 1000;
-    
-    // Add any new MAC addresses to the persistent list.
     for (const mac in data) {
       if (!persistentMACs.includes(mac)) {
         persistentMACs.push(mac);
       }
     }
-    
-    // For each drone, check if it's in historical mode.
     for (const mac in data) {
       if (historicalDrones[mac]) {
-        // If a new detection arrives that's more recent than when the user locked historical mode,
-        // or if the historical view has been active for more than 5 minutes, exit historical mode.
         if (data[mac].last_update > historicalDrones[mac].lockTime ||
             (currentTime - historicalDrones[mac].lockTime) > 300) {
           delete historicalDrones[mac];
@@ -455,11 +594,9 @@ async function updateData() {
             delete droneBroadcastRings[mac];
           }
         } else {
-          // Still in historical mode; skip live updates.
           continue;
         }
       }
-      
       const det = data[mac];
       if (!det.last_update || (currentTime - det.last_update > 300)) {
         if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
@@ -473,30 +610,27 @@ async function updateData() {
         delete pilotPathCoords[mac];
         continue;
       }
-      
       const droneLat = det.lat, droneLng = det.long;
       const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
-      
       const validDrone = (droneLat !== 0 && droneLng !== 0);
       const validPilot = (pilotLat !== 0 && pilotLng !== 0);
       if (!validDrone && !validPilot) continue;
-      
       const color = colorFromMac(mac);
-      
       if (!firstDetectionZoomed && validDrone) {
         firstDetectionZoomed = true;
-        map.setView([droneLat, droneLng], 14);
+        safeSetView([droneLat, droneLng], 14);
       }
-      
-      // Active drone marker and circle.
       if (validDrone) {
         if (droneMarkers[mac]) {
           droneMarkers[mac].setLatLng([droneLat, droneLng]);
-          droneMarkers[mac].setPopupContent(generatePopupContent(det));
+          droneMarkers[mac].setPopupContent(generatePopupContent(det, 'drone'));
         } else {
           droneMarkers[mac] = L.marker([droneLat, droneLng], {icon: createIcon('🛸', color)})
-                                .bindPopup(generatePopupContent(det))
-                                .addTo(map);
+                                .bindPopup(generatePopupContent(det, 'drone'))
+                                .addTo(map)
+                                .on('click', function(){
+                                    safeSetView(this.getLatLng(), 14);
+                                });
         }
         if (droneCircles[mac]) {
           droneCircles[mac].setLatLng([droneLat, droneLng]);
@@ -511,8 +645,6 @@ async function updateData() {
         }
         if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
         dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
-        
-        // Broadcast ring for active drones: lime green if detected within 15 seconds.
         if (currentTime - det.last_update <= 15) {
           if (droneBroadcastRings[mac]) {
             droneBroadcastRings[mac].setLatLng([droneLat, droneLng]);
@@ -530,17 +662,21 @@ async function updateData() {
             delete droneBroadcastRings[mac];
           }
         }
+        if (followLock.enabled && followLock.type === 'drone' && followLock.id === mac) {
+          map.setView([droneLat, droneLng], map.getZoom());
+        }
       }
-      
-      // Pilot marker and circle.
       if (validPilot) {
         if (pilotMarkers[mac]) {
           pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
-          pilotMarkers[mac].setPopupContent(generatePopupContent(det));
+          pilotMarkers[mac].setPopupContent(generatePopupContent(det, 'pilot'));
         } else {
           pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {icon: createIcon('👤', color)})
-                              .bindPopup(generatePopupContent(det))
-                              .addTo(map);
+                                .bindPopup(generatePopupContent(det, 'pilot'))
+                                .addTo(map)
+                                .on('click', function(){
+                                    safeSetView(this.getLatLng(), 14);
+                                });
         }
         if (pilotCircles[mac]) {
           pilotCircles[mac].setLatLng([pilotLat, pilotLng]);
@@ -555,15 +691,18 @@ async function updateData() {
         }
         if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
         pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
+        if (followLock.enabled && followLock.type === 'pilot' && followLock.id === mac) {
+          map.setView([pilotLat, pilotLng], map.getZoom());
+        }
       }
     }
+    // Call updateComboList once after processing all drones.
     updateComboList(data);
   } catch (error) {
     console.error("Error fetching detection data:", error);
   }
 }
 
-// Utility to create a custom icon.
 function createIcon(emoji, color) {
   return L.divIcon({
     html: '<div style="font-size: 24px; color:' + color + ';">' + emoji + '</div>',
@@ -571,21 +710,6 @@ function createIcon(emoji, color) {
     iconSize: [30, 30],
     iconAnchor: [15, 15]
   });
-}
-
-// Generate popup content from detection JSON and add Google Maps links for drone and pilot.
-function generatePopupContent(detection) {
-  let content = '';
-  for (const key in detection) {
-    content += key + ': ' + detection[key] + '<br>';
-  }
-  if (detection.drone_lat && detection.drone_long && (detection.drone_lat != 0 || detection.drone_long != 0)) {
-    content += `<a href="https://www.google.com/maps/search/?api=1&query=${detection.drone_lat},${detection.drone_long}" target="_blank">Drone Location on Google Maps</a><br>`;
-  }
-  if (detection.pilot_lat && detection.pilot_long && (detection.pilot_lat != 0 || detection.pilot_long != 0)) {
-    content += `<a href="https://www.google.com/maps/search/?api=1&query=${detection.pilot_lat},${detection.pilot_long}" target="_blank">Pilot Location on Google Maps</a><br>`;
-  }
-  return content;
 }
 
 async function updateSerialStatus() {
@@ -610,7 +734,21 @@ updateSerialStatus();
 setInterval(updateData, 1000);
 updateData();
 
-// Add toggle functionality for the filter box.
+// New function to update the map view based on lock status instantly.
+function updateLockFollow() {
+  if (followLock.enabled) {
+    if (followLock.type === 'observer' && observerMarker) {
+      map.setView(observerMarker.getLatLng(), map.getZoom());
+    } else if (followLock.type === 'drone' && droneMarkers[followLock.id]) {
+      map.setView(droneMarkers[followLock.id].getLatLng(), map.getZoom());
+    } else if (followLock.type === 'pilot' && pilotMarkers[followLock.id]) {
+      map.setView(pilotMarkers[followLock.id].getLatLng(), map.getZoom());
+    }
+  }
+}
+// Call updateLockFollow at a faster interval (every 200 ms).
+setInterval(updateLockFollow, 200);
+
 document.getElementById("filterToggle").addEventListener("click", function() {
   const content = document.getElementById("filterContent");
   if (content.style.display === "none") {
@@ -651,6 +789,12 @@ PORT_SELECTION_PAGE = '''
     li {
       list-style: none;
       margin: 10px 0;
+    }
+    select {
+      background-color: #333;
+      color: lime;
+      border: none;
+      padding: 3px;
     }
   </style>
 </head>
