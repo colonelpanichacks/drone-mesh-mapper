@@ -200,6 +200,15 @@ HTML_PAGE = '''
       border: none;
       padding: 3px;
     }
+    /* Custom styling for Leaflet zoom controls */
+    .leaflet-control-zoom-in, .leaflet-control-zoom-out {
+      background-color: #333;
+      color: lime;
+      border: 1px solid lime;
+    }
+    .leaflet-control-zoom-in:hover, .leaflet-control-zoom-out:hover {
+      background-color: #222;
+    }
   </style>
 </head>
 <body>
@@ -232,11 +241,9 @@ HTML_PAGE = '''
 <!-- Serial connection status display -->
 <div id="serialStatus">Disconnected</div>
 <script>
-// Helper function to set the map view without zooming out.
-function safeSetView(latlng, minZoom) {
-  var currentZoom = map.getZoom();
-  var targetZoom = currentZoom < minZoom ? minZoom : currentZoom;
-  map.setView(latlng, targetZoom);
+// New safeSetView: for initial zoom-in, always use zoom level 18.
+function safeSetView(latlng, zoom=18) {
+  map.setView(latlng, zoom);
 }
 
 // Global followLock variable shared among all markers.
@@ -449,13 +456,14 @@ if (navigator.geolocation) {
                           updateObserverPopupButtons();
                         })
                         .on('click', function() {
-                          safeSetView(observerMarker.getLatLng(), 14);
+                          safeSetView(observerMarker.getLatLng(), 18);
                         });
-      safeSetView([lat, lng], 14);
+      safeSetView([lat, lng], 18);
     } else {
       observerMarker.setLatLng([lat, lng]);
     }
     if (followLock.enabled && followLock.type === 'observer') {
+      // When locked, follow at the current zoom level.
       map.setView([lat, lng], map.getZoom());
     }
   }, function(error) {
@@ -468,7 +476,7 @@ if (navigator.geolocation) {
 // --- Functions to Zoom and Display Historical Drones ---
 function zoomToDrone(mac, detection) {
   if (detection && detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
-    safeSetView([detection.lat, detection.long], 14);
+    safeSetView([detection.lat, detection.long], 18);
   }
 }
 
@@ -479,7 +487,7 @@ function showHistoricalDrone(mac, detection) {
                            .bindPopup(generatePopupContent(detection, 'drone'))
                            .addTo(map)
                            .on('click', function(){
-                              safeSetView(this.getLatLng(), 14);
+                              safeSetView(this.getLatLng(), 18);
                            });
   } else {
     droneMarkers[mac].setLatLng([detection.lat, detection.long]);
@@ -504,20 +512,20 @@ function showHistoricalDrone(mac, detection) {
                              .bindPopup(generatePopupContent(detection, 'pilot'))
                              .addTo(map)
                              .on('click', function(){
-                                 safeSetView(this.getLatLng(), 14);
+                                 safeSetView(this.getLatLng(), 18);
                              });
     } else {
       pilotMarkers[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
       pilotMarkers[mac].setPopupContent(generatePopupContent(detection, 'pilot'));
     }
+    // Added pilot circle for historical drones
+    if (!pilotCircles[mac]) {
+      pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+                            .addTo(map);
+    } else {
+      pilotCircles[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
+    }
   }
-  if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); }
-  droneBroadcastRings[mac] = L.circleMarker([detection.lat, detection.long], {
-    radius: 16,
-    color: "purple",
-    fill: false,
-    weight: 3
-  }).addTo(map);
 }
 
 // --- Utility Functions ---
@@ -567,6 +575,8 @@ function updateComboList(data) {
           historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
           showHistoricalDrone(mac, historicalDrones[mac]);
           item.classList.add("selected");
+          // Zoom to the historical drone's location initially.
+          safeSetView([detection.lat, detection.long], 18);
         }
       });
       inactivePlaceholder.appendChild(item);
@@ -618,7 +628,7 @@ async function updateData() {
       const color = colorFromMac(mac);
       if (!firstDetectionZoomed && validDrone) {
         firstDetectionZoomed = true;
-        safeSetView([droneLat, droneLng], 14);
+        safeSetView([droneLat, droneLng], 18);
       }
       if (validDrone) {
         if (droneMarkers[mac]) {
@@ -629,7 +639,7 @@ async function updateData() {
                                 .bindPopup(generatePopupContent(det, 'drone'))
                                 .addTo(map)
                                 .on('click', function(){
-                                    safeSetView(this.getLatLng(), 14);
+                                    safeSetView(this.getLatLng(), 18);
                                 });
         }
         if (droneCircles[mac]) {
@@ -675,7 +685,7 @@ async function updateData() {
                                 .bindPopup(generatePopupContent(det, 'pilot'))
                                 .addTo(map)
                                 .on('click', function(){
-                                    safeSetView(this.getLatLng(), 14);
+                                    safeSetView(this.getLatLng(), 18);
                                 });
         }
         if (pilotCircles[mac]) {
