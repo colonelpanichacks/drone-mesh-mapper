@@ -369,9 +369,10 @@ function generatePopupContent(detection, markerType) {
     }
   }
   // Append alias editor section with custom styling.
+  // Added onclick and ontouchstart to stop propagation so the keyboard stays open on mobile.
   content += `<hr style="border: 1px solid lime;">
               <label for="aliasInput">Alias:</label>
-              <input type="text" id="aliasInput" style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
+              <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
               <button onclick="saveAlias('${detection.mac}')">Save Alias</button>
               <button onclick="clearAlias('${detection.mac}')">Clear Alias</button><br>`;
   if (detection.drone_lat && detection.drone_long && (detection.drone_lat != 0 || detection.drone_long != 0)) {
@@ -743,7 +744,10 @@ async function updateData() {
       if (validDrone) {
         if (droneMarkers[mac]) {
           droneMarkers[mac].setLatLng([droneLat, droneLng]);
-          droneMarkers[mac].setPopupContent(generatePopupContent(det, 'drone'));
+          // Only update popup content if it's not open
+          if (!droneMarkers[mac].isPopupOpen()) {
+            droneMarkers[mac].setPopupContent(generatePopupContent(det, 'drone'));
+          }
         } else {
           droneMarkers[mac] = L.marker([droneLat, droneLng], {icon: createIcon('🛸', color)})
                                 .bindPopup(generatePopupContent(det, 'drone'))
@@ -789,7 +793,10 @@ async function updateData() {
       if (validPilot) {
         if (pilotMarkers[mac]) {
           pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
-          pilotMarkers[mac].setPopupContent(generatePopupContent(det, 'pilot'));
+          // Only update popup content if it's not open
+          if (!pilotMarkers[mac].isPopupOpen()) {
+            pilotMarkers[mac].setPopupContent(generatePopupContent(det, 'pilot'));
+          }
         } else {
           pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {icon: createIcon('👤', color)})
                                 .bindPopup(generatePopupContent(det, 'pilot'))
