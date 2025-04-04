@@ -121,7 +121,7 @@ void loop() {
   }
 }
 
-// Sends the minimal JSON payload over USB Serial (unchanged).
+// Sends the minimal JSON payload over USB Serial (updated to include basic_id).
 void send_json_detection(struct uav_data *UAV) {
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -129,12 +129,12 @@ void send_json_detection(struct uav_data *UAV) {
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
   char json_msg[256];
   snprintf(json_msg, sizeof(json_msg),
-    "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f}",
-    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d);
+    "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\"}",
+    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
   Serial.println(json_msg);
 }
 
-// New function: sends JSON payload as fast as possible over USB Serial.
+// New function: sends JSON payload as fast as possible over USB Serial (updated to include basic_id).
 void send_json_fast(struct uav_data *UAV) {
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -142,8 +142,8 @@ void send_json_fast(struct uav_data *UAV) {
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
   char json_msg[256];
   snprintf(json_msg, sizeof(json_msg),
-    "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f}",
-    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d);
+    "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\"}",
+    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
   Serial.println(json_msg);
 }
 
