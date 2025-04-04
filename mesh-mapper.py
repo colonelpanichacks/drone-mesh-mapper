@@ -370,7 +370,7 @@ function generatePopupContent(detection, markerType) {
     content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div><br>';
   }
   
-  // Display all other detection fields (e.g. altitude, GPS, etc.)
+  // Display all other detection fields (except mac, basic_id, last_update).
   for (const key in detection) {
     if (key !== 'mac' && key !== 'basic_id' && key !== 'last_update') {
       content += key + ': ' + detection[key] + '<br>';
@@ -700,25 +700,30 @@ function updateComboList(data) {
       activePlaceholder.appendChild(item);
     } else {
       // Inactive drones:
-      // Single click brings up the popup with alias and details.
+      // Single click opens the alias popup and zooms to the drone location.
       item.addEventListener("click", () => {
          openAliasPopup(mac);
+         if (detection && detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
+             safeSetView([detection.lat, detection.long], 18);
+         }
       });
-      // Double click toggles the historical marker.
+      // Double click toggles the historical drone/pilot markers and closes any open popup.
       item.addEventListener("dblclick", () => {
-        if (historicalDrones[mac]) {
-          delete historicalDrones[mac];
-          if (droneBroadcastRings[mac]) {
-            map.removeLayer(droneBroadcastRings[mac]);
-            delete droneBroadcastRings[mac];
-          }
-          item.classList.remove("selected");
-        } else {
-          historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
-          showHistoricalDrone(mac, historicalDrones[mac]);
-          item.classList.add("selected");
-          safeSetView([detection.lat, detection.long], 18);
-        }
+         if (historicalDrones[mac]) {
+             // Markers are displayed; remove them and close popup.
+             delete historicalDrones[mac];
+             if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
+             if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
+             item.classList.remove("selected");
+             map.closePopup();
+         } else {
+             // Markers are not displayed; show them and open popup.
+             historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
+             showHistoricalDrone(mac, historicalDrones[mac]);
+             item.classList.add("selected");
+             openAliasPopup(mac);
+             safeSetView([detection.lat, detection.long], 18);
+         }
       });
       inactivePlaceholder.appendChild(item);
     }
@@ -775,7 +780,6 @@ async function updateData() {
       if (validDrone) {
         if (droneMarkers[mac]) {
           droneMarkers[mac].setLatLng([droneLat, droneLng]);
-          // Only update popup content if it's not open
           if (!droneMarkers[mac].isPopupOpen()) {
             droneMarkers[mac].setPopupContent(generatePopupContent(det, 'drone'));
           }
@@ -824,7 +828,6 @@ async function updateData() {
       if (validPilot) {
         if (pilotMarkers[mac]) {
           pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
-          // Only update popup content if it's not open
           if (!pilotMarkers[mac].isPopupOpen()) {
             pilotMarkers[mac].setPopupContent(generatePopupContent(det, 'pilot'));
           }
