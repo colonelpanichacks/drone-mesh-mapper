@@ -30,7 +30,7 @@ KML_FILENAME = f"detections_{startup_timestamp}.kml"
 
 # Write CSV header.
 with open(CSV_FILENAME, mode='w', newline='') as csvfile:
-    fieldnames = ['timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long', 'drone_altitude', 'pilot_lat', 'pilot_long']
+    fieldnames = ['timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long', 'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id']
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
 
@@ -61,13 +61,18 @@ def generate_kml():
         f'<name>Detections {startup_timestamp}</name>'
     ]
     for mac, det in tracked_pairs.items():
-        kml_lines.append(f'<Placemark><name>Drone {mac}</name>')
+        remoteIdStr = ""
+        if det.get("basic_id"):
+            remoteIdStr = " (RemoteID: " + det.get("basic_id") + ")"
+        # Drone placemark
+        kml_lines.append(f'<Placemark><name>Drone {mac}{remoteIdStr}</name>')
         kml_lines.append('<Style><IconStyle><scale>1.2</scale>'
                          '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon>'
                          '</IconStyle></Style>')
         kml_lines.append(f'<Point><coordinates>{det.get("drone_long",0)},{det.get("drone_lat",0)},0</coordinates></Point>')
         kml_lines.append('</Placemark>')
-        kml_lines.append(f'<Placemark><name>Pilot {mac}</name>')
+        # Pilot placemark
+        kml_lines.append(f'<Placemark><name>Pilot {mac}{remoteIdStr}</name>')
         kml_lines.append('<Style><IconStyle><scale>1.2</scale>'
                          '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon>'
                          '</IconStyle></Style>')
@@ -89,12 +94,13 @@ def update_detection(detection):
     detection["pilot_lat"] = detection.get("pilot_lat", 0)
     detection["pilot_long"] = detection.get("pilot_long", 0)
     detection["last_update"] = time.time()
+    # basic_id is saved as is if provided
     tracked_pairs[mac] = detection
     detection_history.append(detection.copy())
     print("Updated tracked_pairs:", tracked_pairs)
     # Append detection to CSV.
     with open(CSV_FILENAME, mode='a', newline='') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=['timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long', 'drone_altitude', 'pilot_lat', 'pilot_long'])
+        writer = csv.DictWriter(csvfile, fieldnames=['timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long', 'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id'])
         writer.writerow({
             'timestamp': datetime.now().isoformat(),
             'mac': mac,
@@ -103,7 +109,8 @@ def update_detection(detection):
             'drone_long': detection.get('drone_long', ''),
             'drone_altitude': detection.get('drone_altitude', ''),
             'pilot_lat': detection.get('pilot_lat', ''),
-            'pilot_long': detection.get('pilot_long', '')
+            'pilot_long': detection.get('pilot_long', ''),
+            'basic_id': detection.get('basic_id', '')
         })
     generate_kml()
 
@@ -354,53 +361,57 @@ function updateObserverPopupButtons() {
 // --- Marker Popup Functions ---
 function generatePopupContent(detection, markerType) {
   let content = '';
-  // Always display alias in neon pink and then the MAC in the popup.
+  // Display ID (alias and MAC)
   let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
   content += '<strong>ID:</strong> <span style="color:#FF00FF;">' + aliasText + '</span> (MAC: ' + detection.mac + ')<br>';
-  // Display other fields.
+  
+  // Display FAA RemoteID in a copy-pasteable block if present.
+  if (detection.basic_id) {
+    content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div><br>';
+  }
+  
+  // Display all other detection fields (e.g. altitude, GPS, etc.)
   for (const key in detection) {
-    if (key !== 'mac') {
+    if (key !== 'mac' && key !== 'basic_id' && key !== 'last_update') {
       content += key + ': ' + detection[key] + '<br>';
     }
   }
+  
+  // Always include both Google Maps links (if coordinates exist).
+  if (detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
+    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.lat + ',' + detection.long + '">View Drone on Google Maps</a><br>';
+  }
+  if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
+    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.pilot_lat + ',' + detection.pilot_long + '">View Pilot on Google Maps</a><br>';
+  }
+  
   // Append alias editor section.
   content += `<hr style="border: 1px solid lime;">
               <label for="aliasInput">Alias:</label>
               <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
               <button onclick="saveAlias('${detection.mac}')">Save Alias</button>
               <button onclick="clearAlias('${detection.mac}')">Clear Alias</button><br>`;
-  // For alias popups, add tracking options for both drone and pilot.
-  if (markerType === 'alias') {
-    var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
-    var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" style="background-color: ${isDroneLocked ? 'green' : ''};">
+  
+  // Add a single lime green divider.
+  content += `<div style="border-top:2px solid lime; margin:10px 0;"></div>`;
+  
+  // Tracking options section.
+  var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
+  var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" style="background-color: ${isDroneLocked ? 'green' : ''};">
                       ${isDroneLocked ? 'Locked on Drone' : 'Lock on Drone'}
                     </button>`;
-    var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" style="background-color: ${isDroneLocked ? '' : 'green'};">
+  var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" style="background-color: ${isDroneLocked ? '' : 'green'};">
                       ${isDroneLocked ? 'Unlock Drone' : 'Unlocked Drone'}
                     </button>`;
-    var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
-    var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" style="background-color: ${isPilotLocked ? 'green' : ''};">
+  var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
+  var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" style="background-color: ${isPilotLocked ? 'green' : ''};">
                       ${isPilotLocked ? 'Locked on Pilot' : 'Lock on Pilot'}
                     </button>`;
-    var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" style="background-color: ${isPilotLocked ? '' : 'green'};">
+  var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" style="background-color: ${isPilotLocked ? '' : 'green'};">
                       ${isPilotLocked ? 'Unlock Pilot' : 'Unlocked Pilot'}
                     </button>`;
-    content += `<hr style="border: 1px solid lime;">
-                <div>Tracking Options (Only one can be active):</div>
-                ${droneLockButton} ${droneUnlockButton} <br>
+  content += `${droneLockButton} ${droneUnlockButton} <br>
                 ${pilotLockButton} ${pilotUnlockButton}`;
-  }
-  // For popups already for drone or pilot markers, use one set of buttons.
-  else if (markerType === 'drone' || markerType === 'pilot') {
-    var isLocked = (followLock.enabled && followLock.type === markerType && followLock.id === detection.mac);
-    var lockButton = `<button id="lock-${markerType}-${detection.mac}" onclick="lockMarker('${markerType}', '${detection.mac}')" style="background-color: ${isLocked ? 'green' : ''};">
-                      ${isLocked ? 'Locked on ' + markerType.charAt(0).toUpperCase() + markerType.slice(1) : 'Lock on ' + markerType.charAt(0).toUpperCase() + markerType.slice(1)}
-                    </button>`;
-    var unlockButton = `<button id="unlock-${markerType}-${detection.mac}" onclick="unlockMarker('${markerType}', '${detection.mac}')" style="background-color: ${isLocked ? '' : 'green'};">
-                      ${isLocked ? 'Unlock ' + markerType.charAt(0).toUpperCase() + markerType.slice(1) : 'Unlocked ' + markerType.charAt(0).toUpperCase() + markerType.slice(1)}
-                    </button>`;
-    content += lockButton + unlockButton;
-  }
   return content;
 }
 
