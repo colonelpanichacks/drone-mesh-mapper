@@ -108,6 +108,7 @@ def update_detection(detection):
     generate_kml()
 
 # --- Global Follow Lock Variable ---
+# followLock now enforces that only one marker type (drone or pilot) is locked at any given time.
 followLock = {"type": None, "id": None, "enabled": False}
 
 # --- HTML Page ---
@@ -277,7 +278,7 @@ async function updateAliases() {
     const response = await fetch('/api/aliases');
     aliases = await response.json();
     // After updating aliases, update the list display.
-    updateComboList(trackedPairs);
+    updateComboList(tracked_pairs);
   } catch (error) {
     console.error("Error fetching aliases:", error);
   }
@@ -289,6 +290,7 @@ function safeSetView(latlng, zoom=18) {
 }
 
 // Global followLock variable shared among all markers.
+// Only one type (drone, pilot, observer) can be locked at any one time.
 var followLock = { type: null, id: null, enabled: false };
 
 // --- Observer Popup Functions ---
@@ -351,45 +353,62 @@ function updateObserverPopupButtons() {
 
 // --- Marker Popup Functions ---
 function generatePopupContent(detection, markerType) {
-  var isLocked = (followLock.enabled && followLock.type === markerType && followLock.id === detection.mac);
-  var lockButton = `<button id="lock-${markerType}-${detection.mac}" onclick="lockMarker('${markerType}', '${detection.mac}')" style="background-color: ${isLocked ? 'green' : ''};">
-                      ${isLocked ? 'Locked on ' + markerType.charAt(0).toUpperCase() + markerType.slice(1) : 'Lock on ' + markerType.charAt(0).toUpperCase() + markerType.slice(1)}
-                    </button>`;
-  var unlockButton = `<button id="unlock-${markerType}-${detection.mac}" onclick="unlockMarker('${markerType}', '${detection.mac}')" style="background-color: ${isLocked ? '' : 'green'};">
-                      ${isLocked ? 'Unlock ' + markerType.charAt(0).toUpperCase() + markerType.slice(1) : 'Unlocked ' + markerType.charAt(0).toUpperCase() + markerType.slice(1)}
-                    </button>`;
   let content = '';
-  // Always display MAC and alias in the popup.
+  // Always display alias in neon pink and then the MAC in the popup.
   let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
-  content += '<strong>ID:</strong> ' + aliasText + ' (MAC: ' + detection.mac + ')<br>';
+  content += '<strong>ID:</strong> <span style="color:#FF00FF;">' + aliasText + '</span> (MAC: ' + detection.mac + ')<br>';
   // Display other fields.
   for (const key in detection) {
     if (key !== 'mac') {
       content += key + ': ' + detection[key] + '<br>';
     }
   }
-  // Append alias editor section with custom styling.
-  // Added onclick and ontouchstart to stop propagation so the keyboard stays open on mobile.
+  // Append alias editor section.
   content += `<hr style="border: 1px solid lime;">
               <label for="aliasInput">Alias:</label>
               <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
               <button onclick="saveAlias('${detection.mac}')">Save Alias</button>
               <button onclick="clearAlias('${detection.mac}')">Clear Alias</button><br>`;
-  if (detection.drone_lat && detection.drone_long && (detection.drone_lat != 0 || detection.drone_long != 0)) {
-    content += `<a href="https://www.google.com/maps/search/?api=1&query=${detection.drone_lat},${detection.drone_long}" target="_blank">Drone Location on Google Maps</a><br>`;
+  // For alias popups, add tracking options for both drone and pilot.
+  if (markerType === 'alias') {
+    var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
+    var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" style="background-color: ${isDroneLocked ? 'green' : ''};">
+                      ${isDroneLocked ? 'Locked on Drone' : 'Lock on Drone'}
+                    </button>`;
+    var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" style="background-color: ${isDroneLocked ? '' : 'green'};">
+                      ${isDroneLocked ? 'Unlock Drone' : 'Unlocked Drone'}
+                    </button>`;
+    var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
+    var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" style="background-color: ${isPilotLocked ? 'green' : ''};">
+                      ${isPilotLocked ? 'Locked on Pilot' : 'Lock on Pilot'}
+                    </button>`;
+    var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" style="background-color: ${isPilotLocked ? '' : 'green'};">
+                      ${isPilotLocked ? 'Unlock Pilot' : 'Unlocked Pilot'}
+                    </button>`;
+    content += `<hr style="border: 1px solid lime;">
+                <div>Tracking Options (Only one can be active):</div>
+                ${droneLockButton} ${droneUnlockButton} <br>
+                ${pilotLockButton} ${pilotUnlockButton}`;
   }
-  if (detection.pilot_lat && detection.pilot_long && (detection.pilot_lat != 0 || detection.pilot_long != 0)) {
-    content += `<a href="https://www.google.com/maps/search/?api=1&query=${detection.pilot_lat},${detection.pilot_long}" target="_blank">Pilot Location on Google Maps</a><br>`;
-  }
-  if (markerType === 'drone' || markerType === 'pilot') {
+  // For popups already for drone or pilot markers, use one set of buttons.
+  else if (markerType === 'drone' || markerType === 'pilot') {
+    var isLocked = (followLock.enabled && followLock.type === markerType && followLock.id === detection.mac);
+    var lockButton = `<button id="lock-${markerType}-${detection.mac}" onclick="lockMarker('${markerType}', '${detection.mac}')" style="background-color: ${isLocked ? 'green' : ''};">
+                      ${isLocked ? 'Locked on ' + markerType.charAt(0).toUpperCase() + markerType.slice(1) : 'Lock on ' + markerType.charAt(0).toUpperCase() + markerType.slice(1)}
+                    </button>`;
+    var unlockButton = `<button id="unlock-${markerType}-${detection.mac}" onclick="unlockMarker('${markerType}', '${detection.mac}')" style="background-color: ${isLocked ? '' : 'green'};">
+                      ${isLocked ? 'Unlock ' + markerType.charAt(0).toUpperCase() + markerType.slice(1) : 'Unlocked ' + markerType.charAt(0).toUpperCase() + markerType.slice(1)}
+                    </button>`;
     content += lockButton + unlockButton;
   }
   return content;
 }
 
 function lockMarker(markerType, id) {
+  // Always override any existing lock and set the new one.
   followLock = { type: markerType, id: id, enabled: true };
-  updateMarkerButtons(markerType, id);
+  updateMarkerButtons('drone', id);
+  updateMarkerButtons('pilot', id);
 }
 
 function unlockMarker(markerType, id) {
@@ -413,9 +432,9 @@ function updateMarkerButtons(markerType, id) {
   }
 }
 
-// Function to open an alias editing popup when clicking a list item.
+// Function to open an alias editing popup when clicking a MAC box.
 function openAliasPopup(mac) {
-  let detection = trackedPairs[mac] || {};
+  let detection = tracked_pairs[mac] || {};
   let latlng = null;
   if (droneMarkers[mac]) {
     latlng = droneMarkers[mac].getLatLng();
@@ -443,7 +462,7 @@ async function saveAlias(mac) {
     const data = await response.json();
     if (data.status === "ok") {
       updateAliases();
-      let detection = trackedPairs[mac] || {mac: mac};
+      let detection = tracked_pairs[mac] || {mac: mac};
       let content = generatePopupContent(detection, 'alias');
       L.popup().setContent(content).openOn(map);
     }
@@ -458,7 +477,7 @@ async function clearAlias(mac) {
     const data = await response.json();
     if (data.status === "ok") {
       updateAliases();
-      let detection = trackedPairs[mac] || {mac: mac};
+      let detection = tracked_pairs[mac] || {mac: mac};
       let content = generatePopupContent(detection, 'alias');
       L.popup().setContent(content).openOn(map);
     }
@@ -663,14 +682,18 @@ function updateComboList(data) {
     
     let detection = data[mac];
     if (detection && (currentTime - detection.last_update <= 300)) {
+      // Active drones: single click opens the alias/info popup.
       item.addEventListener("click", () => {
-        zoomToDrone(mac, detection);
-      });
-      item.addEventListener("dblclick", () => {
         openAliasPopup(mac);
       });
       activePlaceholder.appendChild(item);
     } else {
+      // Inactive drones:
+      // Single click brings up the popup with alias and details.
+      item.addEventListener("click", () => {
+         openAliasPopup(mac);
+      });
+      // Double click toggles the historical marker.
       item.addEventListener("dblclick", () => {
         if (historicalDrones[mac]) {
           delete historicalDrones[mac];
@@ -686,9 +709,6 @@ function updateComboList(data) {
           safeSetView([detection.lat, detection.long], 18);
         }
       });
-      item.addEventListener("click", () => {
-        zoomToDrone(mac, detection);
-      });
       inactivePlaceholder.appendChild(item);
     }
   });
@@ -698,7 +718,7 @@ async function updateData() {
   try {
     const response = await fetch('/api/detections');
     const data = await response.json();
-    window.trackedPairs = data;
+    window.tracked_pairs = data;
     const currentTime = Date.now() / 1000;
     for (const mac in data) {
       if (!persistentMACs.includes(mac)) {
