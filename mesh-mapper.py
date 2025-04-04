@@ -5,6 +5,7 @@ import serial.tools.list_ports
 import json
 import time
 import csv
+import os
 from datetime import datetime
 
 app = Flask(__name__)
@@ -33,6 +34,25 @@ with open(CSV_FILENAME, mode='w', newline='') as csvfile:
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
 
+# --- Alias Persistence ---
+ALIASES_FILE = "aliases.json"
+ALIASES = {}
+if os.path.exists(ALIASES_FILE):
+    try:
+        with open(ALIASES_FILE, "r") as f:
+            ALIASES = json.load(f)
+    except Exception as e:
+        print("Error loading aliases:", e)
+
+def save_aliases():
+    global ALIASES
+    try:
+        with open(ALIASES_FILE, "w") as f:
+            json.dump(ALIASES, f)
+    except Exception as e:
+        print("Error saving aliases:", e)
+
+# --- KML Generation ---
 def generate_kml():
     kml_lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -90,7 +110,7 @@ def update_detection(detection):
 # --- Global Follow Lock Variable ---
 followLock = {"type": None, "id": None, "enabled": False}
 
-# --- HTML Page with Layer Dropdown, Drone/Pilot Mapping, Serial Status, and Buttons ---
+# --- HTML Page ---
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -202,12 +222,19 @@ HTML_PAGE = '''
     }
     /* Custom styling for Leaflet zoom controls */
     .leaflet-control-zoom-in, .leaflet-control-zoom-out {
-      background-color: #333;
+      background-color: black;
       color: lime;
       border: 1px solid lime;
     }
     .leaflet-control-zoom-in:hover, .leaflet-control-zoom-out:hover {
       background-color: #222;
+    }
+    /* Styling for alias input */
+    input#aliasInput {
+      background-color: #222;
+      color: #FF00FF;
+      border: 1px solid #FF00FF;
+      padding: 3px;
     }
   </style>
 </head>
@@ -219,7 +246,7 @@ HTML_PAGE = '''
     <option value="osmStandard">OSM Standard</option>
     <option value="osmHumanitarian">OSM Humanitarian</option>
     <option value="cartoPositron">CartoDB Positron</option>
-    <option value="cartoDarkMatter">CartoDB Dark Matter</option>
+    <option value="cartoDarkMatter" selected>CartoDB Dark Matter</option>
     <option value="esriWorldImagery">Esri World Imagery</option>
     <option value="esriWorldTopo">Esri World TopoMap</option>
     <option value="esriDarkGray">Esri Dark Gray Canvas</option>
@@ -241,6 +268,21 @@ HTML_PAGE = '''
 <!-- Serial connection status display -->
 <div id="serialStatus">Disconnected</div>
 <script>
+// Global aliases variable (fetched from the server)
+var aliases = {};
+
+// Function to fetch aliases from the server.
+async function updateAliases() {
+  try {
+    const response = await fetch('/api/aliases');
+    aliases = await response.json();
+    // After updating aliases, update the list display.
+    updateComboList(trackedPairs);
+  } catch (error) {
+    console.error("Error fetching aliases:", error);
+  }
+}
+
 // New safeSetView: for initial zoom-in, always use zoom level 18.
 function safeSetView(latlng, zoom=18) {
   map.setView(latlng, zoom);
@@ -317,9 +359,21 @@ function generatePopupContent(detection, markerType) {
                       ${isLocked ? 'Unlock ' + markerType.charAt(0).toUpperCase() + markerType.slice(1) : 'Unlocked ' + markerType.charAt(0).toUpperCase() + markerType.slice(1)}
                     </button>`;
   let content = '';
+  // Always display MAC and alias in the popup.
+  let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
+  content += '<strong>ID:</strong> ' + aliasText + ' (MAC: ' + detection.mac + ')<br>';
+  // Display other fields.
   for (const key in detection) {
-    content += key + ': ' + detection[key] + '<br>';
+    if (key !== 'mac') {
+      content += key + ': ' + detection[key] + '<br>';
+    }
   }
+  // Append alias editor section with custom styling.
+  content += `<hr style="border: 1px solid lime;">
+              <label for="aliasInput">Alias:</label>
+              <input type="text" id="aliasInput" style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
+              <button onclick="saveAlias('${detection.mac}')">Save Alias</button>
+              <button onclick="clearAlias('${detection.mac}')">Clear Alias</button><br>`;
   if (detection.drone_lat && detection.drone_long && (detection.drone_lat != 0 || detection.drone_long != 0)) {
     content += `<a href="https://www.google.com/maps/search/?api=1&query=${detection.drone_lat},${detection.drone_long}" target="_blank">Drone Location on Google Maps</a><br>`;
   }
@@ -358,6 +412,60 @@ function updateMarkerButtons(markerType, id) {
   }
 }
 
+// Function to open an alias editing popup when clicking a list item.
+function openAliasPopup(mac) {
+  let detection = trackedPairs[mac] || {};
+  let latlng = null;
+  if (droneMarkers[mac]) {
+    latlng = droneMarkers[mac].getLatLng();
+  } else if (pilotMarkers[mac]) {
+    latlng = pilotMarkers[mac].getLatLng();
+  } else {
+    latlng = map.getCenter();
+  }
+  let content = generatePopupContent(Object.assign({mac: mac}, detection), 'alias');
+  L.popup({className: 'leaflet-popup-content-wrapper'})
+    .setLatLng(latlng)
+    .setContent(content)
+    .openOn(map);
+}
+
+// Functions to save and clear alias via server API.
+async function saveAlias(mac) {
+  let alias = document.getElementById("aliasInput").value;
+  try {
+    const response = await fetch('/api/set_alias', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mac: mac, alias: alias})
+    });
+    const data = await response.json();
+    if (data.status === "ok") {
+      updateAliases();
+      let detection = trackedPairs[mac] || {mac: mac};
+      let content = generatePopupContent(detection, 'alias');
+      L.popup().setContent(content).openOn(map);
+    }
+  } catch (error) {
+    console.error("Error saving alias:", error);
+  }
+}
+
+async function clearAlias(mac) {
+  try {
+    const response = await fetch('/api/clear_alias/' + mac, {method: 'POST'});
+    const data = await response.json();
+    if (data.status === "ok") {
+      updateAliases();
+      let detection = trackedPairs[mac] || {mac: mac};
+      let content = generatePopupContent(detection, 'alias');
+      L.popup().setContent(content).openOn(map);
+    }
+  } catch (error) {
+    console.error("Error clearing alias:", error);
+  }
+}
+
 // --- Tile Layers Definition ---
 const osmStandard = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap contributors',
@@ -393,10 +501,11 @@ const openTopoMap = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.pn
 });
 
 // --- Initialize the Map ---
+// Default to CartoDB Dark Matter.
 const map = L.map('map', {
   center: [0, 0],
   zoom: 2,
-  layers: [osmStandard]
+  layers: [cartoDarkMatter]
 });
 
 // --- Basemap Selection Handling ---
@@ -463,7 +572,6 @@ if (navigator.geolocation) {
       observerMarker.setLatLng([lat, lng]);
     }
     if (followLock.enabled && followLock.type === 'observer') {
-      // When locked, follow at the current zoom level.
       map.setView([lat, lng], map.getZoom());
     }
   }, function(error) {
@@ -518,7 +626,6 @@ function showHistoricalDrone(mac, detection) {
       pilotMarkers[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
       pilotMarkers[mac].setPopupContent(generatePopupContent(detection, 'pilot'));
     }
-    // Added pilot circle for historical drones
     if (!pilotCircles[mac]) {
       pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
                             .addTo(map);
@@ -546,23 +653,23 @@ function updateComboList(data) {
   inactivePlaceholder.innerHTML = "";
   const currentTime = Date.now() / 1000;
   persistentMACs.forEach(mac => {
-    // Create the list item.
     const item = document.createElement("div");
-    item.textContent = mac;
+    item.textContent = aliases[mac] ? aliases[mac] : mac;
     const color = colorFromMac(mac);
     item.style.borderColor = color;
     item.style.color = color;
     item.className = "drone-item";
     
     let detection = data[mac];
-    // Active drones: detected within staleThreshold.
     if (detection && (currentTime - detection.last_update <= 300)) {
       item.addEventListener("click", () => {
         zoomToDrone(mac, detection);
       });
+      item.addEventListener("dblclick", () => {
+        openAliasPopup(mac);
+      });
       activePlaceholder.appendChild(item);
     } else {
-      // Inactive drone: double-click toggles historical view.
       item.addEventListener("dblclick", () => {
         if (historicalDrones[mac]) {
           delete historicalDrones[mac];
@@ -575,9 +682,11 @@ function updateComboList(data) {
           historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
           showHistoricalDrone(mac, historicalDrones[mac]);
           item.classList.add("selected");
-          // Zoom to the historical drone's location initially.
           safeSetView([detection.lat, detection.long], 18);
         }
+      });
+      item.addEventListener("click", () => {
+        zoomToDrone(mac, detection);
       });
       inactivePlaceholder.appendChild(item);
     }
@@ -588,6 +697,7 @@ async function updateData() {
   try {
     const response = await fetch('/api/detections');
     const data = await response.json();
+    window.trackedPairs = data;
     const currentTime = Date.now() / 1000;
     for (const mac in data) {
       if (!persistentMACs.includes(mac)) {
@@ -706,8 +816,8 @@ async function updateData() {
         }
       }
     }
-    // Call updateComboList once after processing all drones.
     updateComboList(data);
+    updateAliases();
   } catch (error) {
     console.error("Error fetching detection data:", error);
   }
@@ -756,7 +866,6 @@ function updateLockFollow() {
     }
   }
 }
-// Call updateLockFollow at a faster interval (every 200 ms).
 setInterval(updateLockFollow, 200);
 
 document.getElementById("filterToggle").addEventListener("click", function() {
@@ -898,6 +1007,29 @@ def reactivate(mac):
         return jsonify({"status": "reactivated", "mac": mac})
     else:
         return jsonify({"status": "error", "message": "MAC not found"}), 404
+
+@app.route('/api/aliases', methods=['GET'])
+def api_aliases():
+    return jsonify(ALIASES)
+
+@app.route('/api/set_alias', methods=['POST'])
+def api_set_alias():
+    data = request.get_json()
+    mac = data.get("mac")
+    alias = data.get("alias")
+    if mac:
+        ALIASES[mac] = alias
+        save_aliases()
+        return jsonify({"status": "ok"})
+    return jsonify({"status": "error", "message": "MAC missing"}), 400
+
+@app.route('/api/clear_alias/<mac>', methods=['POST'])
+def api_clear_alias(mac):
+    if mac in ALIASES:
+        del ALIASES[mac]
+        save_aliases()
+        return jsonify({"status": "ok"})
+    return jsonify({"status": "error", "message": "MAC not found"}), 404
 
 @app.route('/api/serial_status', methods=['GET'])
 def api_serial_status():
