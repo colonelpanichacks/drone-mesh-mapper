@@ -699,15 +699,7 @@ function updateComboList(data) {
       });
       activePlaceholder.appendChild(item);
     } else {
-      // Inactive drones:
-      // Single click opens the alias popup and zooms to the drone location.
-      item.addEventListener("click", () => {
-         openAliasPopup(mac);
-         if (detection && detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
-             safeSetView([detection.lat, detection.long], 18);
-         }
-      });
-      // Double click toggles the historical drone/pilot markers and closes any open popup.
+      // Inactive drones: only a double click triggers the toggle.
       item.addEventListener("dblclick", () => {
          if (historicalDrones[mac]) {
              // Markers are displayed; remove them and close popup.
@@ -722,7 +714,9 @@ function updateComboList(data) {
              showHistoricalDrone(mac, historicalDrones[mac]);
              item.classList.add("selected");
              openAliasPopup(mac);
-             safeSetView([detection.lat, detection.long], 18);
+             if (detection && detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
+                 safeSetView([detection.lat, detection.long], 18);
+             }
          }
       });
       inactivePlaceholder.appendChild(item);
