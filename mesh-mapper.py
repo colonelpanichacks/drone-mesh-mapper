@@ -87,14 +87,13 @@ def update_detection(detection):
     mac = detection.get("mac")
     if not mac:
         return
-    # Map incoming fields.
-    detection["lat"] = detection.get("drone_lat", 0)
-    detection["long"] = detection.get("drone_long", 0)
-    detection["altitude"] = detection.get("drone_altitude", 0)
+    # Map incoming fields using only drone_lat, drone_long, and drone_altitude.
+    detection["drone_lat"] = detection.get("drone_lat", 0)
+    detection["drone_long"] = detection.get("drone_long", 0)
+    detection["drone_altitude"] = detection.get("drone_altitude", 0)
     detection["pilot_lat"] = detection.get("pilot_lat", 0)
     detection["pilot_long"] = detection.get("pilot_long", 0)
     detection["last_update"] = time.time()
-    # basic_id is saved as is if provided
     tracked_pairs[mac] = detection
     detection_history.append(detection.copy())
     print("Updated tracked_pairs:", tracked_pairs)
@@ -370,25 +369,29 @@ function generatePopupContent(detection, markerType) {
     content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div><br>';
   }
   
-  // Display all other detection fields (except mac, basic_id, last_update).
+  // Display all other detection fields except unwanted ones.
   for (const key in detection) {
-    if (key !== 'mac' && key !== 'basic_id' && key !== 'last_update') {
+    if (['mac', 'basic_id', 'last_update', 'userLocked', 'lockTime'].indexOf(key) === -1) {
       content += key + ': ' + detection[key] + '<br>';
     }
   }
   
-  // Always include both Google Maps links (if coordinates exist).
-  if (detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
-    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.lat + ',' + detection.long + '">View Drone on Google Maps</a><br>';
+  // Always include both Google Maps links using drone_lat and drone_long.
+  if (detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
+    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' 
+             + detection.drone_lat + ',' + detection.drone_long + '">View Drone on Google Maps</a><br>';
   }
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
-    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.pilot_lat + ',' + detection.pilot_long + '">View Pilot on Google Maps</a><br>';
+    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' 
+             + detection.pilot_lat + ',' + detection.pilot_long + '">View Pilot on Google Maps</a><br>';
   }
   
   // Append alias editor section.
   content += `<hr style="border: 1px solid lime;">
               <label for="aliasInput">Alias:</label>
-              <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
+              <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" 
+                     style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" 
+                     value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
               <button onclick="saveAlias('${detection.mac}')">Save Alias</button>
               <button onclick="clearAlias('${detection.mac}')">Clear Alias</button><br>`;
   
@@ -397,17 +400,21 @@ function generatePopupContent(detection, markerType) {
   
   // Tracking options section.
   var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
-  var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" style="background-color: ${isDroneLocked ? 'green' : ''};">
+  var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" 
+                      style="background-color: ${isDroneLocked ? 'green' : ''};">
                       ${isDroneLocked ? 'Locked on Drone' : 'Lock on Drone'}
                     </button>`;
-  var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" style="background-color: ${isDroneLocked ? '' : 'green'};">
+  var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" 
+                      style="background-color: ${isDroneLocked ? '' : 'green'};">
                       ${isDroneLocked ? 'Unlock Drone' : 'Unlocked Drone'}
                     </button>`;
   var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
-  var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" style="background-color: ${isPilotLocked ? 'green' : ''};">
+  var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" 
+                      style="background-color: ${isPilotLocked ? 'green' : ''};">
                       ${isPilotLocked ? 'Locked on Pilot' : 'Lock on Pilot'}
                     </button>`;
-  var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" style="background-color: ${isPilotLocked ? '' : 'green'};">
+  var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" 
+                      style="background-color: ${isPilotLocked ? '' : 'green'};">
                       ${isPilotLocked ? 'Unlock Pilot' : 'Unlocked Pilot'}
                     </button>`;
   content += `${droneLockButton} ${droneUnlockButton} <br>
@@ -435,11 +442,13 @@ function updateMarkerButtons(markerType, id) {
   var unlockBtn = document.getElementById("unlock-" + markerType + "-" + id);
   if(lockBtn) {
     lockBtn.style.backgroundColor = isLocked ? "green" : "";
-    lockBtn.textContent = isLocked ? "Locked on " + markerType.charAt(0).toUpperCase() + markerType.slice(1) : "Lock on " + markerType.charAt(0).toUpperCase() + markerType.slice(1);
+    lockBtn.textContent = isLocked ? "Locked on " + markerType.charAt(0).toUpperCase() + markerType.slice(1) 
+                                   : "Lock on " + markerType.charAt(0).toUpperCase() + markerType.slice(1);
   }
   if(unlockBtn) {
     unlockBtn.style.backgroundColor = isLocked ? "" : "green";
-    unlockBtn.textContent = isLocked ? "Unlock " + markerType.charAt(0).toUpperCase() + markerType.slice(1) : "Unlocked " + markerType.charAt(0).toUpperCase() + markerType.slice(1);
+    unlockBtn.textContent = isLocked ? "Unlock " + markerType.charAt(0).toUpperCase() + markerType.slice(1) 
+                                     : "Unlocked " + markerType.charAt(0).toUpperCase() + markerType.slice(1);
   }
 }
 
@@ -614,38 +623,41 @@ if (navigator.geolocation) {
 
 // --- Functions to Zoom and Display Historical Drones ---
 function zoomToDrone(mac, detection) {
-  if (detection && detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
-    safeSetView([detection.lat, detection.long], 18);
+  if (detection && detection.drone_lat && detection.drone_long &&
+      detection.drone_lat != 0 && detection.drone_long != 0) {
+    safeSetView([detection.drone_lat, detection.drone_long], 18);
   }
 }
 
 function showHistoricalDrone(mac, detection) {
   const color = colorFromMac(mac);
   if (!droneMarkers[mac]) {
-    droneMarkers[mac] = L.marker([detection.lat, detection.long], {icon: createIcon('🛸', color)})
+    droneMarkers[mac] = L.marker([detection.drone_lat, detection.drone_long], {icon: createIcon('🛸', color)})
                            .bindPopup(generatePopupContent(detection, 'drone'))
                            .addTo(map)
                            .on('click', function(){
                               safeSetView(this.getLatLng(), 18);
                            });
   } else {
-    droneMarkers[mac].setLatLng([detection.lat, detection.long]);
+    droneMarkers[mac].setLatLng([detection.drone_lat, detection.drone_long]);
     droneMarkers[mac].setPopupContent(generatePopupContent(detection, 'drone'));
   }
   if (!droneCircles[mac]) {
-    droneCircles[mac] = L.circleMarker([detection.lat, detection.long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+    droneCircles[mac] = L.circleMarker([detection.drone_lat, detection.drone_long],
+                                       {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
                            .addTo(map);
   } else {
-    droneCircles[mac].setLatLng([detection.lat, detection.long]);
+    droneCircles[mac].setLatLng([detection.drone_lat, detection.drone_long]);
   }
   if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
   const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
-  if (!lastDrone || lastDrone[0] !== detection.lat || lastDrone[1] !== detection.long) {
-    dronePathCoords[mac].push([detection.lat, detection.long]);
+  if (!lastDrone || lastDrone[0] !== detection.drone_lat || lastDrone[1] !== detection.drone_long) {
+    dronePathCoords[mac].push([detection.drone_lat, detection.drone_long]);
   }
   if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
   dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
-  if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
+  if (detection.pilot_lat && detection.pilot_long &&
+      detection.pilot_lat != 0 && detection.pilot_long != 0) {
     if (!pilotMarkers[mac]) {
       pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {icon: createIcon('👤', color)})
                              .bindPopup(generatePopupContent(detection, 'pilot'))
@@ -658,7 +670,8 @@ function showHistoricalDrone(mac, detection) {
       pilotMarkers[mac].setPopupContent(generatePopupContent(detection, 'pilot'));
     }
     if (!pilotCircles[mac]) {
-      pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+      pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long],
+                                          {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
                             .addTo(map);
     } else {
       pilotCircles[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
@@ -714,8 +727,9 @@ function updateComboList(data) {
              showHistoricalDrone(mac, historicalDrones[mac]);
              item.classList.add("selected");
              openAliasPopup(mac);
-             if (detection && detection.lat && detection.long && detection.lat != 0 && detection.long != 0) {
-                 safeSetView([detection.lat, detection.long], 18);
+             if (detection && detection.drone_lat && detection.drone_long &&
+                 detection.drone_lat != 0 && detection.drone_long != 0) {
+                 safeSetView([detection.drone_lat, detection.drone_long], 18);
              }
          }
       });
@@ -761,7 +775,7 @@ async function updateData() {
         delete pilotPathCoords[mac];
         continue;
       }
-      const droneLat = det.lat, droneLng = det.long;
+      const droneLat = det.drone_lat, droneLng = det.drone_long;
       const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
       const validDrone = (droneLat !== 0 && droneLng !== 0);
       const validPilot = (pilotLat !== 0 && pilotLng !== 0);
@@ -788,7 +802,8 @@ async function updateData() {
         if (droneCircles[mac]) {
           droneCircles[mac].setLatLng([droneLat, droneLng]);
         } else {
-          droneCircles[mac] = L.circleMarker([droneLat, droneLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+          droneCircles[mac] = L.circleMarker([droneLat, droneLng],
+                                             {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
                               .addTo(map);
         }
         if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
@@ -802,12 +817,9 @@ async function updateData() {
           if (droneBroadcastRings[mac]) {
             droneBroadcastRings[mac].setLatLng([droneLat, droneLng]);
           } else {
-            droneBroadcastRings[mac] = L.circleMarker([droneLat, droneLng], {
-              radius: 16,
-              color: "lime",
-              fill: false,
-              weight: 3
-            }).addTo(map);
+            droneBroadcastRings[mac] = L.circleMarker([droneLat, droneLng],
+                                                       {radius: 16, color: "lime", fill: false, weight: 3})
+                                        .addTo(map);
           }
         } else {
           if (droneBroadcastRings[mac]) {
@@ -836,7 +848,8 @@ async function updateData() {
         if (pilotCircles[mac]) {
           pilotCircles[mac].setLatLng([pilotLat, pilotLng]);
         } else {
-          pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+          pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng],
+                                             {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
                               .addTo(map);
         }
         if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
@@ -1014,7 +1027,7 @@ def post_detection():
 def api_detections_history():
     features = []
     for det in detection_history:
-        if det.get("lat", 0) == 0 and det.get("long", 0) == 0:
+        if det.get("drone_lat", 0) == 0 and det.get("drone_long", 0) == 0:
             continue
         features.append({
             "type": "Feature",
@@ -1026,7 +1039,7 @@ def api_detections_history():
             },
             "geometry": {
                 "type": "Point",
-                "coordinates": [det.get("long"), det.get("lat")]
+                "coordinates": [det.get("drone_long"), det.get("drone_lat")]
             }
         })
     return jsonify({
