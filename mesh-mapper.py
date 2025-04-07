@@ -294,6 +294,9 @@ var aliases = {};
 // Global color override object.
 var colorOverrides = {};
 
+// Global stale threshold (in seconds) for active combos.
+const STALE_THRESHOLD = 300;
+
 // Function to fetch aliases from the server.
 async function updateAliases() {
   try {
@@ -682,7 +685,7 @@ function showHistoricalDrone(mac, detection) {
   }
   if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
   const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
-  if (!lastDrone || lastDrone[0] !== detection.drone_lat || lastDrone[1] !== detection.drone_long) {
+  if (!lastDrone || lastDrone[0] != detection.drone_lat || lastDrone[1] != detection.drone_long) {
     dronePathCoords[mac].push([detection.drone_lat, detection.drone_long]);
   }
   if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
@@ -847,7 +850,7 @@ async function updateData() {
         }
         if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
         const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
-        if (!lastDrone || lastDrone[0] !== droneLat || lastDrone[1] !== droneLng) {
+        if (!lastDrone || lastDrone[0] != droneLat || lastDrone[1] != droneLng) {
           dronePathCoords[mac].push([droneLat, droneLng]);
         }
         if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
@@ -893,7 +896,7 @@ async function updateData() {
         }
         if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
         const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
-        if (!lastPilot || lastPilot[0] !== pilotLat || lastPilot[1] !== pilotLng) {
+        if (!lastPilot || lastPilot[0] != pilotLat || lastPilot[1] != pilotLng) {
           pilotPathCoords[mac].push([pilotLat, pilotLng]);
         }
         if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
@@ -972,12 +975,23 @@ async function restorePaths() {
     const response = await fetch('/api/paths');
     const data = await response.json();
     for (const mac in data.dronePaths) {
+      // Only update the path if the combo is active (based on last_update) or has been manually restored.
+      let isActive = false;
+      if (tracked_pairs[mac] && ((Date.now()/1000) - tracked_pairs[mac].last_update) <= STALE_THRESHOLD) {
+        isActive = true;
+      }
+      if (!isActive && !historicalDrones[mac]) continue;
       dronePathCoords[mac] = data.dronePaths[mac];
       if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
       const color = get_color_for_mac(mac);
       dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
     }
     for (const mac in data.pilotPaths) {
+      let isActive = false;
+      if (tracked_pairs[mac] && ((Date.now()/1000) - tracked_pairs[mac].last_update) <= STALE_THRESHOLD) {
+        isActive = true;
+      }
+      if (!isActive && !historicalDrones[mac]) continue;
       pilotPathCoords[mac] = data.pilotPaths[mac];
       if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
       const color = get_color_for_mac(mac);
@@ -987,7 +1001,7 @@ async function restorePaths() {
     console.error("Error restoring paths:", error);
   }
 }
-setInterval(restorePaths, 30000);
+setInterval(restorePaths, 1000);
 restorePaths();
 
 // --- New: Update Color Function --- 
