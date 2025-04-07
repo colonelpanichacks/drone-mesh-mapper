@@ -114,8 +114,21 @@ def update_detection(detection):
     generate_kml()
 
 # --- Global Follow Lock Variable ---
-# followLock now enforces that only one marker type (drone or pilot) is locked at any given time.
 followLock = {"type": None, "id": None, "enabled": False}
+
+# --- Global Color Overrides --- 
+# This stores any user-selected hue (0-360) for a given MAC address.
+colorOverrides = {}
+
+# Helper function: returns the override color if set, otherwise computes a default from MAC.
+def get_color_for_mac(mac):
+    if mac in colorOverrides:
+        return f"hsl({colorOverrides[mac]}, 70%, 50%)"
+    # Default color computed from MAC hash.
+    hash_val = 0
+    for ch in mac:
+        hash_val = ord(ch) + ((hash_val << 5) - hash_val)
+    return f"hsl({abs(hash_val) % 360}, 70%, 50%)"
 
 # --- HTML Page ---
 HTML_PAGE = '''
@@ -278,6 +291,9 @@ HTML_PAGE = '''
 // Global aliases variable (fetched from the server)
 var aliases = {};
 
+// Global color override object.
+var colorOverrides = {};
+
 // Function to fetch aliases from the server.
 async function updateAliases() {
   try {
@@ -290,13 +306,12 @@ async function updateAliases() {
   }
 }
 
-// New safeSetView: for initial zoom-in, always use zoom level 18.
+// New safeSetView: for initial zoom-in, always use zoom level 18 (used for observer)
 function safeSetView(latlng, zoom=18) {
   map.setView(latlng, zoom);
 }
 
 // Global followLock variable shared among all markers.
-// Only one type (drone, pilot, observer) can be locked at any one time.
 var followLock = { type: null, id: null, enabled: false };
 
 // --- Observer Popup Functions ---
@@ -329,7 +344,7 @@ function updateObserverEmoji() {
   var select = document.getElementById("observerEmoji");
   var selectedEmoji = select.value;
   if(observerMarker) {
-    observerMarker.setIcon(createIcon(selectedEmoji, 'blue'));
+    observerMarker.setIcon(createIcon('😎', 'blue'));
   }
 }
 
@@ -419,6 +434,21 @@ function generatePopupContent(detection, markerType) {
                     </button>`;
   content += `${droneLockButton} ${droneUnlockButton} <br>
                 ${pilotLockButton} ${pilotUnlockButton}`;
+  
+  // --- New: Color Slider (Rainbow) ---
+  // Determine default hue: if override exists use it, otherwise compute from MAC.
+  let defaultHue = colorOverrides[detection.mac] !== undefined ? colorOverrides[detection.mac] : (function(){
+      let hash = 0;
+      for (let i = 0; i < detection.mac.length; i++){
+          hash = detection.mac.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      return Math.abs(hash) % 360;
+  })();
+  content += `<div style="margin-top:10px;">
+    <label for="colorSlider_${detection.mac}" style="display:block; color:lime;">Color:</label>
+    <input type="range" id="colorSlider_${detection.mac}" min="0" max="360" value="${defaultHue}" style="width:100%; background: linear-gradient(to right, red, orange, yellow, green, blue, indigo, violet);" onchange="updateColor('${detection.mac}', this.value)">
+  </div>`;
+  
   return content;
 }
 
@@ -630,13 +660,14 @@ function zoomToDrone(mac, detection) {
 }
 
 function showHistoricalDrone(mac, detection) {
-  const color = colorFromMac(mac);
+  const color = get_color_for_mac(mac);
   if (!droneMarkers[mac]) {
     droneMarkers[mac] = L.marker([detection.drone_lat, detection.drone_long], {icon: createIcon('🛸', color)})
                            .bindPopup(generatePopupContent(detection, 'drone'))
                            .addTo(map)
                            .on('click', function(){
-                              safeSetView(this.getLatLng(), 18);
+                              // Use current zoom level to preserve user zoom.
+                              map.setView(this.getLatLng(), map.getZoom());
                            });
   } else {
     droneMarkers[mac].setLatLng([detection.drone_lat, detection.drone_long]);
@@ -663,7 +694,7 @@ function showHistoricalDrone(mac, detection) {
                              .bindPopup(generatePopupContent(detection, 'pilot'))
                              .addTo(map)
                              .on('click', function(){
-                                 safeSetView(this.getLatLng(), 18);
+                                 map.setView(this.getLatLng(), map.getZoom());
                              });
     } else {
       pilotMarkers[mac].setLatLng([detection.pilot_lat, detection.pilot_long]);
@@ -689,6 +720,13 @@ function colorFromMac(mac) {
   return 'hsl(' + h + ', 70%, 50%)';
 }
 
+function get_color_for_mac(mac) {
+  if (colorOverrides.hasOwnProperty(mac)) {
+    return "hsl(" + colorOverrides[mac] + ", 70%, 50%)";
+  }
+  return colorFromMac(mac);
+}
+
 // Update the active/inactive drone lists.
 function updateComboList(data) {
   const activePlaceholder = document.getElementById("activePlaceholder");
@@ -699,7 +737,8 @@ function updateComboList(data) {
   persistentMACs.forEach(mac => {
     const item = document.createElement("div");
     item.textContent = aliases[mac] ? aliases[mac] : mac;
-    const color = colorFromMac(mac);
+    // Use override color if set.
+    const color = get_color_for_mac(mac);
     item.style.borderColor = color;
     item.style.color = color;
     item.className = "drone-item";
@@ -712,17 +751,17 @@ function updateComboList(data) {
       });
       activePlaceholder.appendChild(item);
     } else {
-      // Inactive drones: only a double click triggers the toggle.
-      item.addEventListener("dblclick", () => {
+      // Inactive drones: double click toggles markers.
+      item.addEventListener("dblclick", async () => {
+         // Force an immediate update of historical paths.
+         await restorePaths();
          if (historicalDrones[mac]) {
-             // Markers are displayed; remove them and close popup.
              delete historicalDrones[mac];
              if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
              if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
              item.classList.remove("selected");
              map.closePopup();
          } else {
-             // Markers are not displayed; show them and open popup.
              historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
              showHistoricalDrone(mac, historicalDrones[mac]);
              item.classList.add("selected");
@@ -780,7 +819,7 @@ async function updateData() {
       const validDrone = (droneLat !== 0 && droneLng !== 0);
       const validPilot = (pilotLat !== 0 && pilotLng !== 0);
       if (!validDrone && !validPilot) continue;
-      const color = colorFromMac(mac);
+      const color = get_color_for_mac(mac);
       if (!firstDetectionZoomed && validDrone) {
         firstDetectionZoomed = true;
         safeSetView([droneLat, droneLng], 18);
@@ -796,7 +835,7 @@ async function updateData() {
                                 .bindPopup(generatePopupContent(det, 'drone'))
                                 .addTo(map)
                                 .on('click', function(){
-                                    safeSetView(this.getLatLng(), 18);
+                                    map.setView(this.getLatLng(), map.getZoom());
                                 });
         }
         if (droneCircles[mac]) {
@@ -842,7 +881,7 @@ async function updateData() {
                                 .bindPopup(generatePopupContent(det, 'pilot'))
                                 .addTo(map)
                                 .on('click', function(){
-                                    safeSetView(this.getLatLng(), 18);
+                                    map.setView(this.getLatLng(), map.getZoom());
                                 });
         }
         if (pilotCircles[mac]) {
@@ -926,6 +965,68 @@ document.getElementById("filterToggle").addEventListener("click", function() {
     this.textContent = "[+]";
   }
 });
+
+// --- New: Restore Persistent Paths on Page Load --- 
+async function restorePaths() {
+  try {
+    const response = await fetch('/api/paths');
+    const data = await response.json();
+    for (const mac in data.dronePaths) {
+      dronePathCoords[mac] = data.dronePaths[mac];
+      if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
+      const color = get_color_for_mac(mac);
+      dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
+    }
+    for (const mac in data.pilotPaths) {
+      pilotPathCoords[mac] = data.pilotPaths[mac];
+      if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
+      const color = get_color_for_mac(mac);
+      pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
+    }
+  } catch (error) {
+    console.error("Error restoring paths:", error);
+  }
+}
+setInterval(restorePaths, 30000);
+restorePaths();
+
+// --- New: Update Color Function --- 
+function updateColor(mac, hue) {
+  hue = parseInt(hue);
+  colorOverrides[mac] = hue;
+  var newColor = "hsl(" + hue + ", 70%, 50%)";
+  // Update marker icons.
+  if (droneMarkers[mac]) {
+    droneMarkers[mac].setIcon(createIcon('🛸', newColor));
+    droneMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'drone'));
+  }
+  if (pilotMarkers[mac]) {
+    pilotMarkers[mac].setIcon(createIcon('👤', newColor));
+    pilotMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'pilot'));
+  }
+  // Update circles.
+  if (droneCircles[mac]) {
+    droneCircles[mac].setStyle({ color: newColor, fillColor: newColor });
+  }
+  if (pilotCircles[mac]) {
+    pilotCircles[mac].setStyle({ color: newColor, fillColor: newColor });
+  }
+  // Update polylines.
+  if (dronePolylines[mac]) {
+    dronePolylines[mac].setStyle({ color: newColor });
+  }
+  if (pilotPolylines[mac]) {
+    pilotPolylines[mac].setStyle({ color: newColor });
+  }
+  // Update the active/inactive list entry if present.
+  var listItems = document.getElementsByClassName("drone-item");
+  for (var i = 0; i < listItems.length; i++) {
+    if (listItems[i].textContent.includes(mac)) {
+      listItems[i].style.borderColor = newColor;
+      listItems[i].style.color = newColor;
+    }
+  }
+}
 </script>
 </body>
 </html>
@@ -1082,6 +1183,39 @@ def api_clear_alias(mac):
 @app.route('/api/serial_status', methods=['GET'])
 def api_serial_status():
     return jsonify({"connected": serial_connected})
+
+# --- New: API endpoint to return persistent paths ---
+@app.route('/api/paths', methods=['GET'])
+def api_paths():
+    drone_paths = {}
+    pilot_paths = {}
+    for det in detection_history:
+        mac = det.get("mac")
+        if not mac:
+            continue
+        # Drone coordinates
+        d_lat = det.get("drone_lat", 0)
+        d_long = det.get("drone_long", 0)
+        if d_lat != 0 and d_long != 0:
+            drone_paths.setdefault(mac, []).append([d_lat, d_long])
+        # Pilot coordinates
+        p_lat = det.get("pilot_lat", 0)
+        p_long = det.get("pilot_long", 0)
+        if p_lat != 0 and p_long != 0:
+            pilot_paths.setdefault(mac, []).append([p_lat, p_long])
+    def dedupe(path):
+        if not path:
+            return path
+        new_path = [path[0]]
+        for point in path[1:]:
+            if point != new_path[-1]:
+                new_path.append(point)
+        return new_path
+    for mac in drone_paths:
+        drone_paths[mac] = dedupe(drone_paths[mac])
+    for mac in pilot_paths:
+        pilot_paths[mac] = dedupe(pilot_paths[mac])
+    return jsonify({"dronePaths": drone_paths, "pilotPaths": pilot_paths})
 
 def serial_reader():
     global serial_connected
