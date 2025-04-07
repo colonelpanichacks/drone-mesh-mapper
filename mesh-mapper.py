@@ -296,12 +296,15 @@ var colorOverrides = {};
 // Global stale threshold (in seconds) for active combos.
 const STALE_THRESHOLD = 300;
 
+// Global object to store combo list DOM elements by MAC.
+var comboListItems = {};
+
 // Function to fetch aliases from the server.
 async function updateAliases() {
   try {
     const response = await fetch('/api/aliases');
     aliases = await response.json();
-    updateComboList(tracked_pairs);
+    updateComboList(window.tracked_pairs);
   } catch (error) {
     console.error("Error fetching aliases:", error);
   }
@@ -470,7 +473,7 @@ function updateMarkerButtons(markerType, id) {
 }
 
 function openAliasPopup(mac) {
-  let detection = tracked_pairs[mac] || {};
+  let detection = window.tracked_pairs[mac] || {};
   let latlng = null;
   if (droneMarkers[mac]) {
     latlng = droneMarkers[mac].getLatLng();
@@ -497,7 +500,7 @@ async function saveAlias(mac) {
     const data = await response.json();
     if (data.status === "ok") {
       updateAliases();
-      let detection = tracked_pairs[mac] || {mac: mac};
+      let detection = window.tracked_pairs[mac] || {mac: mac};
       let content = generatePopupContent(detection, 'alias');
       L.popup().setContent(content).openOn(map);
     }
@@ -512,7 +515,7 @@ async function clearAlias(mac) {
     const data = await response.json();
     if (data.status === "ok") {
       updateAliases();
-      let detection = tracked_pairs[mac] || {mac: mac};
+      let detection = window.tracked_pairs[mac] || {mac: mac};
       let content = generatePopupContent(detection, 'alias');
       L.popup().setContent(content).openOn(map);
     }
@@ -585,6 +588,7 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   }, 500);
 });
 
+// Global persistent MACs array.
 let persistentMACs = [];
 const droneMarkers = {};
 const pilotMarkers = {};
@@ -702,27 +706,21 @@ function get_color_for_mac(mac) {
   return colorFromMac(mac);
 }
 
+// Modified updateComboList: only attach a double-click event to toggle restoration; no single click event.
 function updateComboList(data) {
   const activePlaceholder = document.getElementById("activePlaceholder");
   const inactivePlaceholder = document.getElementById("inactivePlaceholder");
-  activePlaceholder.innerHTML = "";
-  inactivePlaceholder.innerHTML = "";
   const currentTime = Date.now() / 1000;
+  
   persistentMACs.forEach(mac => {
-    const item = document.createElement("div");
-    item.textContent = aliases[mac] ? aliases[mac] : mac;
-    const color = get_color_for_mac(mac);
-    item.style.borderColor = color;
-    item.style.color = color;
-    item.className = "drone-item";
-    
     let detection = data[mac];
-    if (detection && (currentTime - detection.last_update <= 300)) {
-      item.addEventListener("click", () => {
-        openAliasPopup(mac);
-      });
-      activePlaceholder.appendChild(item);
-    } else {
+    let isActive = detection && ((currentTime - detection.last_update) <= 300);
+    let item = comboListItems[mac];
+    if (!item) {
+      item = document.createElement("div");
+      comboListItems[mac] = item;
+      item.className = "drone-item";
+      // Attach only the double-click event.
       item.addEventListener("dblclick", async () => {
          await restorePaths();
          if (historicalDrones[mac]) {
@@ -742,7 +740,21 @@ function updateComboList(data) {
              }
          }
       });
-      inactivePlaceholder.appendChild(item);
+    }
+    // Update text and style.
+    item.textContent = aliases[mac] ? aliases[mac] : mac;
+    const color = get_color_for_mac(mac);
+    item.style.borderColor = color;
+    item.style.color = color;
+    // Place item in correct container.
+    if (isActive) {
+      if (item.parentNode !== activePlaceholder) {
+          activePlaceholder.appendChild(item);
+      }
+    } else {
+      if (item.parentNode !== inactivePlaceholder) {
+          inactivePlaceholder.appendChild(item);
+      }
     }
   });
 }
