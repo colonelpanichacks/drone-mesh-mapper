@@ -120,14 +120,9 @@ followLock = {"type": None, "id": None, "enabled": False}
 # This stores any user-selected hue (0-360) for a given MAC address.
 colorOverrides = {}
 
-# Helper function: returns the override color if set, otherwise computes a default from MAC.
-def get_color_for_mac(mac):
-    if mac in colorOverrides:
-        return f"hsl({colorOverrides[mac]}, 70%, 50%)"
-    hash_val = 0
-    for ch in mac:
-        hash_val = ord(ch) + ((hash_val << 5) - hash_val)
-    return f"hsl({abs(hash_val) % 360}, 70%, 50%)"
+# --- Client-Side Persistence for Colors and Historical Drones ---
+# The following JavaScript modifications (in the HTML_PAGE below) load any persisted colorOverrides and historicalDrones from localStorage.
+# When colors are updated or historical toggles occur, they are saved to localStorage.
 
 # --- HTML Page ---
 HTML_PAGE = '''
@@ -287,11 +282,46 @@ HTML_PAGE = '''
 <!-- Serial connection status display -->
 <div id="serialStatus">Disconnected</div>
 <script>
+// Load persisted colorOverrides and historicalDrones from localStorage
+if (localStorage.getItem('colorOverrides')) {
+  try {
+    window.colorOverrides = JSON.parse(localStorage.getItem('colorOverrides'));
+  } catch(e) {
+    window.colorOverrides = {};
+  }
+} else {
+  window.colorOverrides = {};
+}
+
+if (localStorage.getItem('historicalDrones')) {
+  try {
+    window.historicalDrones = JSON.parse(localStorage.getItem('historicalDrones'));
+  } catch(e) {
+    window.historicalDrones = {};
+  }
+} else {
+  window.historicalDrones = {};
+}
+
+// Retrieve persisted map state: center and zoom
+let persistedCenter = localStorage.getItem('mapCenter');
+let persistedZoom = localStorage.getItem('mapZoom');
+if (persistedCenter) {
+  try {
+    persistedCenter = JSON.parse(persistedCenter);
+  } catch(e) {
+    persistedCenter = null;
+  }
+} else {
+  persistedCenter = null;
+}
+persistedZoom = persistedZoom ? parseInt(persistedZoom) : null;
+
 // Global aliases variable (fetched from the server)
 var aliases = {};
 
 // Global color override object.
-var colorOverrides = {};
+var colorOverrides = window.colorOverrides;
 
 // Global stale threshold (in seconds) for active combos.
 const STALE_THRESHOLD = 300;
@@ -310,8 +340,11 @@ async function updateAliases() {
   }
 }
 
+// Updated safeSetView to never zoom out—only zoom in if the provided zoom is higher than current.
 function safeSetView(latlng, zoom=18) {
-  map.setView(latlng, zoom);
+  let currentZoom = map.getZoom();
+  let newZoom = zoom > currentZoom ? zoom : currentZoom;
+  map.setView(latlng, newZoom);
 }
 
 // Global followLock variable shared among all markers.
@@ -557,10 +590,19 @@ const openTopoMap = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.pn
   maxZoom: 17
 });
 
+// Initialize the map using persisted view state if available, otherwise fallback.
 const map = L.map('map', {
-  center: [0, 0],
-  zoom: 2,
+  center: persistedCenter || [0, 0],
+  zoom: persistedZoom || 2,
   layers: [cartoDarkMatter]
+});
+
+// Save the current map view to localStorage on every moveend.
+map.on('moveend', function() {
+  let center = map.getCenter();
+  let zoom = map.getZoom();
+  localStorage.setItem('mapCenter', JSON.stringify(center));
+  localStorage.setItem('mapZoom', zoom);
 });
 
 document.getElementById("layerSelect").addEventListener("change", function() {
@@ -599,7 +641,7 @@ const pilotPolylines = {};
 const dronePathCoords = {};
 const pilotPathCoords = {};
 const droneBroadcastRings = {};
-let historicalDrones = {};
+let historicalDrones = window.historicalDrones;
 let firstDetectionZoomed = false;
 
 let observerMarker = null;
@@ -721,16 +763,19 @@ function updateComboList(data) {
       comboListItems[mac] = item;
       item.className = "drone-item";
       // Attach only the double-click event.
-      item.addEventListener("dblclick", async () => {
-         await restorePaths();
+      item.addEventListener("dblclick", () => {
+         // Call restorePaths() without waiting to update instantly
+         restorePaths();
          if (historicalDrones[mac]) {
              delete historicalDrones[mac];
+             localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
              if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
              if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
              item.classList.remove("selected");
              map.closePopup();
          } else {
              historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
+             localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
              showHistoricalDrone(mac, historicalDrones[mac]);
              item.classList.add("selected");
              openAliasPopup(mac);
@@ -775,6 +820,7 @@ async function updateData() {
         if (data[mac].last_update > historicalDrones[mac].lockTime ||
             (currentTime - historicalDrones[mac].lockTime) > 300) {
           delete historicalDrones[mac];
+          localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
           if (droneBroadcastRings[mac]) {
             map.removeLayer(droneBroadcastRings[mac]);
             delete droneBroadcastRings[mac];
@@ -985,6 +1031,8 @@ restorePaths();
 function updateColor(mac, hue) {
   hue = parseInt(hue);
   colorOverrides[mac] = hue;
+  // Persist the updated colorOverrides to localStorage
+  localStorage.setItem('colorOverrides', JSON.stringify(colorOverrides));
   var newColor = "hsl(" + hue + ", 70%, 50%)";
   if (droneMarkers[mac]) {
     droneMarkers[mac].setIcon(createIcon('🛸', newColor));
