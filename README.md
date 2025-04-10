@@ -10,7 +10,7 @@ This project is a minimal scanner for WiFi-based Drone Remote ID based on Cemaxa
 ## Features 🌟
 
 - **WiFi Monitoring:** Listens to WiFi management frames in promiscuous mode to capture Drone Remote ID packets.
-- **Protocol Support:** Decodes messages from **OpenDroneID** and **French Remote ID** formats.
+- **Protocol Support:** Decodes messages from **OpenDroneID** format.
 - **Mesh Integration:** Uses UART to send compact, formatted messages to a mesh network.
 - **Real-Time Mapping:** Provides a web-based interface built with the Mesh-Mapper API that:
   - Displays drone and pilot positions on a map using Leaflet and OpenStreetMap tiles.
