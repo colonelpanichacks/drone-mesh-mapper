@@ -11,7 +11,8 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 #include <esp_wifi.h>
-#include <esp_event_loop.h>   // Still using the legacy header (warnings will be generated)
+#include <esp_event.h>
+#include <esp_netif.h>
 #include <nvs_flash.h>
 #include "opendroneid.h"
 #include "odid_wifi.h"
@@ -69,7 +70,7 @@ struct uav_data {
 };
 
 // Forward declarations
-esp_err_t event_handler(void *, system_event_t *);
+esp_err_t event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data);
 void callback(void *, wifi_promiscuous_pkt_type_t);
 void parse_odid(struct uav_data *, ODID_UAS_Data *);
 void store_mac(struct uav_data *uav, uint8_t *payload);
@@ -82,7 +83,7 @@ static int packetCount = 0;
 unsigned long last_status = 0;
 unsigned long current_millis = 0;
 
-esp_err_t event_handler(void *ctx, system_event_t *event) {
+esp_err_t event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data) {
   return ESP_OK;
 }
 
@@ -98,9 +99,9 @@ void initializeSerial() {
 void setup() {
   setCpuFrequencyMhz(160);
   nvs_flash_init();
-  tcpip_adapter_init();  // Deprecated but still used here
+  esp_netif_init();
   initializeSerial();
-  esp_event_loop_init(event_handler, NULL);  // Deprecated warning appears here
+  esp_event_loop_create_default();
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   esp_wifi_init(&cfg);
   esp_wifi_set_storage(WIFI_STORAGE_RAM);

@@ -13,7 +13,6 @@ sw@simonwunderlich.de
 
 #if defined(ARDUINO_ARCH_ESP32)
 #include <Arduino.h>
-int clock_gettime(clockid_t, struct timespec *);
 #else
 #include <string.h>
 #include <stddef.h>
@@ -26,6 +25,7 @@ int clock_gettime(clockid_t, struct timespec *);
 #include "opendroneid.h"
 #include "odid_wifi.h"
 
+int clock_gettime(clockid_t, struct timespec *);
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #if defined(IDF_VER)
 #include <endian.h>
