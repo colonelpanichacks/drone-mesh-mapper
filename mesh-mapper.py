@@ -21,10 +21,12 @@ app = Flask(__name__)
 tracked_pairs = {}
 detection_history = []  # For CSV logging and KML generation
 
-SELECTED_PORT = None
+# Changed: Instead of one selected port, we allow up to three.
+SELECTED_PORTS = {}  # key will be 'port1', 'port2', 'port3'
 BAUD_RATE = 115200
-staleThreshold = 300  # Global stale threshold in seconds (default 5 minutes)
-serial_connected = False
+staleThreshold = 60  # Global stale threshold in seconds (changed from 300 seconds -> 1 minute)
+# For each port, we track its connection status.
+serial_connected_status = {}  # e.g. {"port1": True, "port2": False, ...}
 
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Updated detections CSV header to include faa_data.
@@ -141,15 +143,47 @@ def generate_kml():
 # ----------------------
 def update_detection(detection):
     mac = detection.get("mac")
-    remote_id = detection.get("basic_id")
     if not mac:
         return
-    detection["drone_lat"] = detection.get("drone_lat", 0)
-    detection["drone_long"] = detection.get("drone_long", 0)
+
+    # Retrieve new drone coordinates from the detection
+    new_drone_lat = detection.get("drone_lat", 0)
+    new_drone_long = detection.get("drone_long", 0)
+    valid_drone = (new_drone_lat != 0 and new_drone_long != 0)
+
+    # If the new detection has invalid (0) drone coordinates...
+    if not valid_drone:
+        # If there is an existing record with valid coordinates, update only non-coordinate fields.
+        if mac in tracked_pairs:
+            existing = tracked_pairs[mac]
+            if existing.get("drone_lat", 0) != 0 and existing.get("drone_long", 0) != 0:
+                # Update fields other than drone coordinates
+                for field in ['rssi', 'basic_id', 'drone_altitude']:
+                    if field in detection:
+                        existing[field] = detection[field]
+                # Update pilot coordinates only if they are valid (non zero)
+                new_pilot_lat = detection.get("pilot_lat", 0)
+                new_pilot_long = detection.get("pilot_long", 0)
+                if new_pilot_lat != 0:
+                    existing["pilot_lat"] = new_pilot_lat
+                if new_pilot_long != 0:
+                    existing["pilot_long"] = new_pilot_long
+                existing["last_update"] = time.time()
+                print(f"Ignored update for {mac} due to invalid drone coordinates, preserving previous valid coordinates.")
+                return
+        # No previous valid record exists: ignore the detection entirely.
+        print(f"Ignored detection for {mac} because drone coordinates are zero.")
+        return
+
+    # Otherwise, use the provided non-zero coordinates.
+    detection["drone_lat"] = new_drone_lat
+    detection["drone_long"] = new_drone_long
     detection["drone_altitude"] = detection.get("drone_altitude", 0)
     detection["pilot_lat"] = detection.get("pilot_lat", 0)
     detection["pilot_long"] = detection.get("pilot_long", 0)
     detection["last_update"] = time.time()
+
+    remote_id = detection.get("basic_id")
     if mac and remote_id:
         cached = FAA_CACHE.get((mac, remote_id))
         if cached:
@@ -279,6 +313,54 @@ def api_query_faa():
 # ----------------------
 # HTML & JS (UI) Section
 # ----------------------
+# Updated: The selection page now has three dropdowns.
+PORT_SELECTION_PAGE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Select USB Serial Ports</title>
+  <style>
+    body { background-color: black; color: lime; font-family: monospace; text-align: center; }
+    pre { font-size: 16px; margin: 20px auto; }
+    form { display: inline-block; text-align: left; }
+    li { list-style: none; margin: 10px 0; }
+    select { background-color: #333; color: lime; border: none; padding: 3px; margin-bottom: 10px; }
+    label { font-size: 18px; }
+  </style>
+</head>
+<body>
+  <pre>{{ ascii_art }}</pre>
+  <h1>Select Up to 3 USB Serial Ports</h1>
+  <form method="POST" action="/select_ports">
+    <label>Port 1:</label><br>
+    <select name="port1">
+      <option value="">--None--</option>
+      {% for port in ports %}
+        <option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>
+      {% endfor %}
+    </select><br>
+    <label>Port 2:</label><br>
+    <select name="port2">
+      <option value="">--None--</option>
+      {% for port in ports %}
+        <option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>
+      {% endfor %}
+    </select><br>
+    <label>Port 3:</label><br>
+    <select name="port3">
+      <option value="">--None--</option>
+      {% for port in ports %}
+        <option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>
+      {% endfor %}
+    </select><br>
+    <button type="submit">Select Ports</button>
+  </form>
+</body>
+</html>
+'''
+
+# Updated: The main mapping page now shows serial statuses for all selected USB devices.
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -291,19 +373,22 @@ HTML_PAGE = '''
   <style>
     body, html { margin: 0; padding: 0; background-color: black; }
     #map { height: 100vh; }
+    /* Layer control styling (bottom left) reduced by 30% */
     #layerControl {
       position: absolute;
       bottom: 10px;
       left: 10px;
       background: rgba(0,0,0,0.8);
-      padding: 5px;
-      border: 1px solid lime;
-      border-radius: 10px;
+      padding: 3.5px; /* reduced from 5px */
+      border: 0.7px solid lime; /* reduced border thickness */
+      border-radius: 7px; /* reduced from 10px */
       color: lime;
       font-family: monospace;
+      font-size: 0.7em; /* scale font by 70% */
       z-index: 1000;
     }
-    #layerControl select { background-color: #333; color: lime; border: none; padding: 3px; }
+    #layerControl select { background-color: #333; color: lime; border: none; padding: 2.1px; } /* reduced padding */
+    
     #filterBox {
       position: absolute;
       top: 10px;
@@ -319,18 +404,26 @@ HTML_PAGE = '''
       z-index: 1000;
     }
     #filterHeader { display: flex; justify-content: space-between; align-items: center; }
+    
+    /* USB status box styling (bottom right) - now even with the map layer select */
     #serialStatus {
       position: absolute;
-      bottom: 30px;
+      bottom: 10px;
       right: 10px;
       background: rgba(0,0,0,0.8);
-      padding: 5px;
-      border: 1px solid lime;
-      border-radius: 10px;
-      color: red;
+      padding: 3.5px; /* reduced from 5px */
+      border: 0.7px solid lime; /* reduced border thickness */
+      border-radius: 7px; /* reduced from 10px */
+      color: lime;
       font-family: monospace;
+      font-size: 0.7em; /* scale font by 70% */
       z-index: 1000;
     }
+    #serialStatus div { margin-bottom: 5px; }
+    /* Remove extra bottom padding from the last USB item */
+    #serialStatus div:last-child { margin-bottom: 0; }
+    
+    .usb-name { color: #FF00FF; } /* Neon pink for device names */
     .drone-item {
       display: inline-block;
       border: 1px solid;
@@ -382,9 +475,43 @@ HTML_PAGE = '''
     <div id="inactivePlaceholder" class="placeholder"></div>
   </div>
 </div>
-<div id="serialStatus">Disconnected</div>
+<div id="serialStatus">
+  <!-- USB port statuses will be injected here -->
+</div>
 <script>
-// Persisted data load.
+// On window load, restore persisted detection data (trackedPairs) and re-add markers.
+window.onload = function() {
+  let stored = localStorage.getItem("trackedPairs");
+  if (stored) {
+    try {
+      let storedPairs = JSON.parse(stored);
+      window.tracked_pairs = storedPairs;
+      for (const mac in storedPairs) {
+        let det = storedPairs[mac];
+        let color = get_color_for_mac(mac);
+        // Restore drone marker if valid coordinates exist.
+        if (det.drone_lat && det.drone_long && det.drone_lat != 0 && det.drone_long != 0) {
+          if (!droneMarkers[mac]) {
+            droneMarkers[mac] = L.marker([det.drone_lat, det.drone_long], {icon: createIcon('🛸', color)})
+                                  .bindPopup(generatePopupContent(det, 'drone'))
+                                  .addTo(map);
+          }
+        }
+        // Restore pilot marker if valid coordinates exist.
+        if (det.pilot_lat && det.pilot_long && det.pilot_lat != 0 && det.pilot_long != 0) {
+          if (!pilotMarkers[mac]) {
+            pilotMarkers[mac] = L.marker([det.pilot_lat, det.pilot_long], {icon: createIcon('👤', color)})
+                                  .bindPopup(generatePopupContent(det, 'pilot'))
+                                  .addTo(map);
+          }
+        }
+      }
+    } catch(e) {
+      console.error("Error parsing trackedPairs from localStorage", e);
+    }
+  }
+}
+
 if (localStorage.getItem('colorOverrides')) {
   try { window.colorOverrides = JSON.parse(localStorage.getItem('colorOverrides')); }
   catch(e){ window.colorOverrides = {}; }
@@ -404,7 +531,7 @@ persistedZoom = persistedZoom ? parseInt(persistedZoom) : null;
 
 var aliases = {};
 var colorOverrides = window.colorOverrides;
-const STALE_THRESHOLD = 300;
+const STALE_THRESHOLD = 60;  // changed from 300 to 60 seconds for stale threshold in client side code
 var comboListItems = {};
 
 async function updateAliases() {
@@ -425,18 +552,19 @@ var followLock = { type: null, id: null, enabled: false };
 
 function generateObserverPopup() {
   var observerLocked = (followLock.enabled && followLock.type === 'observer');
+  var storedObserverEmoji = localStorage.getItem('observerEmoji') || "😎";
   return `
   <div>
     <strong>Observer Location</strong><br>
     <label for="observerEmoji">Select Observer Icon:</label>
     <select id="observerEmoji" onchange="updateObserverEmoji()">
-       <option value="😎">😎</option>
-       <option value="👽">👽</option>
-       <option value="🤖">🤖</option>
-       <option value="🏎️">🏎️</option>
-       <option value="🕵️‍♂️">🕵️‍♂️</option>
-       <option value="🥷">🥷</option>
-       <option value="👁️">👁️</option>
+       <option value="😎" ${storedObserverEmoji === "😎" ? "selected" : ""}>😎</option>
+       <option value="👽" ${storedObserverEmoji === "👽" ? "selected" : ""}>👽</option>
+       <option value="🤖" ${storedObserverEmoji === "🤖" ? "selected" : ""}>🤖</option>
+       <option value="🏎️" ${storedObserverEmoji === "🏎️" ? "selected" : ""}>🏎️</option>
+       <option value="🕵️‍♂️" ${storedObserverEmoji === "🕵️‍♂️" ? "selected" : ""}>🕵️‍♂️</option>
+       <option value="🥷" ${storedObserverEmoji === "🥷" ? "selected" : ""}>🥷</option>
+       <option value="👁️" ${storedObserverEmoji === "👁️" ? "selected" : ""}>👁️</option>
     </select><br>
     <button id="lock-observer" onclick="lockObserver()" style="background-color: ${observerLocked ? 'green' : ''};">
       ${observerLocked ? 'Locked on Observer' : 'Lock on Observer'}
@@ -448,9 +576,14 @@ function generateObserverPopup() {
   `;
 }
 
+// Updated function: now saves the selected observer icon to localStorage and updates the observer marker.
 function updateObserverEmoji() {
   var select = document.getElementById("observerEmoji");
-  if(observerMarker) { observerMarker.setIcon(createIcon('😎', 'blue')); }
+  var selectedEmoji = select.value;
+  localStorage.setItem('observerEmoji', selectedEmoji);
+  if (observerMarker) {
+    observerMarker.setIcon(createIcon(selectedEmoji, 'blue'));
+  }
 }
 
 function lockObserver() { followLock = { type: 'observer', id: 'observer', enabled: true }; updateObserverPopupButtons(); }
@@ -643,6 +776,7 @@ function openAliasPopup(mac) {
     .openOn(map);
 }
 
+// Updated saveAlias: now it updates the open popup without closing it.
 async function saveAlias(mac) {
   let alias = document.getElementById("aliasInput").value;
   try {
@@ -652,7 +786,12 @@ async function saveAlias(mac) {
       updateAliases();
       let detection = window.tracked_pairs[mac] || {mac: mac};
       let content = generatePopupContent(detection, 'alias');
-      L.popup().setContent(content).openOn(map);
+      let currentPopup = map.getPopup();
+      if (currentPopup) {
+         currentPopup.setContent(content);
+      } else {
+         L.popup().setContent(content).openOn(map);
+      }
     }
   } catch (error) { console.error("Error saving alias:", error); }
 }
@@ -706,7 +845,8 @@ const openTopoMap = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.pn
 const map = L.map('map', {
   center: persistedCenter || [0, 0],
   zoom: persistedZoom || 2,
-  layers: [cartoDarkMatter]
+  layers: [cartoDarkMatter],
+  attributionControl: false
 });
 
 map.on('moveend', function() {
@@ -755,7 +895,9 @@ if (navigator.geolocation) {
   navigator.geolocation.watchPosition(function(position) {
     const lat = position.coords.latitude;
     const lng = position.coords.longitude;
-    const observerIcon = createIcon('😎', 'blue');
+    // Use stored observer emoji or default to "😎"
+    const storedObserverEmoji = localStorage.getItem('observerEmoji') || "😎";
+    const observerIcon = createIcon(storedObserverEmoji, 'blue');
     if (!observerMarker) {
       observerMarker = L.marker([lat, lng], {icon: observerIcon})
                         .bindPopup(generateObserverPopup())
@@ -832,7 +974,7 @@ function updateComboList(data) {
   
   persistentMACs.forEach(mac => {
     let detection = data[mac];
-    let isActive = detection && ((currentTime - detection.last_update) <= 300);
+    let isActive = detection && ((currentTime - detection.last_update) <= 60);  // changed from 300 to 60 seconds
     let item = comboListItems[mac];
     if (!item) {
       item = document.createElement("div");
@@ -876,18 +1018,20 @@ async function updateData() {
     const response = await fetch('/api/detections');
     const data = await response.json();
     window.tracked_pairs = data;
+    // Persist current detection data to localStorage so that markers & paths remain on reload.
+    localStorage.setItem("trackedPairs", JSON.stringify(data));
     const currentTime = Date.now() / 1000;
     for (const mac in data) { if (!persistentMACs.includes(mac)) { persistentMACs.push(mac); } }
     for (const mac in data) {
       if (historicalDrones[mac]) {
-        if (data[mac].last_update > historicalDrones[mac].lockTime || (currentTime - historicalDrones[mac].lockTime) > 300) {
+        if (data[mac].last_update > historicalDrones[mac].lockTime || (currentTime - historicalDrones[mac].lockTime) > 60) {  // changed from 300 to 60
           delete historicalDrones[mac];
           localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
           if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
         } else { continue; }
       }
       const det = data[mac];
-      if (!det.last_update || (currentTime - det.last_update > 300)) {
+      if (!det.last_update || (currentTime - det.last_update > 60)) {  // changed from 300 to 60 seconds
         if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
         if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
         if (droneCircles[mac]) { map.removeLayer(droneCircles[mac]); delete droneCircles[mac]; }
@@ -968,13 +1112,22 @@ function createIcon(emoji, color) {
   });
 }
 
+// Updated function: now updates all selected USB port statuses.
 async function updateSerialStatus() {
   try {
     const response = await fetch('/api/serial_status');
     const data = await response.json();
     const statusDiv = document.getElementById('serialStatus');
-    if (data.connected) { statusDiv.textContent = 'Connected'; statusDiv.style.color = 'lime'; }
-    else { statusDiv.textContent = 'Disconnected'; statusDiv.style.color = 'red'; }
+    statusDiv.innerHTML = "";
+    if (data.statuses) {
+      for (const port in data.statuses) {
+        const div = document.createElement("div");
+        // Device name in neon pink and status color accordingly.
+        div.innerHTML = '<span class="usb-name">' + port + '</span>: ' +
+          (data.statuses[port] ? '<span style="color: lime;">Connected</span>' : '<span style="color: red;">Disconnected</span>');
+        statusDiv.appendChild(div);
+      }
+    }
   } catch (error) { console.error("Error fetching serial status:", error); }
 }
 setInterval(updateSerialStatus, 1000);
@@ -1046,37 +1199,32 @@ function updateColor(mac, hue) {
 </html>
 '''
 
-PORT_SELECTION_PAGE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Select USB Serial Port</title>
-  <style>
-    body { background-color: black; color: lime; font-family: monospace; text-align: center; }
-    pre { font-size: 16px; margin: 20px auto; }
-    form { display: inline-block; text-align: left; }
-    li { list-style: none; margin: 10px 0; }
-    select { background-color: #333; color: lime; border: none; padding: 3px; }
-  </style>
-</head>
-<body>
-  <pre>{{ ascii_art }}</pre>
-  <h1>Select USB Serial Port</h1>
-  <form method="POST" action="/select_port">
-    <ul>
-      {% for port in ports %}
-        <li>
-          <input type="radio" name="port" value="{{ port.device }}" required>
-          {{ loop.index }}: {{ port.device }} - {{ port.description }}
-        </li>
-      {% endfor %}
-    </ul>
-    <button type="submit">Select Port</button>
-  </form>
-</body>
-</html>
-'''
+# ----------------------
+# New route: USB port selection for multiple ports.
+# ----------------------
+@app.route('/select_ports', methods=['GET'])
+def select_ports_get():
+    ports = list(serial.tools.list_ports.comports())
+    return render_template_string(PORT_SELECTION_PAGE, ports=ports, ascii_art=ASCII_ART)
+
+@app.route('/select_ports', methods=['POST'])
+def select_ports_post():
+    global SELECTED_PORTS
+    # Get up to 3 ports; if empty string, ignore.
+    port1 = request.form.get('port1')
+    port2 = request.form.get('port2')
+    port3 = request.form.get('port3')
+    if port1:
+        SELECTED_PORTS['port1'] = port1
+    if port2:
+        SELECTED_PORTS['port2'] = port2
+    if port3:
+        SELECTED_PORTS['port3'] = port3
+    # Start threads for each selected port.
+    for key, port in SELECTED_PORTS.items():
+        serial_connected_status[port] = False  # initialize status
+        start_serial_thread(port)
+    return redirect(url_for('index'))
 
 ASCII_ART = r"""
   \  |              |             __ \         |                |           
@@ -1089,23 +1237,10 @@ ____/  _|   \___/  _|  _| \___|      _|  _| \__,_|  .__/   .__/  \___| _|
                                                    _|     _|                
 """
 
-@app.route('/select_port', methods=['GET'])
-def select_port():
-    ports = list(serial.tools.list_ports.comports())
-    return render_template_string(PORT_SELECTION_PAGE, ports=ports, ascii_art=ASCII_ART)
-
-@app.route('/select_port', methods=['POST'])
-def set_port():
-    global SELECTED_PORT
-    SELECTED_PORT = request.form.get('port')
-    print("Selected Serial Port:", SELECTED_PORT)
-    start_serial_thread()
-    return redirect(url_for('index'))
-
 @app.route('/')
 def index():
-    if (SELECTED_PORT is None):
-        return redirect(url_for('select_port'))
+    if (len(SELECTED_PORTS) == 0):
+        return redirect(url_for('select_ports_get'))
     return HTML_PAGE
 
 @app.route('/api/detections', methods=['GET'])
@@ -1174,9 +1309,10 @@ def api_clear_alias(mac):
         return jsonify({"status": "ok"})
     return jsonify({"status": "error", "message": "MAC not found"}), 404
 
+# Updated status endpoint: returns a dict of statuses for each selected USB.
 @app.route('/api/serial_status', methods=['GET'])
 def api_serial_status():
-    return jsonify({"connected": serial_connected})
+    return jsonify({"statuses": serial_connected_status})
 
 @app.route('/api/paths', methods=['GET'])
 def api_paths():
@@ -1206,18 +1342,20 @@ def api_paths():
     for mac in pilot_paths: pilot_paths[mac] = dedupe(pilot_paths[mac])
     return jsonify({"dronePaths": drone_paths, "pilotPaths": pilot_paths})
 
-def serial_reader():
-    global serial_connected
+# ----------------------
+# Serial Reader Threads: Each selected port gets its own thread.
+# ----------------------
+def serial_reader(port):
     ser = None
     while True:
         if ser is None or not ser.is_open:
             try:
-                ser = serial.Serial(SELECTED_PORT, BAUD_RATE, timeout=1)
-                serial_connected = True
-                print(f"Opened serial port {SELECTED_PORT} at {BAUD_RATE} baud.")
+                ser = serial.Serial(port, BAUD_RATE, timeout=1)
+                serial_connected_status[port] = True
+                print(f"Opened serial port {port} at {BAUD_RATE} baud.")
             except Exception as e:
-                serial_connected = False
-                print(f"Error opening serial port {SELECTED_PORT}: {e}")
+                serial_connected_status[port] = False
+                print(f"Error opening serial port {port}: {e}")
                 time.sleep(1)
                 continue
 
@@ -1232,34 +1370,34 @@ def serial_reader():
                 try:
                     detection = json.loads(line)
                     update_detection(detection)
-                    print("Received detection:", detection)
+                    print("Received detection from", port, ":", detection)
                 except json.JSONDecodeError:
                     print("Failed to decode JSON from line:", line)
             else:
                 time.sleep(0.1)
         except (serial.SerialException, OSError) as e:
-            serial_connected = False
-            print(f"SerialException/OSError: {e}")
+            serial_connected_status[port] = False
+            print(f"SerialException/OSError on {port}: {e}")
             try:
                 if ser and ser.is_open:
                     ser.close()
             except Exception as close_error:
-                print(f"Error closing serial port: {close_error}")
+                print(f"Error closing serial port {port}: {close_error}")
             ser = None
             time.sleep(1)
         except Exception as e:
-            serial_connected = False
-            print(f"Error reading serial: {e}")
+            serial_connected_status[port] = False
+            print(f"Error reading serial on {port}: {e}")
             try:
                 if ser and ser.is_open:
                     ser.close()
             except Exception as close_error:
-                print(f"Error closing serial port: {close_error}")
+                print(f"Error closing serial port {port}: {close_error}")
             ser = None
             time.sleep(1)
 
-def start_serial_thread():
-    thread = threading.Thread(target=serial_reader, daemon=True)
+def start_serial_thread(port):
+    thread = threading.Thread(target=serial_reader, args=(port,), daemon=True)
     thread.start()
 
 if __name__ == '__main__':
