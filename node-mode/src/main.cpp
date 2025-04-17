@@ -1,6 +1,6 @@
-/* -*- tab-width: 2; mode: c++; -*-
- * Minimal scanner for WiFi direct remote ID
- */
+/* 
+* node-mode
+*/
 #if !defined(ARDUINO_ARCH_ESP32)
 #error "This program requires an ESP32"
 #endif
