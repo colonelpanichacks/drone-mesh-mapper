@@ -1,5 +1,3 @@
-// src/main.cpp
-
 /* -*- tab-width: 2; mode: c++; -*-
  * Minimal scanner for WiFi direct remote ID
  */
