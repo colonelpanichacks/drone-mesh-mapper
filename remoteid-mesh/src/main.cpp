@@ -1,8 +1,6 @@
-/* -*- tab-width: 2; mode: c++; -*-
 
- * Minimal scanner for WiFi direct remote ID 
 
- */
+/* Minimal scanner for WiFi direct remote ID */
 
 #if !defined(ARDUINO_ARCH_ESP32)
   #error "This program requires an ESP32"
@@ -11,16 +9,16 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 #include <esp_wifi.h>
-#include <esp_event.h>
-#include <esp_netif.h>
 #include <nvs_flash.h>
-#include "opendroneid.h"
-#include "odid_wifi.h"
+#include <esp_netif.h>
+#include <esp_event.h>
 #include <esp_timer.h>
 #include <set>
 #include <string>
+#include "opendroneid.h"
+#include "odid_wifi.h"
 
-// Custom UART pin definitions for Serial1 (unchanged)
+// Custom UART pin definitions for Serial1
 const int SERIAL1_RX_PIN = 7;  // GPIO7
 const int SERIAL1_TX_PIN = 6;  // GPIO6
 
@@ -70,7 +68,7 @@ struct uav_data {
 };
 
 // Forward declarations
-esp_err_t event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data);
+void event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data);
 void callback(void *, wifi_promiscuous_pkt_type_t);
 void parse_odid(struct uav_data *, ODID_UAS_Data *);
 void store_mac(struct uav_data *uav, uint8_t *payload);
@@ -83,11 +81,11 @@ static int packetCount = 0;
 unsigned long last_status = 0;
 unsigned long current_millis = 0;
 
-esp_err_t event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data) {
-  return ESP_OK;
+void event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+  // No-op handler for now
 }
 
-// Initialize USB Serial (for JSON output) and Serial1 (UART messages remain unchanged)
+// Initialize USB Serial (for JSON output) and Serial1 (
 void initializeSerial() {
   // Initialize USB Serial for JSON payloads.
   Serial.begin(115200);
@@ -99,9 +97,10 @@ void initializeSerial() {
 void setup() {
   setCpuFrequencyMhz(160);
   nvs_flash_init();
-  esp_netif_init();
+  esp_netif_init();  // Modern replacement for tcpip_adapter_init
   initializeSerial();
-  esp_event_loop_create_default();
+  esp_event_loop_create_default();  // Modern replacement
+  esp_event_handler_instance_register(ESP_EVENT_ANY_BASE, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL);
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   esp_wifi_init(&cfg);
   esp_wifi_set_storage(WIFI_STORAGE_RAM);
