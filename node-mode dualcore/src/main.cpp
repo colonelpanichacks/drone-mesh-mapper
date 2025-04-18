@@ -1,5 +1,5 @@
 /* 
-* node-mode with dual Wi-Fi and BLE support for ESP32
+* node-mode with dual Wi-Fi and BLE support for ESP32S3
 */
 #if !defined(ARDUINO_ARCH_ESP32)
 #error "This program requires an ESP32"
@@ -17,9 +17,9 @@
 #include "odid_wifi.h"
 #include <esp_timer.h>
 
-// UART pin definitions for Serial1
-const int SERIAL1_RX_PIN = 7;  // GPIO7
-const int SERIAL1_TX_PIN = 6;  // GPIO6
+// UART pin definitions for Serial1 on esp32s3
+const int SERIAL1_RX_PIN = 4;  // GPIO4
+const int SERIAL1_TX_PIN = 5;  // GPIO5
 
 // Structure to hold UAV detection data
 struct uav_data {
