@@ -1,6 +1,4 @@
-/* -*- tab-width: 2; mode: c++; -*-
- * Serial forwarder for ESP32 (no detection logic)
- */
+
 #if !defined(ARDUINO_ARCH_ESP32)
 #error "This program requires an ESP32"
 #endif
