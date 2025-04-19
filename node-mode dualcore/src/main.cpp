@@ -279,6 +279,11 @@ void bleScanTask(void *parameter) {
       last_status = current_millis;
     }
     
+    // Echo any incoming bytes from Serial1 to USB Serial
+    while (Serial1.available()) {
+      Serial.write(Serial1.read());
+    }
+
     delay(100);
   }
 }
@@ -293,6 +298,11 @@ void wifiProcessTask(void *parameter) {
         uavs[i].flag = 0;
       }
     }
+    // Echo any incoming bytes from Serial1 to USB Serial
+    while (Serial1.available()) {
+      Serial.write(Serial1.read());
+    }
+
     delay(10);
   }
 }
