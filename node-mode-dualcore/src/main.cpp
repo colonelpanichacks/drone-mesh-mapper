@@ -278,12 +278,7 @@ void bleScanTask(void *parameter) {
       Serial.println("{\"heartbeat\":\"Device is active and running.\"}");
       last_status = current_millis;
     }
-    
-    // Echo any incoming bytes from Serial1 to USB Serial
-    while (Serial1.available()) {
-      Serial.write(Serial1.read());
-    }
-
+  
     delay(100);
   }
 }
@@ -297,10 +292,6 @@ void wifiProcessTask(void *parameter) {
         print_compact_message(&uavs[i]);
         uavs[i].flag = 0;
       }
-    }
-    // Echo any incoming bytes from Serial1 to USB Serial
-    while (Serial1.available()) {
-      Serial.write(Serial1.read());
     }
 
     delay(10);

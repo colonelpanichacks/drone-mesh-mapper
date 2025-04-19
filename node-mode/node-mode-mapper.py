@@ -167,38 +167,10 @@ def update_detection(detection):
     if not mac:
         return
 
-    # Retrieve new drone coordinates from the detection
-    new_drone_lat = detection.get("drone_lat", 0)
-    new_drone_long = detection.get("drone_long", 0)
-    valid_drone = (new_drone_lat != 0 and new_drone_long != 0)
-
-    # If the new detection has invalid (0) drone coordinates...
-    if not valid_drone:
-        # If there is an existing record with valid coordinates, update only non-coordinate fields.
-        if mac in tracked_pairs:
-            existing = tracked_pairs[mac]
-            if existing.get("drone_lat", 0) != 0 and existing.get("drone_long", 0) != 0:
-                # Update fields other than drone coordinates
-                for field in ['rssi', 'basic_id', 'drone_altitude']:
-                    if field in detection:
-                        existing[field] = detection[field]
-                # Update pilot coordinates only if they are valid (non zero)
-                new_pilot_lat = detection.get("pilot_lat", 0)
-                new_pilot_long = detection.get("pilot_long", 0)
-                if new_pilot_lat != 0:
-                    existing["pilot_lat"] = new_pilot_lat
-                if new_pilot_long != 0:
-                    existing["pilot_long"] = new_pilot_long
-                existing["last_update"] = time.time()
-                print(f"Ignored update for {mac} due to invalid drone coordinates, preserving previous valid coordinates.")
-                return
-        # No previous valid record exists: ignore the detection entirely.
-        print(f"Ignored detection for {mac} because drone coordinates are zero.")
-        return
-
-    # Otherwise, use the provided non-zero coordinates.
-    detection["drone_lat"] = new_drone_lat
-    detection["drone_long"] = new_drone_long
+    # Remove the validation checks that filter out zero coordinates
+    # Simply use all coordinates as they are
+    detection["drone_lat"] = detection.get("drone_lat", 0)
+    detection["drone_long"] = detection.get("drone_long", 0)
     detection["drone_altitude"] = detection.get("drone_altitude", 0)
     detection["pilot_lat"] = detection.get("pilot_lat", 0)
     detection["pilot_long"] = detection.get("pilot_long", 0)
