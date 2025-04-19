@@ -107,6 +107,10 @@ void loop() {
     Serial.println("{\"heartbeat\":\"Device is active and running.\"}");
     last_status = current_millis;
   }
+    // Echo any incoming bytes from Serial1 to USB Serial
+    while (Serial1.available()) {
+      Serial.write(Serial1.read());
+    }
 }
 
 // Sends the minimal JSON payload over USB Serial (includes basic_id).
