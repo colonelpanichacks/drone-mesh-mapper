@@ -1,7 +1,8 @@
 
 *.DS_Store
 
-remoteid-mesh/.vscode/extensions.json
+*.pio/build/
 
+*.vscode/
 
-remoteid-mesh/.vscode/settings.json
+node-mode-dualcore/.pio/build/
