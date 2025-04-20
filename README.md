@@ -131,7 +131,7 @@ The ESP32 firmware is the heart of the wireless scanning operation:
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/drone-remote-id-scanner.git
+   git clone https://github.com/colonelpanichacks/WiFi-RemoteID.git
    cd drone-remote-id-scanner
    ```
 
@@ -146,7 +146,7 @@ The ESP32 firmware is the heart of the wireless scanning operation:
      ```
    - Run the API script:
      ```bash
-     python app.py
+     mesh-mapper.py
      ```
    - The API will start and open in your default web browser.
 
