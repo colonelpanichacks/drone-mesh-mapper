@@ -13,6 +13,8 @@ from flask import Flask, request, jsonify, redirect, url_for, render_template_st
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+
+
 app = Flask(__name__)
 
 # ----------------------
@@ -27,6 +29,8 @@ BAUD_RATE = 115200
 staleThreshold = 60  # Global stale threshold in seconds (changed from 300 seconds -> 1 minute)
 # For each port, we track its connection status.
 serial_connected_status = {}  # e.g. {"port1": True, "port2": False, ...}
+# Mapping to merge fragmented detections: port -> last seen mac
+last_mac_by_port = {}
 
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Updated detections CSV header to include faa_data.
@@ -1364,15 +1368,32 @@ def serial_reader(port):
                 line = ser.readline().decode('utf-8').strip()
                 if not line:
                     continue
-                if not line.startswith("{"):
-                    print("Ignoring non-JSON line:", line)
-                    continue
+                # Extract JSON substring if there's any prefix (e.g., emoji)
+                if '{' in line:
+                    json_str = line[line.find('{'):]
+                else:
+                    json_str = line
                 try:
-                    detection = json.loads(line)
-                    update_detection(detection)
-                    print("Received detection from", port, ":", detection)
+                    detection = json.loads(json_str)
+                    # Track or assign MAC for fragmented messages with debug
+                    if 'mac' in detection:
+                        last_mac_by_port[port] = detection['mac']
+                        print(f"[DEBUG] Port {port}: saw MAC {detection['mac']}")
+                    elif port in last_mac_by_port:
+                        detection['mac'] = last_mac_by_port[port]
+                        print(f"[DEBUG] Port {port}: injected MAC {detection['mac']} into detection")
                 except json.JSONDecodeError:
-                    print("Failed to decode JSON from line:", line)
+                    print("Ignoring invalid JSON line:", line)
+                    continue
+                # Support payloads using 'remote_id' by aliasing it to 'basic_id'
+                if 'remote_id' in detection and 'basic_id' not in detection:
+                    detection['basic_id'] = detection['remote_id']
+                # Ignore heartbeat messages entirely
+                if 'heartbeat' in detection:
+                    continue
+                update_detection(detection)
+                print("Received detection from", port, ":", detection)
+                
             else:
                 time.sleep(0.1)
         except (serial.SerialException, OSError) as e:
@@ -1383,6 +1404,9 @@ def serial_reader(port):
                     ser.close()
             except Exception as close_error:
                 print(f"Error closing serial port {port}: {close_error}")
+            # Remove from broadcast registry on error
+            with serial_objs_lock:
+              serial_objs.pop(port, None)
             ser = None
             time.sleep(1)
         except Exception as e:
@@ -1393,6 +1417,9 @@ def serial_reader(port):
                     ser.close()
             except Exception as close_error:
                 print(f"Error closing serial port {port}: {close_error}")
+            # Remove from broadcast registry on error
+            with serial_objs_lock:
+                serial_objs.pop(port, None)
             ser = None
             time.sleep(1)
 
