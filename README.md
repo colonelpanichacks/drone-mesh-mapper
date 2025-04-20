@@ -132,7 +132,7 @@ The ESP32 firmware is the heart of the wireless scanning operation:
 
    ```bash
    git clone https://github.com/colonelpanichacks/WiFi-RemoteID.git
-   cd drone-remote-id-scanner
+   cd WiFi-RemoteID
    ```
 
 2. **Upload the ESP32 Firmware:**
