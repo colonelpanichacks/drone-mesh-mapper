@@ -1,15 +1,19 @@
 # Drone Remote ID to Meshtastic with Mesh-Mapper API 📡
 
-Minimal WiFi-based Drone Remote ID Scanner  
-This project is a minimal scanner for WiFi-based Drone Remote ID based on Cemaxacuter's wifi remote id detection firmware, supporting OpenDroneID. It runs on ESP32 (tested with Mesh-Detect boards like the Xiao ESP32-C3) and sends parsed messages over a custom UART to a serial mesh network.
+## About
+
+***Minimal WiFi & BT 4/5 Drone Remote ID Scanner***
+
+- This project is a minimal scanner for WiFi and BT-based Drone Remote ID based on Cemaxacuter's [wifi remote id detection firmware](https://github.com/alphafox02/T-Halow), using OpenDroneID. 
+
+- Runs on an ESP32 (defined with Xiao ESP32-C3 and S3 variants) and sends parsed messages over a custom UART to a serial mesh network as well as serial JSON logging.
 
 <img src="eye.png" alt="eye" style="width:50%; height:25%;">
-
----
 
 ## Features 🌟
 
 - **WiFi Monitoring:** Listens to WiFi management frames in promiscuous mode to capture Drone Remote ID packets.
+- **BT 4/5 Monitoring**: Listens for advertisements to capture Drone Remote ID packets in real time *(S3 dualcore fw only)*
 - **Protocol Support:** Decodes messages from **OpenDroneID** format.
 - **Mesh Integration:** Uses UART to send compact, formatted messages to a mesh network.
 - **Real-Time Mapping:** Provides a web-based interface built with the Mesh-Mapper API that:
@@ -17,8 +21,13 @@ This project is a minimal scanner for WiFi-based Drone Remote ID based on Cemaxa
   - Tracks movement paths automatically with unique color markers (derived from device MAC addresses).
   - Offers intuitive controls such as alias management, locking onto markers, and color customization.
 - **Stale Data Management:** Automatically removes markers and paths if no new data is received within 5 minutes.
-- **Logging & Export:** Saves each detection to a CSV file and continuously updates a KML file for offline analysis.
+- **Logging & Export:** Prints JSON to serial with heartbeat monitor. Saves each detection to a CSV file and continuously updates a KML file for offline analysis.
 - **Serial Port Selection:** Presents a user-friendly interface to select the correct USB serial port for ESP32 connection.
+
+
+---
+> [!NOTE]
+> MeshDetect kits use an esp32c3. Dual core firmware is for esp32s3 due to memory capacity restrictions.
 
 ---
 
@@ -139,6 +148,7 @@ The ESP32 firmware is the heart of the wireless scanning operation:
    - Open the firmware folder.
    - Build and flash the ESP32 code to your device using your preferred IDE or command-line tools.
 
+
 3. **Run the Flask API:**
    - Install the required Python dependencies:
      ```bash
@@ -154,6 +164,10 @@ The ESP32 firmware is the heart of the wireless scanning operation:
    - Connect your ESP32 via USB.
    - Select the correct serial port from the web interface.
    - Watch as drone and pilot detections appear in real-time on the interactive map.
+  
+
+> [!TIP]
+> Use this [quick flasher script](https://github.com/lukeswitz/mesh-detect/tree/main) for the Mesh Detect board & quick firmware changes.
 
 ---
 
