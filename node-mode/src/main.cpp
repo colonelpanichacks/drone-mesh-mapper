@@ -84,23 +84,11 @@ void initializeSerial() {
   Serial.println("USB Serial (for JSON) and UART (Serial1) initialized.");
 }
 
-// Task to forward incoming JSON from Serial1 (UART) to USB Serial
-void uartForwardTask(void *parameter) {
-  for (;;) {
-    while (Serial1.available()) {
-      char c = Serial1.read();
-      Serial.write(c);
-    }
-    delay(2);
-  }
-}
-
 void setup() {
   delay(6000);  // 6-second boot delay (nedessary for xiao meshtastic )
   setCpuFrequencyMhz(160);
   nvs_flash_init();
   initializeSerial();
-  xTaskCreatePinnedToCore(uartForwardTask, "UARTForwardTask", 4096, NULL, 1, NULL, 1);
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   esp_wifi_init(&cfg);
   esp_wifi_set_storage(WIFI_STORAGE_RAM);
@@ -119,7 +107,10 @@ void loop() {
     Serial.println("{\"heartbeat\":\"Device is active and running.\"}");
     last_status = current_millis;
   }
-  // UART forwarding now handled by uartForwardTask
+    // Echo any incoming bytes from Serial1 to USB Serial
+    while (Serial1.available()) {
+      Serial.write(Serial1.read());
+    }
 }
 
 // Sends the minimal JSON payload over USB Serial (includes basic_id).
