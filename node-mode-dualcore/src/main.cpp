@@ -18,7 +18,7 @@
 #include <esp_timer.h>
 
 // UART pin definitions for Serial1 on esp32s3
-const int SERIAL1_RX_PIN = 4;  // GPIO4
+const int SERIAL1_RX_PIN = 6;  // GPIO6
 const int SERIAL1_TX_PIN = 5;  // GPIO5
 
 // Structure to hold UAV detection data
@@ -284,6 +284,7 @@ void bleScanTask(void *parameter) {
 }
 
 // Wi-Fi processing task running on core 1
+
 void wifiProcessTask(void *parameter) {
   for(;;) {
     for (int i = 0; i < MAX_UAVS; i++) {
@@ -293,8 +294,18 @@ void wifiProcessTask(void *parameter) {
         uavs[i].flag = 0;
       }
     }
-
     delay(10);
+  }
+}
+
+// Task to forward incoming JSON from Serial1 (UART) to USB Serial
+void uartForwardTask(void *parameter) {
+  for (;;) {
+    while (Serial1.available()) {
+      char c = Serial1.read();
+      Serial.write(c);
+    }
+    delay(2);
   }
 }
 
@@ -326,6 +337,7 @@ void setup() {
   // Create tasks for BLE scanning and Wi-Fi processing on separate cores
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(uartForwardTask, "UARTForwardTask", 4096, NULL, 1, NULL, 1);
 }
 
 void loop() {
