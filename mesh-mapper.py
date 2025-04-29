@@ -357,6 +357,10 @@ PORT_SELECTION_PAGE = '''
       outline: none;
       border-radius: 10px;
     }
+    /* Shrink only the logo ASCII block */
+    pre.logo-art {
+      display: inline-block;
+    }
     /* Gradient styling for ASCII art below the button */
     pre.ascii-art {
       background: linear-gradient(to right, blue, purple, pink, lime, green);
@@ -375,7 +379,7 @@ PORT_SELECTION_PAGE = '''
   </style>
 </head>
 <body>
-  <pre class="ascii-art">{{ logo_ascii }}</pre>
+  <pre class="ascii-art logo-art">{{ logo_ascii }}</pre>
   <h1>Select Up to 3 USB Serial Ports</h1>
   <form method="POST" action="/select_ports">
     <label>Port 1:</label><br>
@@ -1595,14 +1599,18 @@ BOTTOM_ASCII = r"""
 """
 
 LOGO_ASCII = r"""
-  \  |              |             __ \         |                |           
- |\/ |   _ \   __|  __ \          |   |   _ \  __|   _ \   __|  __|         
- |   |   __/ \__ \  | | | _____|  |   |   __/  |     __/   (     |           
-_|_ \| \___| ____/ _| |_|        ____/ \\_|_| \__| \___| \___| \__|         
- |   |   __|  _ \   __ \    _ \       |\/ |   _` |  __ \   __ \    _ \   __|
- |   |  |    (   |  |   |   __/       |   |  (   |  |   |  |   |   __/  |   
-____/  _|   \___/  _|  _| \___|      _|  _| \__,_|  .__/   .__/  \___| _|   
-                                                   _|     _|                
+        _____                .__      ________          __                 __       
+       /     \   ____   _____|  |__   \______ \   _____/  |_  ____   _____/  |_     
+      /  \ /  \_/ __ \ /  ___/  |  \   |    |  \_/ __ \   __\/ __ \_/ ___\   __\    
+     /    Y    \  ___/ \___ \|   Y  \  |    `   \  ___/|  | \  ___/\  \___|  |      
+     \____|__  /\___  >____  >___|  / /_______  /\___  >__|  \___  >\___  >__|      
+             \/     \/     \/     \/          \/     \/     \/          \/     \/          
+________                                  _____                                     
+\______ \_______  ____   ____   ____     /     \ _____  ______ ______   ___________ 
+ |    |  \_  __ \/  _ \ /    \_/ __ \   /  \ /  \\__  \ \____ \\____ \_/ __ \_  __ \
+ |    `   \  | \(  <_> )   |  \  ___/  /    Y    \/ __ \|  |_> >  |_> >  ___/|  | \/
+/_______  /__|   \____/|___|  /\___  > \____|__  (____  /   __/|   __/ \___  >__|   
+        \/                  \/     \/          \/     \/|__|   |__|        \/       
 """
 
 @app.route('/')
