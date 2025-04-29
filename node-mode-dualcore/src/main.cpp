@@ -143,7 +143,7 @@ void send_json_fast(const uav_data *UAV) {
 // Modified function: emits two JSON messages over Serial1
 void print_compact_message(const uav_data *UAV) {
   static unsigned long lastSendTime = 0;
-  const unsigned long sendInterval = 5000;  // 5-second interval for UART messages
+  const unsigned long sendInterval = 3000;  // 3-second interval for UART messages
   if (millis() - lastSendTime < sendInterval) return;
   lastSendTime = millis();
 
@@ -305,7 +305,7 @@ void uartForwardTask(void *parameter) {
       char c = Serial1.read();
       Serial.write(c);
     }
-    delay(2);
+    delay(3000);  // 3-second polling interval for UART-to-USB echo
   }
 }
 
