@@ -335,7 +335,9 @@ PORT_SELECTION_PAGE = '''
   <meta charset="UTF-8">
   <title>Select USB Serial Ports</title>
   <style>
-    body { background-color: black; color: lime; font-family: monospace; text-align: center; }
+    body { background-color: black; color: lime; font-family: monospace; text-align: center;
+      zoom: 1.15;
+    }
     pre { font-size: 16px; margin: 20px auto; }
     form {
       display: inline-block;
@@ -360,6 +362,7 @@ PORT_SELECTION_PAGE = '''
     /* Shrink only the logo ASCII block */
     pre.logo-art {
       display: inline-block;
+      margin: 2px auto 0;
     }
     /* Gradient styling for ASCII art below the button */
     pre.ascii-art {
@@ -374,7 +377,7 @@ PORT_SELECTION_PAGE = '''
       background: linear-gradient(to right, lime, yellow);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
-      margin-bottom: 10px;
+      margin: 2px 0;
     }
   </style>
 </head>
@@ -455,7 +458,16 @@ HTML_PAGE = '''
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <style>
-    body, html { margin: 0; padding: 0; background-color: black; }
+    /* Toggle switch styling */
+    .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #333; transition: .4s; border-radius: 20px; }
+    .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: lime; transition: .4s; border-radius: 50%; }
+    .switch input:checked + .slider { background-color: lime; }
+    .switch input:checked + .slider:before { transform: translateX(20px); }
+    body, html { margin: 0; padding: 0; background-color: black;
+      zoom: 1.15;
+    }
     #map { height: 100vh; }
     /* Layer control styling (bottom left) reduced by 30% */
     #layerControl {
@@ -486,7 +498,7 @@ HTML_PAGE = '''
       right: 10px;
       width: 220px;
       background: rgba(0,0,0,0.8);
-      padding: 10px;
+      padding: 8px;
       border: 1px solid lime;
       border-radius: 10px;
       color: lime;
@@ -502,7 +514,7 @@ HTML_PAGE = '''
     #filterBox.collapsed {
       overflow: hidden;
       width: auto;         /* shrink width to content */
-      padding: 5px;        /* minimal padding around header */
+      padding: 4px;        /* minimal padding around header */
     }
     #filterBox.collapsed #filterContent {
       display: none;
@@ -531,7 +543,7 @@ HTML_PAGE = '''
       bottom: 10px;
       right: 10px;
       background: rgba(0,0,0,0.8);
-      padding: 3.5px; /* reduced from 5px */
+      padding: 3px; /* reduced from 5px */
       border: 0.7px solid lime; /* reduced border thickness */
       border-radius: 7px; /* reduced from 10px */
       color: lime;
@@ -561,9 +573,18 @@ HTML_PAGE = '''
       max-height: 200px;
     }
     .selected { background-color: rgba(255,255,255,0.2); }
-    .leaflet-popup-content-wrapper { background-color: black; color: lime; font-family: monospace; border: 2px solid lime; border-radius: 10px; }
+    .leaflet-popup-content-wrapper { background-color: black; color: lime; font-family: monospace; border: 2px solid lime; border-radius: 10px;
+      width: 220px !important;
+      max-width: 220px;
+      zoom: 1.15;
+    }
+    .leaflet-popup-content {
+      font-size: 0.75em;
+      line-height: 1.2em;
+      white-space: normal;
+    }
     .leaflet-popup-tip { background: lime; }
-    button { margin-top: 5px; padding: 5px; border: none; background-color: #333; color: lime; cursor: pointer; }
+    button { margin-top: 4px; padding: 3px; font-size: 0.8em; border: none; background-color: #333; color: lime; cursor: pointer; }
     select { background-color: #333; color: lime; border: none; padding: 3px; }
     .leaflet-control-zoom-in, .leaflet-control-zoom-out {
       background: rgba(0,0,0,0.8);
@@ -603,14 +624,32 @@ HTML_PAGE = '''
       background-color: #222;
       color: #FF00FF;
       border: 1px solid #FF00FF;
-      padding: 3px;
+      padding: 2px;
+      font-size: 0.8em;
       caret-color: transparent;
       outline: none;
     }
-    /* Disable tile transitions to prevent blur */
+    /* Popup button and input sizing */
+    .leaflet-popup-content-wrapper button {
+      font-size: 0.9em;
+      padding: 4px;
+      margin-top: 5px;
+    }
+    .leaflet-popup-content-wrapper input[type="text"],
+    .leaflet-popup-content-wrapper input[type="range"] {
+      font-size: 0.75em;
+      padding: 2px;
+    }
+    /* Disable tile transitions to prevent blur and hide tile seams */
     .leaflet-tile {
       transition: none !important;
       image-rendering: crisp-edges;
+      background-color: black;
+      border: none !important;
+      box-shadow: none !important;
+    }
+    .leaflet-container {
+      background-color: black;
     }
     /* Disable text cursor in drone list and filter toggle */
     .drone-item, #filterToggle {
@@ -716,12 +755,54 @@ HTML_PAGE = '''
         <button id="downloadAliases">Aliases</button>
       </div>
     </div>
+    <div style="margin-top:8px; text-align:center;">
+      <label style="color:lime; font-family:monospace; margin-right:8px;">Node Mode</label>
+      <label class="switch">
+        <input type="checkbox" id="nodeModeMainSwitch">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div style="color:#FF00FF; font-family:monospace; font-size:0.75em; white-space:normal; line-height:1.2; margin-top:4px; text-align:center;">
+      Polls detections every second instead of every 200 ms to reduce CPU/battery use and optimizes API for Node Mode.
+    </div>
   </div>
 </div>
 <div id="serialStatus">
   <!-- USB port statuses will be injected here -->
 </div>
 <script>
+  // Round tile positions to integer pixels to eliminate seams
+  L.DomUtil.setPosition = (function() {
+    var original = L.DomUtil.setPosition;
+    return function(el, point) {
+      var rounded = L.point(Math.round(point.x), Math.round(point.y));
+      original.call(this, el, rounded);
+    };
+  })();
+// --- Node Mode Main Switch & Polling Interval Sync ---
+document.addEventListener('DOMContentLoaded', () => {
+  // Ensure Node Mode default is off if unset
+  if (localStorage.getItem('nodeMode') === null) {
+    localStorage.setItem('nodeMode', 'false');
+  }
+  const mainSwitch = document.getElementById('nodeModeMainSwitch');
+  if (mainSwitch) {
+    // Sync toggle with stored setting
+    mainSwitch.checked = (localStorage.getItem('nodeMode') === 'true');
+    mainSwitch.onchange = () => {
+      const enabled = mainSwitch.checked;
+      localStorage.setItem('nodeMode', enabled);
+      clearInterval(updateDataInterval);
+      updateDataInterval = setInterval(updateData, enabled ? 1000 : 200);
+      // Sync popup toggle if open
+      const popupSwitch = document.getElementById('nodeModePopupSwitch');
+      if (popupSwitch) popupSwitch.checked = enabled;
+    };
+  }
+  // Start polling based on current setting
+  updateData();
+  updateDataInterval = setInterval(updateData, mainSwitch && mainSwitch.checked ? 1000 : 200);
+});
 // Optimize tile loading for smooth zoom and aggressive preloading
 L.Map.prototype.options.fadeAnimation = false;
 L.TileLayer.prototype.options.updateWhenZooming = true;
@@ -754,7 +835,7 @@ window.onload = function() {
         // Restore pilot marker if valid coordinates exist.
         if (det.pilot_lat && det.pilot_long && det.pilot_lat != 0 && det.pilot_long != 0) {
           if (!pilotMarkers[mac]) {
-            pilotMarkers[mac] = L.marker([det.pilot_lat, det.pilot_long], {icon: createIcon('👤', color)})
+            pilotMarkers[mac] = L.marker([det.pilot_lat, det.pilot_long], {icon: createIcon('👨‍✈️', color)})
                                   .bindPopup(generatePopupContent(det, 'pilot'))
                                   .addTo(map);
           }
@@ -940,7 +1021,9 @@ function generatePopupContent(detection, markerType) {
     <label for="colorSlider_${detection.mac}" style="display:block; color:lime;">Color:</label>
     <input type="range" id="colorSlider_${detection.mac}" min="0" max="360" value="${defaultHue}" style="width:100%;" onchange="updateColor('${detection.mac}', this.value)">
   </div>`;
-  
+
+      // Node Mode toggle in popup
+
   return content;
 }
 
@@ -1019,15 +1102,17 @@ function updateMarkerButtons(markerType, id) {
 
 function openAliasPopup(mac) {
   let detection = window.tracked_pairs[mac] || {};
-  let latlng = null;
-  if (droneMarkers[mac]) { latlng = droneMarkers[mac].getLatLng(); }
-  else if (pilotMarkers[mac]) { latlng = pilotMarkers[mac].getLatLng(); }
-  else { latlng = map.getCenter(); }
   let content = generatePopupContent(Object.assign({mac: mac}, detection), 'alias');
-  L.popup({className: 'leaflet-popup-content-wrapper'})
-    .setLatLng(latlng)
-    .setContent(content)
-    .openOn(map);
+  if (droneMarkers[mac]) {
+    droneMarkers[mac].setPopupContent(content).openPopup();
+  } else if (pilotMarkers[mac]) {
+    pilotMarkers[mac].setPopupContent(content).openPopup();
+  } else {
+    L.popup({className: 'leaflet-popup-content-wrapper'})
+      .setLatLng(map.getCenter())
+      .setContent(content)
+      .openOn(map);
+  }
 }
 
 // Updated saveAlias: now it updates the open popup without closing it.
@@ -1142,6 +1227,32 @@ map.on('moveend', function() {
   localStorage.setItem('mapZoom', zoom);
 });
 
+// Update marker icon sizes whenever the map zoom changes
+map.on('zoomend', function() {
+  // Scale circle and ring radii based on current zoom
+  const zoomLevel = map.getZoom();
+  const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
+  const circleRadius = size * 0.34;
+  Object.keys(droneMarkers).forEach(mac => {
+    const color = get_color_for_mac(mac);
+    droneMarkers[mac].setIcon(createIcon('🛸', color));
+  });
+  Object.keys(pilotMarkers).forEach(mac => {
+    const color = get_color_for_mac(mac);
+    pilotMarkers[mac].setIcon(createIcon('👨‍✈️', color));
+  });
+  // Update circle marker sizes
+  Object.values(droneCircles).forEach(circle => circle.setRadius(circleRadius));
+  Object.values(pilotCircles).forEach(circle => circle.setRadius(circleRadius * 1.15));
+  // Update broadcast ring sizes
+  Object.values(droneBroadcastRings).forEach(ring => ring.setRadius(size * 0.51));
+  // Update observer icon size based on zoom level
+  if (observerMarker) {
+    const storedObserverEmoji = localStorage.getItem('observerEmoji') || "😎";
+    observerMarker.setIcon(createIcon(storedObserverEmoji, 'blue'));
+  }
+});
+
 document.getElementById("layerSelect").addEventListener("change", function() {
   let value = this.value;
   let newLayer;
@@ -1216,8 +1327,10 @@ function showHistoricalDrone(mac, detection) {
     droneMarkers[mac].setPopupContent(generatePopupContent(detection, 'drone'));
   }
   if (!droneCircles[mac]) {
+    const zoomLevel = map.getZoom();
+    const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
     droneCircles[mac] = L.circleMarker([detection.drone_lat, detection.drone_long],
-                                       {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+                                       {radius: size * 0.34, color: color, fillColor: color, fillOpacity: 0.7})
                            .addTo(map);
   } else { droneCircles[mac].setLatLng([detection.drone_lat, detection.drone_long]); }
   if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
@@ -1227,7 +1340,7 @@ function showHistoricalDrone(mac, detection) {
   dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
     if (!pilotMarkers[mac]) {
-      pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {icon: createIcon('👤', color)})
+      pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {icon: createIcon('👨‍✈️', color)})
                              .bindPopup(generatePopupContent(detection, 'pilot'))
                              .addTo(map)
                              .on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
@@ -1236,8 +1349,10 @@ function showHistoricalDrone(mac, detection) {
       pilotMarkers[mac].setPopupContent(generatePopupContent(detection, 'pilot'));
     }
     if (!pilotCircles[mac]) {
+      const zoomLevel = map.getZoom();
+      const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
       pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long],
-                                          {radius: 12, color: color, fillColor: color, fillOpacity: 0.7})
+                                          {radius: size * 0.34 * 1.15, color: color, fillColor: color, fillOpacity: 0.7})
                             .addTo(map);
     } else { pilotCircles[mac].setLatLng([detection.pilot_lat, detection.pilot_long]); }
   }
@@ -1352,7 +1467,11 @@ async function updateData() {
                                 .on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
         }
         if (droneCircles[mac]) { droneCircles[mac].setLatLng([droneLat, droneLng]); }
-        else { droneCircles[mac] = L.circleMarker([droneLat, droneLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7}).addTo(map); }
+        else {
+          const zoomLevel = map.getZoom();
+          const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
+          droneCircles[mac] = L.circleMarker([droneLat, droneLng], {radius: size * 0.34, color: color, fillColor: color, fillOpacity: 0.7}).addTo(map);
+        }
         if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
         const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
         if (!lastDrone || lastDrone[0] != droneLat || lastDrone[1] != droneLng) { dronePathCoords[mac].push([droneLat, droneLng]); }
@@ -1371,13 +1490,17 @@ async function updateData() {
           pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
           if (!pilotMarkers[mac].isPopupOpen()) { pilotMarkers[mac].setPopupContent(generatePopupContent(det, 'pilot')); }
         } else {
-          pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {icon: createIcon('👤', color)})
+          pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {icon: createIcon('👨‍✈️', color)})
                                 .bindPopup(generatePopupContent(det, 'pilot'))
                                 .addTo(map)
                                 .on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
         }
         if (pilotCircles[mac]) { pilotCircles[mac].setLatLng([pilotLat, pilotLng]); }
-        else { pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng], {radius: 12, color: color, fillColor: color, fillOpacity: 0.7}).addTo(map); }
+        else {
+          const zoomLevel = map.getZoom();
+          const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
+          pilotCircles[mac] = L.circleMarker([pilotLat, pilotLng], {radius: size * 0.34 * 1.15, color: color, fillColor: color, fillOpacity: 0.7}).addTo(map);
+        }
         if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
         const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
         if (!lastPilot || lastPilot[0] != pilotLat || lastPilot[1] != pilotLng) { pilotPathCoords[mac].push([pilotLat, pilotLng]); }
@@ -1392,12 +1515,22 @@ async function updateData() {
 }
 
 function createIcon(emoji, color) {
+  // Compute a dynamic size based on zoom
+  const size = getDynamicSize();
+  const isize = Math.round(size);
+  const half = Math.round(size / 2);
   return L.divIcon({
-    html: '<div style="font-size: 24px; color:' + color + ';">' + emoji + '</div>',
+    html: `<div style="width:${isize}px; height:${isize}px; font-size:${isize}px; color:${color}; text-align:center; line-height:${isize}px;">${emoji}</div>`,
     className: '',
-    iconSize: [30, 30],
-    iconAnchor: [15, 15]
+    iconSize: [isize, isize],
+    iconAnchor: [half, half]
   });
+}
+
+function getDynamicSize() {
+  const zoomLevel = map.getZoom();
+  // Clamp between 12px and 24px
+  return Math.max(12, Math.min(zoomLevel * 1.5, 24));
 }
 
 // Updated function: now updates all selected USB port statuses.
@@ -1421,8 +1554,8 @@ async function updateSerialStatus() {
 setInterval(updateSerialStatus, 1000);
 updateSerialStatus();
 
-setInterval(updateData, 200);
-updateData();
+// (Node Mode mainSwitch and polling interval are now managed solely by the DOMContentLoaded handler above.)
+// Sync popup Node Mode toggle when a popup opens
 
 function updateLockFollow() {
   if (followLock.enabled) {
@@ -1437,6 +1570,9 @@ document.getElementById("filterToggle").addEventListener("click", function() {
   const box = document.getElementById("filterBox");
   const isCollapsed = box.classList.toggle("collapsed");
   this.textContent = isCollapsed ? "[+]" : "[-]";
+  // Sync Node Mode toggle with stored setting when filter opens
+  const mainSwitch = document.getElementById('nodeModeMainSwitch');
+  mainSwitch.checked = (localStorage.getItem('nodeMode') === 'true');
 });
 
 async function restorePaths() {
@@ -1472,7 +1608,7 @@ function updateColor(mac, hue) {
   localStorage.setItem('colorOverrides', JSON.stringify(colorOverrides));
   var newColor = "hsl(" + hue + ", 70%, 50%)";
   if (droneMarkers[mac]) { droneMarkers[mac].setIcon(createIcon('🛸', newColor)); droneMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'drone')); }
-  if (pilotMarkers[mac]) { pilotMarkers[mac].setIcon(createIcon('👤', newColor)); pilotMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'pilot')); }
+  if (pilotMarkers[mac]) { pilotMarkers[mac].setIcon(createIcon('👨‍✈️', newColor)); pilotMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'pilot')); }
   if (droneCircles[mac]) { droneCircles[mac].setStyle({ color: newColor, fillColor: newColor }); }
   if (pilotCircles[mac]) { pilotCircles[mac].setStyle({ color: newColor, fillColor: newColor }); }
   if (dronePolylines[mac]) { dronePolylines[mac].setStyle({ color: newColor }); }
@@ -1500,6 +1636,11 @@ function updateColor(mac, hue) {
     setTimeout(() => { this.style.backgroundColor = '#333'; }, 300);
     window.location.href = '/download/aliases';
   });
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js')
+      .then(reg => console.log('Service Worker registered', reg))
+      .catch(err => console.error('Service Worker registration failed', err));
+  }
 </script>
 </body>
 </html>
