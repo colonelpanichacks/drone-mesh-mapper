@@ -1638,8 +1638,9 @@ function createIcon(emoji, color) {
 
 function getDynamicSize() {
   const zoomLevel = map.getZoom();
-  // Clamp between 12px and 24px
-  return Math.max(12, Math.min(zoomLevel * 1.5, 24));
+  // Clamp between 12px and 24px, then boost by 15%
+  const base = Math.max(12, Math.min(zoomLevel * 1.5, 24));
+  return base * 1.15;
 }
 
 // Updated function: now updates all selected USB port statuses.
