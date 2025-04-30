@@ -12,6 +12,8 @@ from datetime import datetime
 from flask import Flask, request, jsonify, redirect, url_for, render_template_string, send_file
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import zmq
+from zmq.error import ZMQError
 
 # Ensure file paths are absolute
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -198,12 +200,23 @@ def update_detection(detection):
     detection["last_update"] = time.time()
 
     remote_id = detection.get("basic_id")
-    if mac and remote_id:
-        cached = FAA_CACHE.get((mac, remote_id))
-        if cached:
-            detection["faa_data"] = cached
-    if mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
-        detection["faa_data"] = tracked_pairs[mac]["faa_data"]
+    # Try exact cache lookup by (mac, remote_id), then fallback to any cached data for this mac, then to previous tracked_pairs entry
+    if mac:
+        # Exact match if basic_id provided
+        if remote_id:
+            key = (mac, remote_id)
+            if key in FAA_CACHE:
+                detection["faa_data"] = FAA_CACHE[key]
+        # Fallback: any cached FAA data for this mac
+        if "faa_data" not in detection:
+            for (c_mac, _), faa_data in FAA_CACHE.items():
+                if c_mac == mac:
+                    detection["faa_data"] = faa_data
+                    break
+        # Fallback: last known FAA data in tracked_pairs
+        if "faa_data" not in detection and mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
+            detection["faa_data"] = tracked_pairs[mac]["faa_data"]
+
     tracked_pairs[mac] = detection
     detection_history.append(detection.copy())
     print("Updated tracked_pairs:", tracked_pairs)
@@ -457,7 +470,7 @@ PORT_SELECTION_PAGE = '''
 </html>
 '''
 
-# Updated: The main mapping page now shows serial statuses for all selected USB devices.
+    # Updated: The main mapping page now shows serial statuses for all selected USB devices.
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -480,12 +493,27 @@ HTML_PAGE = '''
       background-color: black !important;
     }
     /* Toggle switch styling */
-    .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
+    .switch { position: relative; display: inline-block; vertical-align: middle; width: 40px; height: 20px; }
     .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #333; transition: .4s; border-radius: 20px; }
-    .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: lime; transition: .4s; border-radius: 50%; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .4s; border-radius: 20px; }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 2px;
+      top: 50%;
+      background-color: lime;
+      border: 1px solid #9B30FF;
+      transition: .4s;
+      border-radius: 50%;
+      transform: translateY(-50%);
+    }
     .switch input:checked + .slider { background-color: lime; }
-    .switch input:checked + .slider:before { transform: translateX(20px); }
+    .switch input:checked + .slider:before {
+      transform: translateX(20px) translateY(-50%);
+      border: 1px solid #9B30FF;
+    }
     body, html { margin: 0; padding: 0; background-color: black; }
     #map { height: 100vh; }
     /* Layer control styling (bottom left) reduced by 30% */
@@ -497,15 +525,19 @@ HTML_PAGE = '''
       padding: 3.5px; /* reduced from 5px */
       border: 0.7px solid lime; /* reduced border thickness */
       border-radius: 7px; /* reduced from 10px */
-      color: lime;
+      color: #FF00FF;
       font-family: monospace;
       font-size: 0.7em; /* scale font by 70% */
       z-index: 1000;
     }
+    /* Basemap label always neon pink */
+    #layerControl > label {
+      color: #FF00FF;
+    }
     #layerControl select,
     #layerControl select option {
       background-color: #333;
-      color: #FF00FF;
+      color: lime;
       border: none;
       padding: 2.1px;
       font-size: 0.7em;
@@ -515,28 +547,21 @@ HTML_PAGE = '''
       position: absolute;
       top: 10px;
       right: 10px;
-      width: 220px;
       background: rgba(0,0,0,0.8);
       padding: 8px;
       border: 1px solid lime;
       border-radius: 10px;
       color: lime;
       font-family: monospace;
+      max-width: 300px;
       max-height: 80vh;
-      overflow: hidden;
-      transition: max-height 0.3s ease;
       z-index: 1000;
-      transform: scale(0.85);
-      transform-origin: top right;
-    }
-    /* Collapsed filterBox shows only header, emoji, and toggle */
-    #filterBox.collapsed {
-      overflow: hidden;
-      width: auto;         /* shrink width to content */
-      padding: 4px;        /* minimal padding around header */
     }
     #filterBox.collapsed #filterContent {
       display: none;
+    }
+    #filterBox:not(.collapsed) #filterHeader h3 {
+      visibility: hidden;
     }
     #filterHeader {
       display: flex;
@@ -550,10 +575,6 @@ HTML_PAGE = '''
       display: block;
       width: 100%;
       color: #FF00FF;
-    }
-    /* Hide the header text when the box is expanded */
-    #filterBox:not(.collapsed) #filterHeader h3 {
-      display: none;
     }
     
     /* USB status box styling (bottom right) - now even with the map layer select */
@@ -641,18 +662,21 @@ HTML_PAGE = '''
     .leaflet-control-zoom-in:hover, .leaflet-control-zoom-out:hover { background-color: #222; }
     input#aliasInput {
       background-color: #222;
-      color: #FF00FF;
+      color: #87CEEB;         /* pastel blue (updated) */
       border: 1px solid #FF00FF;
-      padding: 2px;
-      font-size: 0.8em;
-      caret-color: transparent;
+      padding: 4px;
+      font-size: 1.06em;
+      caret-color: #87CEEB;
       outline: none;
+    }
+    .leaflet-popup-content-wrapper input:not(#aliasInput) {
+      caret-color: transparent;
     }
     /* Popup button and input sizing */
     .leaflet-popup-content-wrapper button {
-      font-size: 0.9em;
-      padding: 4px;
-      margin-top: 5px;
+      font-size: 1.19em;
+      padding: 6px;
+      margin-top: 7px;
     }
     .leaflet-popup-content-wrapper input[type="text"],
     .leaflet-popup-content-wrapper input[type="range"] {
@@ -685,20 +709,21 @@ HTML_PAGE = '''
     }
     /* Cyberpunk styling for filter headings */
     #filterContent > h3:nth-of-type(1) {
-      color: #BA55D3;         /* Active Drones in purple */
+      color: #FF00FF;         /* Active Drones in magenta */
       text-align: center;     /* center text */
       font-size: 1.1em;       /* slightly larger font */
     }
     #filterContent > h3:nth-of-type(2) {
-      color: #BA55D3;        /* more pastel purple */
+      color: #FF00FF;        /* more magenta */
       text-align: center;    /* center text */
       font-size: 1.1em;      /* slightly larger font */
     }
     /* Lime-green hacky dashes around filter headers */
     #filterContent > h3 {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
+      display: block;
+      width: 100%;
+      text-align: center;
+      margin: 0.5em 0;
     }
     #filterContent > h3::before,
     #filterContent > h3::after {
@@ -741,6 +766,135 @@ HTML_PAGE = '''
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
+    /* Staleout slider styling – match popup sliders */
+    #staleoutSlider {
+      -webkit-appearance: none;
+      width: 80%;
+      height: 3px;
+      background: transparent;
+      border: none;
+      outline: none;
+    }
+    #staleoutSlider::-webkit-slider-runnable-track {
+      width: 100%;
+      height: 3px;
+      background: #9B30FF;
+      border: none;
+      border-radius: 0;
+    }
+    #staleoutSlider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      margin-top: -6.5px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    /* Firefox */
+    #staleoutSlider::-moz-range-track {
+      width: 100%;
+      height: 3px;
+      background: #9B30FF;
+      border: none;
+      border-radius: 0;
+    }
+    #staleoutSlider::-moz-range-thumb {
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      margin-top: -6.5px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    /* IE */
+    #staleoutSlider::-ms-fill-lower,
+    #staleoutSlider::-ms-fill-upper {
+      background: #9B30FF;
+      border: none;
+      border-radius: 2px;
+    }
+    #staleoutSlider::-ms-thumb {
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      border-radius: 50%;
+      cursor: pointer;
+      margin-top: -6.5px;
+    }
+
+    /* Popup range sliders styling */
+    .leaflet-popup-content-wrapper input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 3px;
+      background: transparent;
+      border: none;
+    }
+    .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      margin-top: -6.5px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-thumb {
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      margin-top: -6.5px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    /* Ensure popup sliders have the same track styling */
+    .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-runnable-track {
+      width: 100%;
+      height: 3px;
+      background: #9B30FF;
+      border: 1px solid lime;
+      border-radius: 0;
+    }
+    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-track {
+      width: 100%;
+      height: 3px;
+      background: #9B30FF;
+      border: 1px solid lime;
+      border-radius: 0;
+    }
+
+    /* 1) Remove rounded corners from all sliders */
+    /* WebKit */
+    input[type="range"]::-webkit-slider-runnable-track,
+    input[type="range"]::-webkit-slider-thumb {
+      border-radius: 0;
+    }
+    /* Firefox */
+    input[type="range"]::-moz-range-track,
+    input[type="range"]::-moz-range-thumb {
+      border-radius: 0;
+    }
+    /* IE */
+    input[type="range"]::-ms-fill-lower,
+    input[type="range"]::-ms-fill-upper,
+    input[type="range"]::-ms-thumb {
+      border-radius: 0;
+    }
+
+    /* 2) Smaller, side-by-side Observer buttons */
+    .leaflet-popup-content-wrapper #lock-observer,
+    .leaflet-popup-content-wrapper #unlock-observer {
+      display: inline-block;
+      font-size: 0.9em;
+      padding: 4px 6px;
+      margin: 2px 4px 2px 0;
+    }
   </style>
 </head>
 <body>
@@ -777,7 +931,7 @@ HTML_PAGE = '''
         <button id="downloadAliases">Aliases</button>
       </div>
     </div>
-    <div style="margin-top:8px; text-align:center;">
+    <div style="margin-top:8px; display:flex; align-items:center; justify-content:center; height:20px;">
       <label style="color:lime; font-family:monospace; margin-right:8px;">Node Mode</label>
       <label class="switch">
         <input type="checkbox" id="nodeModeMainSwitch">
@@ -786,6 +940,33 @@ HTML_PAGE = '''
     </div>
     <div style="color:#FF00FF; font-family:monospace; font-size:0.75em; white-space:normal; line-height:1.2; margin-top:4px; text-align:center;">
       Polls detections every second instead of every 200 ms to reduce CPU/battery use and optimizes API for Node Mode.
+    </div>
+    <div id="zmqSection" style="margin-top:8px; text-align:center;">
+      <div style="margin-top:8px; display:flex; align-items:center; justify-content:center; height:20px;">
+        <label style="color:lime; font-family:monospace; margin-right:8px;">ZMQ Mode</label>
+        <label class="switch">
+          <input type="checkbox" id="zmqModeSwitch">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div style="margin-top:5px;">
+        <div style="display:flex; justify-content:center; align-items:center; margin-top:5px;">
+          <input type="text" id="zmqIP" placeholder="127.0.0.1" style="background-color:#222;color:#FF00FF;border:1px solid #FF00FF;width:55%;padding:4px;margin-right:5px;">
+          <span style="color:lime;">:</span>
+          <input type="text" id="zmqPort" placeholder="4224" style="background-color:#222;color:#FF00FF;border:1px solid #FF00FF;width:25%;padding:4px;margin-left:5px;">
+        </div>
+        <button id="applyZmqSettings" style="margin-top:5px;width:40%;padding:5px;border:1px solid lime;background:#333;color:lime;font-family:monospace;cursor:pointer;border-radius:5px;">Update ZMQ</button>
+      </div>
+      <div style="color:#FF00FF;font-family:monospace;font-size:0.75em;white-space:normal;line-height:1.2;margin-top:4px;text-align:center;">
+        Connect to ZMQ decoder via direct IP connection
+      </div>
+    </div>
+    <!-- Staleout Slider -->
+    <div style="margin-top:8px; text-align:center;">
+      <label style="color:lime; font-family:monospace; margin-bottom:4px; display:block;">Staleout Time</label>
+      <input type="range" id="staleoutSlider" min="1" max="5" step="1" value="1" 
+             style="width:80%; border:1px solid lime; margin-bottom:4px;">
+      <div id="staleoutValue" style="color:lime; font-family:monospace;">1 min</div>
     </div>
   </div>
 </div>
@@ -803,6 +984,18 @@ HTML_PAGE = '''
   })();
 // --- Node Mode Main Switch & Polling Interval Sync ---
 document.addEventListener('DOMContentLoaded', () => {
+  // restore follow-lock on reload
+  const storedLock = localStorage.getItem('followLock');
+  if (storedLock) {
+    try {
+      followLock = JSON.parse(storedLock);
+      if (followLock.type === 'observer') {
+        updateObserverPopupButtons();
+      } else if (followLock.type === 'drone' || followLock.type === 'pilot') {
+        updateMarkerButtons(followLock.type, followLock.id);
+      }
+    } catch (e) { console.error('Failed to restore followLock', e); }
+  }
   // Ensure Node Mode default is off if unset
   if (localStorage.getItem('nodeMode') === null) {
     localStorage.setItem('nodeMode', 'false');
@@ -824,6 +1017,66 @@ document.addEventListener('DOMContentLoaded', () => {
   // Start polling based on current setting
   updateData();
   updateDataInterval = setInterval(updateData, mainSwitch && mainSwitch.checked ? 1000 : 200);
+
+  // ZMQ Settings
+  if (localStorage.getItem('zmqEnabled') === null) { localStorage.setItem('zmqEnabled','false'); }
+  const zmqSwitch = document.getElementById('zmqModeSwitch');
+    // Persist ZMQ toggle state on change so reload reflects current setting
+    zmqSwitch.onchange = () => { localStorage.setItem('zmqEnabled', zmqSwitch.checked); };
+  const zmqIP = document.getElementById('zmqIP');
+  const zmqPort = document.getElementById('zmqPort');
+  const applyZmqSettings = document.getElementById('applyZmqSettings');
+  if (zmqSwitch && zmqIP && zmqPort && applyZmqSettings) {
+    zmqSwitch.checked = (localStorage.getItem('zmqEnabled') === 'true');
+    const storedEndpoint = localStorage.getItem('zmqEndpoint') || 'tcp://127.0.0.1:4224';
+    try {
+      const url = new URL(storedEndpoint);
+      zmqIP.value = url.hostname;
+      zmqPort.value = url.port;
+    } catch (e) {
+      zmqIP.value = '127.0.0.1';
+      zmqPort.value = '4224';
+    }
+    applyZmqSettings.addEventListener('click', function() {
+      this.style.backgroundColor = 'purple';
+      setTimeout(() => { this.style.backgroundColor = '#333'; }, 300);
+      const endpoint = `tcp://${zmqIP.value.trim()}:${zmqPort.value.trim()}`;
+      localStorage.setItem('zmqEnabled', zmqSwitch.checked);
+      localStorage.setItem('zmqEndpoint', endpoint);
+      fetch('/api/zmq_settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: zmqSwitch.checked, endpoint: endpoint})
+      }).catch(err => console.error('Error applying ZMQ settings:', err));
+    });
+    fetch('/api/zmq_settings')
+      .then(res => res.json())
+      .then(data => {
+        zmqSwitch.checked = data.enabled;
+        try {
+          const url = new URL(data.endpoint);
+          zmqIP.value = url.hostname;
+          zmqPort.value = url.port;
+        } catch (e) {}
+        localStorage.setItem('zmqEnabled', data.enabled);
+        localStorage.setItem('zmqEndpoint', data.endpoint);
+      })
+      .catch(err => console.error('Error fetching ZMQ settings:', err));
+  }
+
+  // Staleout slider initialization
+  const staleoutSlider = document.getElementById('staleoutSlider');
+  const staleoutValue = document.getElementById('staleoutValue');
+  if (staleoutSlider && typeof STALE_THRESHOLD !== 'undefined') {
+    staleoutSlider.value = STALE_THRESHOLD / 60;
+    staleoutValue.textContent = (STALE_THRESHOLD / 60) + ' min';
+    staleoutSlider.oninput = () => {
+      const minutes = parseInt(staleoutSlider.value, 10);
+      STALE_THRESHOLD = minutes * 60;
+      staleoutValue.textContent = minutes + ' min';
+      localStorage.setItem('staleoutMinutes', minutes.toString());
+    };
+  }
 });
 // Optimize tile loading for smooth zoom and aggressive preloading
 L.Map.prototype.options.fadeAnimation = false;
@@ -874,21 +1127,34 @@ if (localStorage.getItem('colorOverrides')) {
   catch(e){ window.colorOverrides = {}; }
 } else { window.colorOverrides = {}; }
 
+// Restore historical drones from localStorage
 if (localStorage.getItem('historicalDrones')) {
   try { window.historicalDrones = JSON.parse(localStorage.getItem('historicalDrones')); }
-  catch(e){ window.historicalDrones = {}; }
-} else { window.historicalDrones = {}; }
+  catch(e) { window.historicalDrones = {}; }
+} else {
+  window.historicalDrones = {};
+}
 
+// Restore map center and zoom from localStorage
 let persistedCenter = localStorage.getItem('mapCenter');
 let persistedZoom = localStorage.getItem('mapZoom');
 if (persistedCenter) {
-  try { persistedCenter = JSON.parse(persistedCenter); } catch(e){ persistedCenter = null; }
-} else { persistedCenter = null; }
-persistedZoom = persistedZoom ? parseInt(persistedZoom) : null;
+  try { persistedCenter = JSON.parse(persistedCenter); } catch(e) { persistedCenter = null; }
+} else {
+  persistedCenter = null;
+}
+persistedZoom = persistedZoom ? parseInt(persistedZoom, 10) : null;
 
+// Application-level globals
 var aliases = {};
 var colorOverrides = window.colorOverrides;
-const STALE_THRESHOLD = 60;  // changed from 300 to 60 seconds for stale threshold in client side code
+
+// Load stale-out minutes from localStorage (default 1) and compute threshold in seconds
+if (localStorage.getItem('staleoutMinutes') === null) {
+  localStorage.setItem('staleoutMinutes', '1');
+}
+let STALE_THRESHOLD = parseInt(localStorage.getItem('staleoutMinutes'), 10) * 60;
+
 var comboListItems = {};
 
 async function updateAliases() {
@@ -943,8 +1209,12 @@ function updateObserverEmoji() {
   }
 }
 
-function lockObserver() { followLock = { type: 'observer', id: 'observer', enabled: true }; updateObserverPopupButtons(); }
-function unlockObserver() { followLock = { type: null, id: null, enabled: false }; updateObserverPopupButtons(); }
+function lockObserver() { followLock = { type: 'observer', id: 'observer', enabled: true }; updateObserverPopupButtons();
+  localStorage.setItem('followLock', JSON.stringify(followLock));
+}
+function unlockObserver() { followLock = { type: null, id: null, enabled: false }; updateObserverPopupButtons();
+  localStorage.setItem('followLock', JSON.stringify(followLock));
+}
 function updateObserverPopupButtons() {
   var observerLocked = (followLock.enabled && followLock.type === 'observer');
   var lockBtn = document.getElementById("lock-observer");
@@ -956,13 +1226,15 @@ function updateObserverPopupButtons() {
 function generatePopupContent(detection, markerType) {
   let content = '';
   let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
-  content += '<strong>ID:</strong> <span id="aliasDisplay_' + detection.mac + '" style="color:#FF00FF;">' + aliasText + '</span> (MAC: ' + detection.mac + ')<br>';
+  content += '<strong>ID:</strong> <span id="aliasDisplay_' + detection.mac + '" style="color:#87CEEB;">' + aliasText + '</span> (MAC: ' + detection.mac + ')<br>';
   
-  if (detection.basic_id) {
-    content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div>';
-    // Button for querying FAA API.
-    content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA API</button>';
-    // FAA data display container.
+  if (detection.basic_id || detection.faa_data) {
+    if (detection.basic_id) {
+      content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div>';
+    }
+    if (detection.basic_id) {
+      content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA API</button>';
+    }
     content += '<div id="faaResult_' + detection.mac + '" style="margin-top:5px;">';
     if (detection.faa_data) {
       let faaData = detection.faa_data;
@@ -971,7 +1243,6 @@ function generatePopupContent(detection, markerType) {
         item = faaData.data.items[0];
       }
       if (item) {
-        // Only display specific fields in the desired order.
         const fields = ["makeName", "modelName", "series", "trackingNumber", "complianceCategories", "updatedAt"];
         content += '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">';
         fields.forEach(function(field) {
@@ -1004,7 +1275,7 @@ function generatePopupContent(detection, markerType) {
   content += `<hr style="border: 1px solid lime;">
               <label for="aliasInput">Alias:</label>
               <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" 
-                     style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" 
+                     style="background-color: #222; color: #87CEEB; border: 1px solid #FF00FF;" 
                      value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
               <button onclick="saveAlias('${detection.mac}')">Save Alias</button>
               <button onclick="clearAlias('${detection.mac}')">Clear Alias</button><br>`;
@@ -1102,15 +1373,29 @@ async function queryFaaAPI(mac, remote_id) {
 }
 
 function lockMarker(markerType, id) {
+  // Remember previous lock so we can clear its buttons
+  const prevId = followLock.id;
+  // Set new lock
   followLock = { type: markerType, id: id, enabled: true };
+  // Update buttons for this id in both drone and pilot sections
   updateMarkerButtons('drone', id);
   updateMarkerButtons('pilot', id);
+  localStorage.setItem('followLock', JSON.stringify(followLock));
+  // If another id was locked before, clear its button states
+  if (prevId && prevId !== id) {
+    updateMarkerButtons('drone', prevId);
+    updateMarkerButtons('pilot', prevId);
+  }
 }
 
 function unlockMarker(markerType, id) {
   if (followLock.enabled && followLock.type === markerType && followLock.id === id) {
+    // Clear the lock
     followLock = { type: null, id: null, enabled: false };
-    updateMarkerButtons(markerType, id);
+    // Update buttons for this id in both drone and pilot sections
+    updateMarkerButtons('drone', id);
+    updateMarkerButtons('pilot', id);
+    localStorage.setItem('followLock', JSON.stringify(followLock));
   }
 }
 
@@ -1167,6 +1452,8 @@ async function saveAlias(mac) {
         aliasSpan.style.backgroundColor = 'purple';
         setTimeout(() => { aliasSpan.style.backgroundColor = prevBg; }, 300);
       }
+      // Ensure the alias list updates immediately
+      updateComboList(window.tracked_pairs);
     }
   } catch (error) { console.error("Error saving alias:", error); }
 }
@@ -1272,7 +1559,7 @@ map.on('zoomend', function() {
   // Scale circle and ring radii based on current zoom
   const zoomLevel = map.getZoom();
   const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
-  const circleRadius = size * 0.34;
+  const circleRadius = size * 0.45;
   Object.keys(droneMarkers).forEach(mac => {
     const color = get_color_for_mac(mac);
     droneMarkers[mac].setIcon(createIcon('🛸', color));
@@ -1318,8 +1605,8 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   map.options.maxZoom = maxAllowed;
   localStorage.setItem('basemap', value);
   this.style.backgroundColor = "rgba(0,0,0,0.8)";
-  this.style.color = "#FF00FF";
-  setTimeout(() => { this.style.backgroundColor = "rgba(0,0,0,0.8)"; this.style.color = "#FF00FF"; }, 500);
+  this.style.color = "lime";
+  setTimeout(() => { this.style.backgroundColor = "rgba(0,0,0,0.8)"; this.style.color = "lime"; }, 500);
 });
 
 let persistentMACs = [];
@@ -1382,7 +1669,7 @@ function showHistoricalDrone(mac, detection) {
     droneCircles[mac] = L.circleMarker([detection.drone_lat, detection.drone_long],
                                        {
                                          pane: 'droneCirclePane',
-                                         radius: size * 0.34,
+                                         radius: size * 0.45,
                                          color: color,
                                          fillColor: color,
                                          fillOpacity: 0.7
@@ -1450,7 +1737,7 @@ function updateComboList(data) {
   
   persistentMACs.forEach(mac => {
     let detection = data[mac];
-    let isActive = detection && ((currentTime - detection.last_update) <= 60);  // changed from 300 to 60 seconds
+    let isActive = detection && ((currentTime - detection.last_update) <= STALE_THRESHOLD);
     let item = comboListItems[mac];
     if (!item) {
       item = document.createElement("div");
@@ -1500,14 +1787,14 @@ async function updateData() {
     for (const mac in data) { if (!persistentMACs.includes(mac)) { persistentMACs.push(mac); } }
     for (const mac in data) {
       if (historicalDrones[mac]) {
-        if (data[mac].last_update > historicalDrones[mac].lockTime || (currentTime - historicalDrones[mac].lockTime) > 60) {  // changed from 300 to 60
+        if (data[mac].last_update > historicalDrones[mac].lockTime || (currentTime - historicalDrones[mac].lockTime) > STALE_THRESHOLD) {
           delete historicalDrones[mac];
           localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
           if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
         } else { continue; }
       }
       const det = data[mac];
-      if (!det.last_update || (currentTime - det.last_update > 60)) {  // changed from 300 to 60 seconds
+      if (!det.last_update || (currentTime - det.last_update > STALE_THRESHOLD)) {
         if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
         if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
         if (droneCircles[mac]) { map.removeLayer(droneCircles[mac]); delete droneCircles[mac]; }
@@ -1548,7 +1835,7 @@ async function updateData() {
           const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
           droneCircles[mac] = L.circleMarker([droneLat, droneLng], {
             pane: 'droneCirclePane',
-            radius: size * 0.34,
+            radius: size * 0.45,
             color: color,
             fillColor: color,
             fillOpacity: 0.7
@@ -1560,7 +1847,7 @@ async function updateData() {
         if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
         dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
         if (currentTime - det.last_update <= 15) {
-          const dynamicRadius = getDynamicSize() * 0.34;
+          const dynamicRadius = getDynamicSize() * 0.45;
           const ringWeight = 3 * 0.8;  // 20% thinner
           const ringRadius = dynamicRadius + ringWeight / 2;  // sit just outside the main circle
           if (droneBroadcastRings[mac]) {
