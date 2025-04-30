@@ -335,6 +335,16 @@ PORT_SELECTION_PAGE = '''
   <meta charset="UTF-8">
   <title>Select USB Serial Ports</title>
   <style>
+    /* Hide tile seams */
+    .leaflet-tile {
+      border: none !important;
+      box-shadow: none !important;
+      background-color: transparent !important;
+      image-rendering: crisp-edges !important;
+    }
+    .leaflet-container {
+      background-color: black !important;
+    }
     body { background-color: black; color: lime; font-family: monospace; text-align: center;
       zoom: 1.15;
     }
@@ -458,6 +468,17 @@ HTML_PAGE = '''
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <style>
+    /* Hide tile seams on all map layers */
+    .leaflet-tile {
+      border: none !important;
+      box-shadow: none !important;
+      background-color: transparent !important;
+      image-rendering: crisp-edges !important;
+      transition: none !important;
+    }
+    .leaflet-container {
+      background-color: black !important;
+    }
     /* Toggle switch styling */
     .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
     .switch input { opacity: 0; width: 0; height: 0; }
@@ -465,9 +486,7 @@ HTML_PAGE = '''
     .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: lime; transition: .4s; border-radius: 50%; }
     .switch input:checked + .slider { background-color: lime; }
     .switch input:checked + .slider:before { transform: translateX(20px); }
-    body, html { margin: 0; padding: 0; background-color: black;
-      zoom: 1.15;
-    }
+    body, html { margin: 0; padding: 0; background-color: black; }
     #map { height: 100vh; }
     /* Layer control styling (bottom left) reduced by 30% */
     #layerControl {
@@ -642,6 +661,9 @@ HTML_PAGE = '''
     }
     /* Disable tile transitions to prevent blur and hide tile seams */
     .leaflet-tile {
+      display: block;
+      margin: 0;
+      padding: 0;
       transition: none !important;
       image-rendering: crisp-edges;
       background-color: black;
@@ -1166,35 +1188,43 @@ async function clearAlias(mac) {
 
 const osmStandard = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap contributors',
-  maxZoom: 19
+  maxNativeZoom: 19,
+  maxZoom: 22,
 });
 const osmHumanitarian = L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png', {
   attribution: '© Humanitarian OpenStreetMap Team',
-  maxZoom: 19
+  maxNativeZoom: 19,
+  maxZoom: 22,
 });
 const cartoPositron = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
   attribution: '© OpenStreetMap contributors, © CARTO',
-  maxZoom: 19
+  maxNativeZoom: 19,
+  maxZoom: 22,
 });
 const cartoDarkMatter = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
   attribution: '© OpenStreetMap contributors, © CARTO',
-  maxZoom: 19
+  maxNativeZoom: 19,
+  maxZoom: 22,
 });
 const esriWorldImagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
   attribution: 'Tiles © Esri',
-  maxZoom: 19
+  maxNativeZoom: 19,
+  maxZoom: 22,
 });
 const esriWorldTopo = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {
   attribution: 'Tiles © Esri',
-  maxZoom: 19
+  maxNativeZoom: 19,
+  maxZoom: 22,
 });
 const esriDarkGray = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
   attribution: 'Tiles © Esri',
-  maxZoom: 16
+  maxNativeZoom: 16,
+  maxZoom: 16,
 });
 const openTopoMap = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenTopoMap contributors',
-  maxZoom: 17
+  maxNativeZoom: 17,
+  maxZoom: 17,
 });
 
   // Load persisted basemap selection or default to satellite imagery
@@ -1217,7 +1247,8 @@ const map = L.map('map', {
   center: persistedCenter || [0, 0],
   zoom: persistedZoom || 2,
   layers: [initialLayer],
-  attributionControl: false
+  attributionControl: false,
+  maxZoom: initialLayer.options.maxZoom
 });
 // create custom Leaflet panes for z-ordering
 map.createPane('pilotCirclePane');
@@ -1278,6 +1309,13 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   });
   newLayer.addTo(map);
   newLayer.redraw();
+  // Clamp zoom to the layer's allowed maxZoom to avoid missing tiles
+  const maxAllowed = newLayer.options.maxZoom;
+  if (map.getZoom() > maxAllowed) {
+    map.setZoom(maxAllowed);
+  }
+  // update map's allowed max zoom for this layer
+  map.options.maxZoom = maxAllowed;
   localStorage.setItem('basemap', value);
   this.style.backgroundColor = "rgba(0,0,0,0.8)";
   this.style.color = "#FF00FF";
