@@ -14,6 +14,8 @@
 #include "opendroneid.h"
 #include "odid_wifi.h"
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 const int SERIAL1_RX_PIN = 4;
 const int SERIAL1_TX_PIN = 5;
@@ -70,7 +72,6 @@ public:
       id_data* UAV = next_uav(mac);
       UAV->last_seen = millis();
       UAV->rssi = device.getRSSI();
-      UAV->flag = 1;
       memcpy(UAV->mac, mac, 6);
       
       uint8_t* odid = &payload[6];
@@ -106,6 +107,7 @@ public:
           break;
         }
       }
+      UAV->flag = 1;
     }
   }
 };
@@ -161,6 +163,28 @@ void print_compact_message(const id_data *UAV) {
   }
 }
 
+void bleScanTask(void *parameter) {
+  for (;;) {
+    BLEScanResults* foundDevices = pBLEScan->start(1, false);
+    pBLEScan->clearResults();
+    for (int i = 0; i < MAX_UAVS; i++) {
+      if (uavs[i].flag) {
+        send_json_fast(&uavs[i]);
+        print_compact_message(&uavs[i]);
+        uavs[i].flag = 0;
+      }
+    }
+    delay(100);
+  }
+}
+
+void wifiProcessTask(void *parameter) {
+  for (;;) {
+    // No-op: callback sets uavs[].flag and data, so nothing needed here
+    delay(10);
+  }
+}
+
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   if (type != WIFI_PKT_MGMT) return;
   
@@ -196,9 +220,11 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
         strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
       }
       
-      id_data* dbUAV = next_uav(UAV.mac);
-      memcpy(dbUAV, &UAV, sizeof(UAV));
-      dbUAV->flag = 1;
+      id_data* storedUAV = next_uav(UAV.mac);
+      *storedUAV = UAV;
+      storedUAV->flag = 1;
+      send_json_fast(&UAV);
+      print_compact_message(&UAV);
     }
   }
   else if (payload[0] == 0x80) {
@@ -239,43 +265,15 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
             strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
           }
           
-          id_data* dbUAV = next_uav(UAV.mac);
-          memcpy(dbUAV, &UAV, sizeof(UAV));
-          dbUAV->flag = 1;
+          id_data* storedUAV = next_uav(UAV.mac);
+          *storedUAV = UAV;
+          storedUAV->flag = 1;
+          send_json_fast(&UAV);
+          print_compact_message(&UAV);
         }
       }
       offset += len + 2;
     }
-  }
-}
-
-void bleScanTask(void *parameter) {
-  for(;;) {
-    BLEScanResults* foundDevices = pBLEScan->start(1, false);
-    pBLEScan->clearResults();
-    
-    for (int i = 0; i < MAX_UAVS; i++) {
-      if (uavs[i].flag) {
-        send_json_fast(&uavs[i]);
-        print_compact_message(&uavs[i]);
-        uavs[i].flag = 0;
-      }
-    }
-    
-    delay(100);
-  }
-}
-
-void wifiProcessTask(void *parameter) {
-  for(;;) {
-    for (int i = 0; i < MAX_UAVS; i++) {
-      if (uavs[i].flag) {
-        send_json_fast(&uavs[i]);
-        print_compact_message(&uavs[i]);
-        uavs[i].flag = 0;
-      }
-    }
-    delay(10);
   }
 }
 
@@ -300,13 +298,11 @@ void setup() {
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
-  pBLEScan->setInterval(100);
-  pBLEScan->setWindow(99);
+  
+  xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 0);
   
   memset(uavs, 0, sizeof(uavs));
-  
-  xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 1);
 }
 
 void loop() {
