@@ -47,6 +47,8 @@ BLEScan* pBLEScan = nullptr;
 ODID_UAS_Data UAS_data;
 unsigned long last_status = 0;
 
+static QueueHandle_t printQueue;
+
 id_data* next_uav(uint8_t* mac) {
   for (int i = 0; i < MAX_UAVS; i++) {
     if (memcmp(uavs[i].mac, mac, 6) == 0)
@@ -108,6 +110,12 @@ public:
         }
       }
       UAV->flag = 1;
+      {
+        id_data tmp = *UAV;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+      }
     }
   }
 };
@@ -169,8 +177,7 @@ void bleScanTask(void *parameter) {
     pBLEScan->clearResults();
     for (int i = 0; i < MAX_UAVS; i++) {
       if (uavs[i].flag) {
-        send_json_fast(&uavs[i]);
-        print_compact_message(&uavs[i]);
+        // Removed send_json_fast and print_compact_message calls here
         uavs[i].flag = 0;
       }
     }
@@ -223,8 +230,12 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       id_data* storedUAV = next_uav(UAV.mac);
       *storedUAV = UAV;
       storedUAV->flag = 1;
-      send_json_fast(&UAV);
-      print_compact_message(&UAV);
+      {
+        id_data tmp = *storedUAV;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+      }
     }
   }
   else if (payload[0] == 0x80) {
@@ -268,11 +279,26 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           id_data* storedUAV = next_uav(UAV.mac);
           *storedUAV = UAV;
           storedUAV->flag = 1;
-          send_json_fast(&UAV);
-          print_compact_message(&UAV);
+          {
+            id_data tmp = *storedUAV;
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
+            if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+          }
         }
       }
       offset += len + 2;
+    }
+  }
+}
+
+void printerTask(void *param) {
+  id_data UAV;
+  for (;;) {
+    if (xQueueReceive(printQueue, &UAV, portMAX_DELAY)) {
+      send_json_fast(&UAV);
+      print_compact_message(&UAV);
+      // no need to reset flag on copy
     }
   }
 }
@@ -298,9 +324,12 @@ void setup() {
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
+
+  printQueue = xQueueCreate(MAX_UAVS, sizeof(id_data));
   
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(printerTask, "PrinterTask", 10000, NULL, 1, NULL, 1);
   
   memset(uavs, 0, sizeof(uavs));
 }
