@@ -17,7 +17,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-const int SERIAL1_RX_PIN = 4;
+const int SERIAL1_RX_PIN = 6;
 const int SERIAL1_TX_PIN = 5;
 
 struct id_data {
