@@ -1535,7 +1535,8 @@ const map = L.map('map', {
   zoom: persistedZoom || 2,
   layers: [initialLayer],
   attributionControl: false,
-  maxZoom: initialLayer.options.maxZoom
+  maxZoom: initialLayer.options.maxZoom,
+  preferCanvas: true
 });
 // create custom Leaflet panes for z-ordering
 map.createPane('pilotCirclePane');
@@ -1846,7 +1847,7 @@ async function updateData() {
         if (!lastDrone || lastDrone[0] != droneLat || lastDrone[1] != droneLng) { dronePathCoords[mac].push([droneLat, droneLng]); }
         if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
         dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
-        if (currentTime - det.last_update <= 15) {
+        if (currentTime - det.last_update <= 5) {
           const dynamicRadius = getDynamicSize() * 0.45;
           const ringWeight = 3 * 0.8;  // 20% thinner
           const ringRadius = dynamicRadius + ringWeight / 2;  // sit just outside the main circle
