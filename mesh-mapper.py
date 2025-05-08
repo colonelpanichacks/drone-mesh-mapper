@@ -1,349 +1,22 @@
-import tempfile
-from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
-from cryptography.hazmat.primitives import serialization
+
 import requests
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import json
 import logging
-logging.basicConfig(level=logging.DEBUG)
 import threading
 import serial
 import serial.tools.list_ports
 import time
 import csv
 import os
-import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request, jsonify, redirect, url_for, render_template_string, send_file
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import ssl
-import socket
-from urllib.parse import urlparse
-from typing import Optional
-
-# --- TLS context setup for TAK (inspired by DragonSync) ---
-import atexit
-import tempfile
-
-def setup_tls_context(p12_path: str, p12_password: Optional[bytes], skip_verify: bool) -> Optional[ssl.SSLContext]:
-    """Load a PKCS#12 file and return an SSLContext or None if no file provided."""
-    if not os.path.isfile(p12_path):
-        return None
-    try:
-        with open(p12_path, 'rb') as f:
-            p12_data = f.read()
-    except OSError as err:
-        logging.error(f"Failed to read P12 file: {err}")
-        return None
-    try:
-        key, cert, more_certs = load_key_and_certificates(p12_data, p12_password)
-    except Exception as e:
-        logging.error(f"Failed to load P12 certificates: {e}")
-        return None
-    # Write temp PEM files
-    key_bytes = key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
-    cert_bytes = cert.public_bytes(serialization.Encoding.PEM)
-    ca_bytes = b''.join(c.public_bytes(serialization.Encoding.PEM) for c in (more_certs or []))
-    key_tmp = tempfile.NamedTemporaryFile(delete=False)
-    cert_tmp = tempfile.NamedTemporaryFile(delete=False)
-    ca_tmp = tempfile.NamedTemporaryFile(delete=False)
-    key_tmp.write(key_bytes); key_tmp.close()
-    cert_tmp.write(cert_bytes); cert_tmp.close()
-    ca_tmp.write(ca_bytes);   ca_tmp.close()
-    # schedule cleanup
-    atexit.register(os.unlink, key_tmp.name)
-    atexit.register(os.unlink, cert_tmp.name)
-    atexit.register(os.unlink, ca_tmp.name)
-    # build context
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.load_cert_chain(certfile=cert_tmp.name, keyfile=key_tmp.name)
-    if ca_bytes:
-        ctx.load_verify_locations(cafile=ca_tmp.name)
-    if skip_verify:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-# Global TLS context for TAK, initialized on settings POST
-global_tls_context: Optional[ssl.SSLContext] = None
-
-class TAKClient:  
-    """Client for CoT messaging over TCP/TLS with backoff & retries."""
-    def __init__(self,
-                 host: str,
-                 port: int,
-                 ssl_context: Optional[ssl.SSLContext] = None,
-                 skip_verify: bool = False,
-                 max_retries: int = -1,
-                 backoff_factor: float = 2.0,
-                 max_backoff: float = 60.0):
-        self.tak_host = host
-        self.tak_port = port
-        self.skip_verify = skip_verify
-        self.tak_tls_context = ssl_context
-        self.sock = None
-        self.max_retries = max_retries
-        self.backoff_factor = backoff_factor
-        self.max_backoff = max_backoff
-        self.retry_count = 0
-        self.connecting_lock = threading.Lock()
-        # Number of send retries on failure
-        self.send_retries = 2
-
-    def connect(self):
-        while self.max_retries == -1 or self.retry_count < self.max_retries:
-            try:
-                raw = socket.create_connection((self.tak_host, self.tak_port), timeout=10)
-                # Enable TCP keepalive to detect dead peers
-                raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                if self.tak_tls_context:
-                    # wrap socket and let default handshake occur automatically
-                    ssl_sock = self.tak_tls_context.wrap_socket(
-                        raw,
-                        server_hostname=self.tak_host
-                    )
-                    self.sock = ssl_sock
-                else:
-                    self.sock = raw
-                logging.info("\033[32mConnected to TAK server via TCP/TLS\033[0m")
-                self.retry_count = 0
-                return
-            except Exception as e:
-                wait = min(self.backoff_factor ** self.retry_count, self.max_backoff)
-                logging.error(f"TAKClient connect error: {e}, retry in {wait}s")
-                time.sleep(wait)
-                self.retry_count += 1
-        logging.critical("TAKClient max retries exceeded; giving up")
-        self.sock = None
-
-    def run_connect_loop(self):
-        while True:
-            if not self.sock:
-                with self.connecting_lock:
-                    if not self.sock:
-                        self.connect()
-            time.sleep(1)
-
-    def send(self, cot_xml: bytes):
-        """
-        Send CoT XML over the TLS socket with automatic reconnects and retries.
-        """
-        for attempt in range(self.send_retries + 1):
-            if not self.sock:
-                logging.warning("TAKClient: socket not connected, attempting reconnect...")
-                with self.connecting_lock:
-                    self.connect()
-            if not self.sock:
-                logging.error("TAKClient: socket still not connected, dropping CoT")
-                return
-            try:
-                # ensure messages are newline-delimited for the TAK TCP listener
-                self.sock.sendall(cot_xml + b'\n')
-                logging.info(f"\033[32mSent CoT message via TCP/TLS: {cot_xml}\033[0m")
-                return
-            except (ssl.SSLError, OSError) as e:
-                logging.error(f"TAKClient send error on attempt {attempt+1}: {e}, reconnecting...")
-                self.close()
-                with self.connecting_lock:
-                    self.connect()
-        logging.error("TAKClient: failed to send CoT after retries")
-
-    def close(self):
-        if self.sock:
-            try: self.sock.close()
-            except: pass
-            self.sock = None
-            logging.debug("TAKClient socket closed")
-
-
-
-class TAKUDPClient:
-    """UDP client for CoT messaging (unicast or multicast)."""
-    def __init__(self, host: str, port: int, interface: Optional[str] = None):
-        self.host = host
-        self.port = port
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        if interface:
-            try:
-                ip = socket.gethostbyname(interface)
-                self.sock.setsockopt(socket.IPPROTO_IP,
-                                     socket.IP_MULTICAST_IF,
-                                     socket.inet_aton(ip))
-            except:
-                pass
-
-    def send(self, cot_xml: bytes):
-        try:
-            self.sock.sendto(cot_xml, (self.host, self.port))
-            logging.info(f"\033[32mSent CoT message via UDP to {self.host}:{self.port}: {len(cot_xml)} bytes\033[0m")
-            logging.debug(f"TAKUDPClient sent CoT ({len(cot_xml)} bytes) to {self.host}:{self.port}")
-        except Exception as e:
-            logging.error(f"TAKUDPClient send error: {e}")
-
-    def close(self):
-        self.sock.close()
-
-
-# --- Plain TCP (no TLS) client for CoT ---
-class TAKPlainClient:
-    """TCP client for CoT messaging without TLS."""
-    def __init__(self, host: str, port: int):
-        self.host = host
-        self.port = port
-        self.sock = None
-
-    def connect(self):
-        try:
-            self.sock = socket.create_connection((self.host, self.port), timeout=10)
-            logging.info("Connected to ATAK client via plain TCP")
-        except Exception as e:
-            logging.error(f"TAKPlainClient connect error: {e}")
-            self.sock = None
-
-    def send(self, cot_xml: bytes):
-        if not self.sock:
-            self.connect()
-        if not self.sock:
-            logging.error("TAKPlainClient: socket not connected, dropping CoT")
-            return
-        try:
-            self.sock.sendall(cot_xml + b'\n')
-            logging.info(f"Sent CoT message via plain TCP: {cot_xml}")
-        except Exception as e:
-            logging.error(f"TAKPlainClient send error: {e}")
-            try: self.sock.close()
-            except: pass
-            self.sock = None
-
-    def close(self):
-        if self.sock:
-            try: self.sock.close()
-            except: pass
-            self.sock = None
-
-
-
-class CotMessenger:
-    """
-    Wraps TCP/TLS and UDP CoT sends. Call .send_cot(xml_bytes).
-    """
-    def __init__(self,
-                 tak_client: Optional[TAKClient] = None,
-                 tak_udp_client: Optional[TAKUDPClient] = None,
-                 multicast_address: Optional[str] = None,
-                 multicast_port: Optional[int] = None,
-                 enable_multicast: bool = False,
-                 multicast_interface: Optional[str] = None):
-        self.tak_client = tak_client
-        self.tak_udp_client = tak_udp_client
-        self.enable_multicast = enable_multicast
-        self.multicast_address = multicast_address
-        self.multicast_port = multicast_port
-        if enable_multicast and multicast_address and multicast_port:
-            self.mcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            if multicast_interface:
-                try:
-                    ip = socket.gethostbyname(multicast_interface)
-                    self.mcast_sock.setsockopt(socket.IPPROTO_IP,
-                                               socket.IP_MULTICAST_IF,
-                                               socket.inet_aton(ip))
-                except:
-                    pass
-        else:
-            self.mcast_sock = None
-
-    def send_cot(self, cot_xml: bytes, retry_count: int = 3, retry_delay: float = 1.0):
-        for _ in range(retry_count):
-            if self.tak_client:
-                self.tak_client.send(cot_xml)
-            if self.tak_udp_client:
-                self.tak_udp_client.send(cot_xml)
-            if self.enable_multicast and self.mcast_sock:
-                try:
-                    self.mcast_sock.sendto(cot_xml, (self.multicast_address, self.multicast_port))
-                except Exception as e:
-                    logging.error(f"CotMessenger multicast error: {e}")
-            return
-        logging.error("CotMessenger: failed to send CoT after retries")
-
-    def close(self):
-        if self.tak_client:
-            self.tak_client.close()
-        if self.tak_udp_client:
-            self.tak_udp_client.close()
-        if self.mcast_sock:
-            self.mcast_sock.close()
-
-
-
-
-TAK_SETTINGS = {'enabled': False, 'endpoint': '', 'skipVerify': True, 'p12Filename': ''}
-
-# ----------------------------------
 
 # Ensure file paths are absolute
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ----------------------------------
-# Persisted TAK settings
-SETTINGS_FILE = os.path.join(BASE_DIR, 'tak_settings.json')
-# Load persisted TAK_SETTINGS if present
-if os.path.isfile(SETTINGS_FILE):
-    try:
-        with open(SETTINGS_FILE, 'r') as f:
-            saved = json.load(f)
-            # Only update known keys
-            for key in ['enabled', 'endpoint', 'skipVerify', 'p12Filename']:
-                if key in saved:
-                    TAK_SETTINGS[key] = saved[key]
-    except Exception as e:
-        print(f"[TAK DEBUG] Failed to load persisted TAK settings: {e}")
 
-
-
-def init_tak_client():
-    global _tak_client, _cot_messenger
-    _tak_client = None
-    _cot_messenger = None
-
-    if TAK_SETTINGS.get('enabled') and TAK_SETTINGS.get('endpoint'):
-        host, port_str = TAK_SETTINGS['endpoint'].split(':', 1)
-        port = int(port_str)
-        if global_tls_context:
-            _tak_client = TAKClient(
-                host=host,
-                port=port,
-                ssl_context=global_tls_context
-            )
-            _tak_client.connect()
-            threading.Thread(target=_tak_client.run_connect_loop, daemon=True).start()
-            _cot_messenger = CotMessenger(tak_client=_tak_client)
-        else:
-            # Plain TCP to ATAK client on port 8089
-            if port == 8089:
-                plain_client = TAKPlainClient(host, port)
-                _cot_messenger = CotMessenger(tak_client=plain_client)
-            else:
-                tak_udp = TAKUDPClient(host, port)
-                _cot_messenger = CotMessenger(tak_udp_client=tak_udp)
-    else:
-        _cot_messenger = CotMessenger(tak_client=None)
-
-# Load persisted P12 and password for initial TLS context
-p12_path = os.path.join(BASE_DIR, 'tak.p12')
-pw_path = os.path.join(BASE_DIR, 'tak_password.txt')
-p12_password = None
-if os.path.isfile(pw_path):
-    with open(pw_path, 'rb') as pf:
-        p12_password = pf.read()
-global_tls_context = setup_tls_context(p12_path, p12_password, TAK_SETTINGS.get('skipVerify', True))
-\
 
 app = Flask(__name__)
 
@@ -492,8 +165,27 @@ def update_detection(detection):
     new_drone_long = detection.get("drone_long", 0)
     valid_drone = (new_drone_lat != 0 and new_drone_long != 0)
 
-    # If the new detection has invalid (0) drone coordinates, ignore it entirely
+    # If the new detection has invalid (0) drone coordinates...
     if not valid_drone:
+        # If there is an existing record with valid coordinates, update only non-coordinate fields.
+        if mac in tracked_pairs:
+            existing = tracked_pairs[mac]
+            if existing.get("drone_lat", 0) != 0 and existing.get("drone_long", 0) != 0:
+                # Update fields other than drone coordinates
+                for field in ['rssi', 'basic_id', 'drone_altitude']:
+                    if field in detection:
+                        existing[field] = detection[field]
+                # Update pilot coordinates only if they are valid (non zero)
+                new_pilot_lat = detection.get("pilot_lat", 0)
+                new_pilot_long = detection.get("pilot_long", 0)
+                if new_pilot_lat != 0:
+                    existing["pilot_lat"] = new_pilot_lat
+                if new_pilot_long != 0:
+                    existing["pilot_long"] = new_pilot_long
+                existing["last_update"] = time.time()
+                print(f"Ignored update for {mac} due to invalid drone coordinates, preserving previous valid coordinates.")
+                return
+        # No previous valid record exists: ignore the detection entirely.
         print(f"Ignored detection for {mac} because drone coordinates are zero.")
         return
 
@@ -505,30 +197,13 @@ def update_detection(detection):
     detection["pilot_long"] = detection.get("pilot_long", 0)
     detection["last_update"] = time.time()
 
-    # Preserve previous basic_id if new detection lacks one
-    if not detection.get("basic_id") and mac in tracked_pairs and tracked_pairs[mac].get("basic_id"):
-        detection["basic_id"] = tracked_pairs[mac]["basic_id"]
     remote_id = detection.get("basic_id")
-    # Try exact cache lookup by (mac, remote_id), then fallback to any cached data for this mac, then to previous tracked_pairs entry
-    if mac:
-        # Exact match if basic_id provided
-        if remote_id:
-            key = (mac, remote_id)
-            if key in FAA_CACHE:
-                detection["faa_data"] = FAA_CACHE[key]
-        # Fallback: any cached FAA data for this mac
-        if "faa_data" not in detection:
-            for (c_mac, _), faa_data in FAA_CACHE.items():
-                if c_mac == mac:
-                    detection["faa_data"] = faa_data
-                    break
-        # Fallback: last known FAA data in tracked_pairs
-        if "faa_data" not in detection and mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
-            detection["faa_data"] = tracked_pairs[mac]["faa_data"]
-        # Always cache FAA data by MAC and current basic_id for fallback
-        if "faa_data" in detection:
-            write_to_faa_cache(mac, detection.get("basic_id", ""), detection["faa_data"])
-
+    if mac and remote_id:
+        cached = FAA_CACHE.get((mac, remote_id))
+        if cached:
+            detection["faa_data"] = cached
+    if mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
+        detection["faa_data"] = tracked_pairs[mac]["faa_data"]
     tracked_pairs[mac] = detection
     detection_history.append(detection.copy())
     print("Updated tracked_pairs:", tracked_pairs)
@@ -550,36 +225,6 @@ def update_detection(detection):
             'faa_data': json.dumps(detection.get('faa_data', {}))
         })
     generate_kml()
-    # ----------------------------------
-    # Send Cursor-on-Target for this detection via TCP/TLS socket (only if TAK enabled)
-    if TAK_SETTINGS.get('enabled') and '_cot_messenger' in globals() and _cot_messenger:
-        logging.info(f"[TAK] Sending CoT for MAC {mac}")
-        try:
-            cot_time = datetime.utcnow().isoformat() + 'Z'
-            stale_time = (datetime.utcnow() + timedelta(seconds=staleThreshold)).isoformat() + 'Z'
-            drone_cot = (
-                f"<event version='2.0' uid='drone-{mac}' type='a-f-G-U-C' how='m-p' "
-                f"time='{cot_time}' start='{cot_time}' stale='{stale_time}'>"
-                f"<point lat='{detection['drone_lat']}' lon='{detection['drone_long']}' "
-                f"hae='{detection['drone_altitude']}' ce='9999999' le='9999999'/></event>"
-            )
-            pilot_cot = (
-                f"<event version='2.0' uid='pilot-{mac}' type='a-f-G-U-P' how='m-p' "
-                f"time='{cot_time}' start='{cot_time}' stale='{stale_time}'>"
-                f"<point lat='{detection.get('pilot_lat', 0)}' lon='{detection.get('pilot_long', 0)}' "
-                f"hae='0' ce='9999999' le='9999999'/></event>"
-            )
-            print(f"[DEBUG] Drone COT XML: {drone_cot}")
-            _cot_messenger.send_cot(drone_cot.encode('utf-8'))
-            logging.info(f"[TAK] Drone CoT sent for MAC {mac}")
-            if detection.get('pilot_lat', 0) and detection.get('pilot_long', 0):
-                print(f"[DEBUG] Pilot COT XML: {pilot_cot}")
-                _cot_messenger.send_cot(pilot_cot.encode('utf-8'))
-                logging.info(f"[TAK] Pilot CoT sent for MAC {mac}")
-        except Exception as e:
-            # Only log TAK errors if TAK mode is truly enabled
-            logging.error(f"COT publish failed: {e}")
-    # ----------------------------------
 
 # ----------------------
 # Global Follow Lock & Color Overrides
@@ -656,12 +301,6 @@ def api_query_faa():
     session = create_retry_session()
     refresh_cookie(session)
     faa_result = query_remote_id(session, remote_id)
-    # Fallback: if FAA API query failed or returned no records, try cached FAA data by MAC
-    if not faa_result or not faa_result.get("data", {}).get("items"):
-        for (c_mac, _), cached_data in FAA_CACHE.items():
-            if c_mac == mac:
-                faa_result = cached_data
-                break
     if faa_result is None:
         return jsonify({"status": "error", "message": "FAA query failed"}), 500
     if mac in tracked_pairs:
@@ -686,133 +325,6 @@ def api_query_faa():
     return jsonify({"status": "ok", "faa_data": faa_result})
 
 # ----------------------
-# FAA Data GET API Endpoint (by MAC or basic_id)
-# ----------------------
-@app.route('/api/faa/<identifier>', methods=['GET'])
-def api_get_faa(identifier):
-    """
-    Retrieve cached FAA data by MAC address or by basic_id (remote ID).
-    """
-    # First try lookup by MAC
-    if identifier in tracked_pairs and 'faa_data' in tracked_pairs[identifier]:
-        return jsonify({'status': 'ok', 'faa_data': tracked_pairs[identifier]['faa_data']})
-    # Then try lookup by basic_id
-    for mac, det in tracked_pairs.items():
-        if det.get('basic_id') == identifier and 'faa_data' in det:
-            return jsonify({'status': 'ok', 'faa_data': det['faa_data']})
-    # Fallback: search cached FAA data by remote_id first, then by MAC
-    for (c_mac, c_rid), faa_data in FAA_CACHE.items():
-        if c_rid == identifier:
-            return jsonify({'status': 'ok', 'faa_data': faa_data})
-    for (c_mac, c_rid), faa_data in FAA_CACHE.items():
-        if c_mac == identifier:
-            return jsonify({'status': 'ok', 'faa_data': faa_data})
-    return jsonify({'status': 'error', 'message': 'No FAA data found for this identifier'}), 404
-
-
-@app.route('/api/tak_settings', methods=['GET'])
-def api_get_tak_settings():
-    import os
-    settings = dict(TAK_SETTINGS)
-    settings['p12Filename'] = TAK_SETTINGS.get('p12Filename', '')
-    # indicate whether a password has been saved
-    pw_path = os.path.join(BASE_DIR, 'tak_password.txt')
-    settings['passwordSet'] = os.path.isfile(pw_path) and os.path.getsize(pw_path) > 0
-    password = ''
-    if os.path.isfile(pw_path):
-        try:
-            with open(pw_path, 'r') as pf:
-                password = pf.read()
-        except:
-            password = ''
-    settings['password'] = password
-    return jsonify(settings)
-
-
-@app.route('/api/tak_settings', methods=['POST'])
-def api_post_tak_settings():
-    data = request.get_json()
-    TAK_SETTINGS['enabled'] = data.get('enabled', TAK_SETTINGS['enabled'])
-    TAK_SETTINGS['endpoint'] = data.get('endpoint', TAK_SETTINGS['endpoint'])
-    TAK_SETTINGS['skipVerify'] = data.get('skipVerify', TAK_SETTINGS['skipVerify'])
-    # Persist TAK_SETTINGS to disk
-    try:
-        with open(SETTINGS_FILE, 'w') as f:
-            json.dump(TAK_SETTINGS, f)
-    except Exception as e:
-        print(f"[TAK DEBUG] Failed to save TAK settings: {e}")
-    # Live reinitialize TAK client and CoT messenger based on new setting
-    global _tak_client, _cot_messenger, global_tls_context
-    if TAK_SETTINGS['enabled']:
-        # Load or refresh TLS context from uploaded P12
-        p12_path = os.path.join(BASE_DIR, 'tak.p12')
-        pw_path = os.path.join(BASE_DIR, 'tak_password.txt')
-        p12_password = None
-        if os.path.isfile(pw_path):
-            with open(pw_path, 'rb') as pf:
-                p12_password = pf.read()
-        # Create a new SSLContext or None
-        global_tls_context = setup_tls_context(p12_path, p12_password, TAK_SETTINGS.get('skipVerify', True))
-        # Initialize TAK client or UDP fallback
-        host, port_str = TAK_SETTINGS['endpoint'].split(':')
-        port = int(port_str)
-        if global_tls_context:
-            _tak_client = TAKClient(
-                host=host,
-                port=port,
-                ssl_context=global_tls_context
-            )
-            threading.Thread(target=_tak_client.run_connect_loop, daemon=True).start()
-            _cot_messenger = CotMessenger(tak_client=_tak_client)
-        else:
-            tak_udp = TAKUDPClient(host, port)
-            _cot_messenger = CotMessenger(tak_client=None, tak_udp_client=tak_udp)
-    else:
-        if _cot_messenger:
-            try:
-                _cot_messenger.close()
-            except:
-                pass
-        _tak_client = None
-        _cot_messenger = None
-    # After updating _tak_client/_cot_messenger based on new settings
-    # Ensure serial reader threads remain running after toggling TAK mode
-    for port in SELECTED_PORTS.values():
-        if port not in serial_objs:
-            start_serial_thread(port)
-    response = dict(TAK_SETTINGS)
-    response['p12Filename'] = TAK_SETTINGS.get('p12Filename', '')
-    return jsonify(response)
-
-# TAK connection status API
-@app.route('/api/tak_status', methods=['GET'])
-def api_tak_status():
-    try:
-        connected = _tak_client is not None and _tak_client.sock is not None
-    except NameError:
-        connected = False
-    return jsonify({'connected': connected})
-
-@app.route('/api/upload_tak_certs', methods=['POST'])
-def api_upload_tak_certs():
-    if 'p12' not in request.files:
-        return jsonify({'status': 'error', 'message': 'No P12 file provided'}), 400
-    p12 = request.files['p12']
-    password = request.form.get('password', '')
-    cert_path = os.path.join(BASE_DIR, 'tak.p12')
-    p12.save(cert_path)
-    with open(os.path.join(BASE_DIR, 'tak_password.txt'), 'w') as f:
-        f.write(password)
-    TAK_SETTINGS['p12Filename'] = p12.filename
-    # Persist updated p12 filename
-    try:
-        with open(SETTINGS_FILE, 'w') as f:
-            json.dump(TAK_SETTINGS, f)
-    except Exception as e:
-        print(f"[TAK DEBUG] Failed to save p12Filename to settings: {e}")
-    return jsonify({'status':'ok','p12Filename': p12.filename})
-
-# ----------------------
 # HTML & JS (UI) Section
 # ----------------------
 # Updated: The selection page now has three dropdowns.
@@ -822,37 +334,7 @@ PORT_SELECTION_PAGE = '''
 <head>
   <meta charset="UTF-8">
   <title>Select USB Serial Ports</title>
-  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
   <style>
-    /* Tooltip for collapsed TAK Mode */
-    .tooltip-container {
-        position: relative;
-        display: inline-block;
-    }
-    .tooltip-container .tak-tooltip {
-        visibility: hidden;
-        width: 168px;
-        background-color: rgba(0, 0, 0, 0.8);
-        color: #00FF00;
-        text-shadow: none;
-        font-family: monospace;
-        font-size: 0.56em;
-        padding: 4px;
-        position: absolute;
-        top: 100%;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: 100;
-        white-space: normal;
-        border-radius: 0;
-        margin-top: 5px;
-    }
-    .tooltip-container:hover .tak-tooltip {
-        visibility: visible;
-    }
-    .tooltip-container.expanded .tak-tooltip {
-        visibility: hidden;
-    }
     /* Hide tile seams */
     .leaflet-tile {
       border: none !important;
@@ -863,122 +345,49 @@ PORT_SELECTION_PAGE = '''
     .leaflet-container {
       background-color: black !important;
     }
-    body {
-      margin: 0;
-      padding: 0;
-      font-family: 'Orbitron', monospace;
-      background-color: #0a001f;
-      color: #0ff;
-      text-shadow: 0 0 8px #0ff, 0 0 16px #f0f;
-      text-align: center;
+    body { background-color: black; color: lime; font-family: monospace; text-align: center;
       zoom: 1.15;
     }
-    pre { font-size: 16px; margin: 10px auto; }
+    pre { font-size: 16px; margin: 20px auto; }
     form {
       display: inline-block;
-      text-align: center;
+      text-align: left;
     }
     li { list-style: none; margin: 10px 0; }
-    select {
-      background-color: #333;
-      color: lime;
-      border: none;
-      padding: 3px;
-      margin-bottom: 5px;
-      box-shadow: 0 0 4px #0ff;
-    }
+    select { background-color: #333; color: lime; border: none; padding: 3px; margin-bottom: 10px; }
     label { font-size: 18px; }
     /* Style and center the select-ports submit button */
     button[type="submit"] {
       display: block;
-      margin: 1em auto 5px auto;
+      margin: 10px auto;
       padding: 5px;
       border: 1px solid lime;
-      background-color: #333;
-      color: lime;
-      font-family: 'Orbitron', monospace;
+      background: linear-gradient(to right, lime, yellow);
+      color: black;
+      font-family: monospace;
       cursor: pointer;
       outline: none;
       border-radius: 10px;
-      box-shadow: 0 0 8px #f0f, 0 0 16px #0ff;
     }
     /* Shrink only the logo ASCII block */
     pre.logo-art {
       display: inline-block;
-      margin: 0 auto;
-      margin-bottom: 10px;
+      margin: 2px auto 0;
     }
     /* Gradient styling for ASCII art below the button */
     pre.ascii-art {
-      margin: 0;
-      padding: 5px;
       background: linear-gradient(to right, blue, purple, pink, lime, green);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       font-family: monospace;
+      padding: 10px;
       font-size: 90%;
     }
     h1 {
-      font-size: 18px;
-      font-family: 'Orbitron', monospace;
-      margin: 1em 0 4px 0;
-    }
-    /* Style TAK settings inputs and buttons to match main UI */
-    #portTakSettings input[type="text"],
-    #portTakSettings input[type="password"] {
-      background-color: #222;
-      color: #87CEEB;
-      border: 1px solid #FF00FF;
-      padding: 4px;
-      font-size: 1em;
-      outline: none;
-    }
-    #portTakSettings input[type="checkbox"] {
-      transform: scale(1.2);
-    }
-    #portTakSettings button {
-      margin-top: 4px;
-      padding: 3px;
-      font-size: 0.8em;
-      border: 1px solid lime;
-      background-color: #333;
-      color: lime;
-      cursor: pointer;
-      width: auto;
-      border-radius: 10px;
-      font-family: 'Orbitron', monospace;
-    }
-    #portTakSettings {
-      margin-top: 5px;
-      text-align: center;
-    }
-    #portTakP12Filename {
-      color: #FF00FF;
-      font-family: monospace;
-      margin-top: 4px;
-      text-align: center;
-    }
-    /* Cyberpunk toggle styling */
-    .switch { position: relative; display: inline-block; vertical-align: middle; width: 40px; height: 20px; }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .4s; border-radius: 20px; }
-    .slider:before {
-        position: absolute;
-        content: "";
-        height: 16px;
-        width: 16px;
-        left: 2px;
-        top: 50%;
-        background-color: lime;
-        border: 1px solid #9B30FF;
-        transition: .4s;
-        border-radius: 50%;
-        transform: translateY(-50%);
-    }
-    .switch input:checked + .slider { background-color: lime; }
-    .switch input:checked + .slider:before {
-        transform: translateX(20px) translateY(-50%);
-        border: 1px solid #9B30FF;
+      background: linear-gradient(to right, lime, yellow);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin: 2px 0;
     }
   </style>
 </head>
@@ -1007,29 +416,7 @@ PORT_SELECTION_PAGE = '''
         <option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>
       {% endfor %}
     </select><br>
-    <div id="portTakModeContainer" class="tooltip-container" style="text-align:center; margin:5px 0;">
-        <label style="font-size:18px; font-family:'Orbitron', monospace; display:inline-block; margin-right:10px; vertical-align:middle;">Enable TAK Mode</label>
-        <label class="switch" style="vertical-align:middle;">
-          <input type="checkbox" id="portTakModeSwitch">
-          <span class="slider"></span>
-        </label>
-        <div class="tak-tooltip">Please note - if mesh-mapper is not able to connect to your TAK server, you will need to disable TAK Mode in order to access the mapping screen.</div>
-    </div>
-    <div id="portTakSettings" style="display:none; text-align:center;">
-      <label style="display:inline-block; margin-right:10px; margin-bottom:5px;">TAK IP: <input type="text" id="portTakIP" value="127.0.0.1" style="width:100px;"></label>
-      <label style="display:inline-block; margin-bottom:5px;">Port: <input type="text" id="portTakPort" value="8444" style="width:60px;"></label><br>
-      <div style="margin-bottom:5px; text-align:center;">
-        <button id="portTakP12Button">Upload P12</button>
-        <div id="portTakP12Filename" style="color:lime; border:1px solid #FF00FF; border-radius:4px; padding:2px; margin:4px auto; display:inline-block;"></div>
-        <input type="file" id="portTakP12" accept=".p12" style="display:none;" />
-        <input type="password" id="portTakP12Pass" placeholder="Password" style="width:80px;" />
-        <label style="display:inline-block; margin-left:10px;">Skip Verify: <input type="checkbox" id="portTakSkipVerify" checked></label>
-        <button id="portApplyTakSettings" style="display:inline-block; margin-left:10px;">Update TAK</button>
-      </div>
-    </div>
-        <button id="beginMapping" type="submit" style="display:block; margin:20px auto 0; padding:8px 12px; border:1px solid lime; background-color:#333; color:lime; font-family:monospace; cursor:pointer;">
-          Begin Mapping
-        </button>
+    <button type="submit">Select Ports</button>
   </form>
   <pre class="ascii-art">{{ bottom_ascii }}</pre>
   <script>
@@ -1065,108 +452,12 @@ PORT_SELECTION_PAGE = '''
     window.onload = function() {
       refreshPortOptions();
     }
-    // TAK P12 upload controls
-    document.getElementById('portTakP12Button').addEventListener('click', function(e) {
-      e.preventDefault();
-      document.getElementById('portTakP12').click();
-    });
-    document.getElementById('portTakP12').addEventListener('change', function() {
-      const fileInput = document.getElementById('portTakP12');
-      const filenameDiv = document.getElementById('portTakP12Filename');
-      filenameDiv.textContent = fileInput.files.length ? fileInput.files[0].name : '';
-    });
-
-    document.getElementById('portApplyTakSettings').addEventListener('click', function(e) {
-      e.preventDefault();
-      const enabled = document.getElementById('portTakModeSwitch').checked;
-      const endpoint = `${document.getElementById('portTakIP').value.trim()}:${document.getElementById('portTakPort').value.trim()}`;
-      const skipVerify = document.getElementById('portTakSkipVerify').checked;
-      const p12Input = document.getElementById('portTakP12');
-      const passwordInput = document.getElementById('portTakP12Pass');
-      if (p12Input.files.length) {
-        const formData = new FormData();
-        formData.append('p12', p12Input.files[0]);
-        formData.append('password', passwordInput.value);
-        fetch('/api/upload_tak_certs', { method: 'POST', body: formData })
-          .then(res => {
-            if (!res.ok) throw new Error('Failed to upload P12');
-            return res.json();
-          })
-          .then(function(uploadData) {
-            document.getElementById('portTakP12Filename').textContent = uploadData.p12Filename || '';
-            return fetch('/api/tak_settings', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ enabled, endpoint, skipVerify })
-            });
-          })
-          .then(res => res.json())
-          .then(function(data) {
-            // Optionally update UI fields here if needed
-          })
-          .catch(function(err) {
-            console.error('Error uploading TAK P12 or updating settings:', err);
-          });
-      } else {
-        fetch('/api/tak_settings', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ enabled, endpoint, skipVerify })
-        })
-        .then(res => res.json())
-        .then(function(data) {
-          // Optionally update UI fields here if needed
-        })
-        .catch(function(err) {
-          console.error('Error updating TAK settings:', err);
-        });
-      }
-    });
-    // Show/hide TAK settings when portTakModeSwitch toggled
-    const portTakSettings = document.getElementById('portTakSettings');
-    const portTakSwitch = document.getElementById('portTakModeSwitch');
-    portTakSettings.style.display = portTakSwitch.checked ? 'block' : 'none';
-    const modeContainer = document.getElementById('portTakModeContainer');
-    if (portTakSwitch.checked) { modeContainer.classList.add('expanded'); } else { modeContainer.classList.remove('expanded'); }
-    portTakSwitch.addEventListener('change', () => {
-      portTakSettings.style.display = portTakSwitch.checked ? 'block' : 'none';
-      const modeContainer = document.getElementById('portTakModeContainer');
-      if (portTakSwitch.checked) { modeContainer.classList.add('expanded'); } else { modeContainer.classList.remove('expanded'); }
-    });
-
-    // Auto-update backend TAK setting when toggled on port selection screen
-    portTakSwitch.addEventListener('change', () => {
-      fetch('/api/tak_settings', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ enabled: portTakSwitch.checked })
-      })
-      .then(res => res.json())
-      .catch(err => console.error('Error toggling TAK settings:', err));
-    });
-
-
-    // Load persisted TAK settings on page load
-    fetch(window.location.origin + '/api/tak_settings')
-      .then(res => res.json())
-      .then(data => {
-        portTakSwitch.checked = data.enabled;
-        const [ip, port] = data.endpoint.split(':');
-        document.getElementById('portTakIP').value = ip;
-        document.getElementById('portTakPort').value = port;
-        document.getElementById('portTakSkipVerify').checked = data.skipVerify;
-        document.getElementById('portTakP12Filename').textContent = data.p12Filename || '';
-        document.getElementById('portTakP12Pass').value = data.password || '';
-        portTakSettings.style.display = data.enabled ? 'block' : 'none';
-        repositionBeginBtn();
-      })
-      .catch(err => console.error('Error loading TAK settings:', err));
   </script>
 </body>
 </html>
 '''
 
-    # Updated: The main mapping page now shows serial statuses for all selected USB devices.
+# Updated: The main mapping page now shows serial statuses for all selected USB devices.
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -1175,7 +466,6 @@ HTML_PAGE = '''
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mesh Mapper</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
-  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <style>
     /* Hide tile seams on all map layers */
@@ -1190,33 +480,13 @@ HTML_PAGE = '''
       background-color: black !important;
     }
     /* Toggle switch styling */
-    .switch { position: relative; display: inline-block; vertical-align: middle; width: 40px; height: 20px; }
+    .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
     .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .4s; border-radius: 20px; }
-    .slider:before {
-      position: absolute;
-      content: "";
-      height: 16px;
-      width: 16px;
-      left: 2px;
-      top: 50%;
-      background-color: lime;
-      border: 1px solid #9B30FF;
-      transition: .4s;
-      border-radius: 50%;
-      transform: translateY(-50%);
-    }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #333; transition: .4s; border-radius: 20px; }
+    .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: lime; transition: .4s; border-radius: 50%; }
     .switch input:checked + .slider { background-color: lime; }
-    .switch input:checked + .slider:before {
-      transform: translateX(20px) translateY(-50%);
-      border: 1px solid #9B30FF;
-    }
-    body, html {
-      margin: 0;
-      padding: 0;
-      background-color: #0a001f;
-      font-family: 'Orbitron', monospace;
-    }
+    .switch input:checked + .slider:before { transform: translateX(20px); }
+    body, html { margin: 0; padding: 0; background-color: black; }
     #map { height: 100vh; }
     /* Layer control styling (bottom left) reduced by 30% */
     #layerControl {
@@ -1227,94 +497,63 @@ HTML_PAGE = '''
       padding: 3.5px; /* reduced from 5px */
       border: 0.7px solid lime; /* reduced border thickness */
       border-radius: 7px; /* reduced from 10px */
-      color: #FF00FF;
+      color: lime;
       font-family: monospace;
       font-size: 0.7em; /* scale font by 70% */
       z-index: 1000;
     }
-    /* Basemap label always neon pink */
-    #layerControl > label {
-      color: #FF00FF;
-    }
     #layerControl select,
     #layerControl select option {
       background-color: #333;
-      color: lime;
+      color: #FF00FF;
       border: none;
       padding: 2.1px;
       font-size: 0.7em;
     }
     
-        #filterBox {
-          position: absolute;
-          top: 10px;
-          right: 10px;
-          background: rgba(0,0,0,0.8);
-          padding: 8px;
-          width: 18.75vw;
-          border: 1px solid lime;
-          border-radius: 10px;
-          color: lime;
-          font-family: monospace;
-          max-height: 95vh;
-          overflow-y: auto;
-          overflow-x: hidden;
-          z-index: 1000;
-        }
-        @media (max-width: 600px) {
-          #filterBox {
-            width: 37.5vw;
-            max-width: 90vw;
-          }
-        }
-        /* Auto-size inputs inside filterBox */
-        #filterBox input[type="text"],
-        #filterBox input[type="password"],
-        #filterBox input[type="range"],
-        #filterBox select {
-          width: auto !important;
-          min-width: 0;
-        }
-    #filterBox.collapsed #filterContent {
-      display: none;
+    #filterBox {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 220px;
+      background: rgba(0,0,0,0.8);
+      padding: 8px;
+      border: 1px solid lime;
+      border-radius: 10px;
+      color: lime;
+      font-family: monospace;
+      max-height: 80vh;
+      overflow: hidden;
+      transition: max-height 0.3s ease;
+      z-index: 1000;
+      transform: scale(0.85);
+      transform-origin: top right;
     }
-    /* Tighten header when collapsed */
+    /* Collapsed filterBox shows only header, emoji, and toggle */
     #filterBox.collapsed {
-      padding: 4px;
-      width: auto;
+      overflow: hidden;
+      width: auto;         /* shrink width to content */
+      padding: 4px;        /* minimal padding around header */
     }
-    #filterBox.collapsed #filterHeader {
-      padding: 0;
-    }
-    #filterBox.collapsed #filterHeader h3 {
-      display: inline-block;
-      flex: none;
-      width: auto;
-      margin: 0;
-      color: #FF00FF;
-    }
-# Add margin to filterToggle when collapsed
-    #filterBox.collapsed #filterHeader #filterToggle {
-      margin-left: 5px;
-    }
-    #filterBox:not(.collapsed) #filterHeader h3 {
+    #filterBox.collapsed #filterContent {
       display: none;
     }
     #filterHeader {
       display: flex;
       align-items: center;
     }
-    #filterBox:not(.collapsed) #filterHeader {
-      justify-content: flex-end;
-    }
     #filterHeader h3 {
-      flex: none;
+      flex: 1;
       text-align: center;
       margin: 0;
       font-size: 1em;
       display: block;
       width: 100%;
       color: #FF00FF;
+    }
+    /* Hide the header text when the box is expanded */
+    #filterBox:not(.collapsed) #filterHeader h3 {
+      display: none;
     }
     
     /* USB status box styling (bottom right) - now even with the map layer select */
@@ -1343,28 +582,6 @@ HTML_PAGE = '''
       padding: 3px;
       cursor: pointer;
     }
-    .drone-item.no-gps {
-      position: relative;
-    }
-    .drone-item.no-gps:hover::after {
-      content: attr(data-tooltip);
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      transform: translateX(-50%);
-      background: black;
-      color: #00FF00;
-      padding: 2px 4px;
-      border-radius: 3px;
-      white-space: nowrap;
-      font-family: monospace;
-      font-size: 0.75em;
-      z-index: 2000;
-    }
-    /* Highlight recently seen drones */
-    .drone-item.recent {
-      box-shadow: 0 0 0 1px lime;
-    }
     .placeholder {
       border: 2px solid transparent;
       border-image: linear-gradient(to right, lime 85%, yellow 15%) 1;
@@ -1386,22 +603,8 @@ HTML_PAGE = '''
       white-space: normal;
     }
     .leaflet-popup-tip { background: lime; }
-    button {
-      margin-top: 4px;
-      padding: 3px;
-      font-size: 0.8em;
-      border: 1px solid lime;
-      background-color: #333;
-      color: lime;
-      cursor: pointer;
-      width: auto;
-    }
-    select {
-      background-color: #333;
-      color: lime;
-      border: none;
-      padding: 3px;
-    }
+    button { margin-top: 4px; padding: 3px; font-size: 0.8em; border: none; background-color: #333; color: lime; cursor: pointer; }
+    select { background-color: #333; color: lime; border: none; padding: 3px; }
     .leaflet-control-zoom-in, .leaflet-control-zoom-out {
       background: rgba(0,0,0,0.8);
       color: lime;
@@ -1438,40 +641,18 @@ HTML_PAGE = '''
     .leaflet-control-zoom-in:hover, .leaflet-control-zoom-out:hover { background-color: #222; }
     input#aliasInput {
       background-color: #222;
-      color: #87CEEB;         /* pastel blue (updated) */
+      color: #FF00FF;
       border: 1px solid #FF00FF;
-      padding: 4px;
-      font-size: 1.06em;
-      caret-color: #87CEEB;
+      padding: 2px;
+      font-size: 0.8em;
+      caret-color: transparent;
       outline: none;
     }
-    .leaflet-popup-content-wrapper input:not(#aliasInput) {
-      caret-color: transparent;
-    }
-    /* Popup button styling */
+    /* Popup button and input sizing */
     .leaflet-popup-content-wrapper button {
-      display: inline-block;
-      margin: 2px 4px 2px 0;
-      padding: 4px 6px;
       font-size: 0.9em;
-      width: auto;
-      background-color: #333;
-      border: 1px solid lime;
-      color: lime;
-      box-shadow: none;
-      text-shadow: none;
-    }
-
-    /* Locked button styling */
-    .leaflet-popup-content-wrapper button[style*="background-color: green"] {
-      background-color: green;
-      color: black;
-      border-color: green;
-    }
-
-    /* Hover effect */
-    .leaflet-popup-content-wrapper button:hover {
-      background-color: rgba(255,255,255,0.1);
+      padding: 4px;
+      margin-top: 5px;
     }
     .leaflet-popup-content-wrapper input[type="text"],
     .leaflet-popup-content-wrapper input[type="range"] {
@@ -1504,21 +685,20 @@ HTML_PAGE = '''
     }
     /* Cyberpunk styling for filter headings */
     #filterContent > h3:nth-of-type(1) {
-      color: #FF00FF;         /* Active Drones in magenta */
+      color: #BA55D3;         /* Active Drones in purple */
       text-align: center;     /* center text */
       font-size: 1.1em;       /* slightly larger font */
     }
     #filterContent > h3:nth-of-type(2) {
-      color: #FF00FF;        /* more magenta */
+      color: #BA55D3;        /* more pastel purple */
       text-align: center;    /* center text */
       font-size: 1.1em;      /* slightly larger font */
     }
     /* Lime-green hacky dashes around filter headers */
     #filterContent > h3 {
-      display: block;
-      width: 100%;
-      text-align: center;
-      margin: 0.5em 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     #filterContent > h3::before,
     #filterContent > h3::after {
@@ -1529,18 +709,17 @@ HTML_PAGE = '''
     /* Download buttons styling */
     #downloadButtons {
       display: flex;
-      width: 100%;
-      gap: 4px;
+      justify-content: space-between;
       margin-top: 8px;
     }
     #downloadButtons button {
       flex: 1;
-      margin: 0;
+      margin: 0 4px;
       padding: 4px;
       font-size: 0.8em;
       border: 1px solid lime;
       border-radius: 5px;
-      background-color: #333;
+      background: #333;
       color: lime;
       font-family: monospace;
       cursor: pointer;
@@ -1562,143 +741,7 @@ HTML_PAGE = '''
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
-    /* Staleout slider styling – match popup sliders */
-    #staleoutSlider {
-      -webkit-appearance: none;
-      width: 100%;
-      height: 3px;
-      background: transparent;
-      border: none;
-      outline: none;
-    }
-    #staleoutSlider::-webkit-slider-runnable-track {
-      width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: none;
-      border-radius: 0;
-    }
-    #staleoutSlider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
-      border-radius: 50%;
-      cursor: pointer;
-    }
-    /* Firefox */
-    #staleoutSlider::-moz-range-track {
-      width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: none;
-      border-radius: 0;
-    }
-    #staleoutSlider::-moz-range-thumb {
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
-      border-radius: 50%;
-      cursor: pointer;
-    }
-    /* IE */
-    #staleoutSlider::-ms-fill-lower,
-    #staleoutSlider::-ms-fill-upper {
-      background: #9B30FF;
-      border: none;
-      border-radius: 2px;
-    }
-    #staleoutSlider::-ms-thumb {
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      border-radius: 50%;
-      cursor: pointer;
-      margin-top: -6.5px;
-    }
-
-    /* Popup range sliders styling */
-    .leaflet-popup-content-wrapper input[type="range"] {
-      -webkit-appearance: none;
-      width: 100%;
-      height: 3px;
-      background: transparent;
-      border: none;
-    }
-    .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
-      border-radius: 50%;
-      cursor: pointer;
-    }
-    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-thumb {
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
-      border-radius: 50%;
-      cursor: pointer;
-    }
-    /* Ensure popup sliders have the same track styling */
-    .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-runnable-track {
-      width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: 1px solid lime;
-      border-radius: 0;
-    }
-    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-track {
-      width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: 1px solid lime;
-      border-radius: 0;
-    }
-
-    /* 1) Remove rounded corners from all sliders */
-    /* WebKit */
-    input[type="range"]::-webkit-slider-runnable-track,
-    input[type="range"]::-webkit-slider-thumb {
-      border-radius: 0;
-    }
-    /* Firefox */
-    input[type="range"]::-moz-range-track,
-    input[type="range"]::-moz-range-thumb {
-      border-radius: 0;
-    }
-    /* IE */
-    input[type="range"]::-ms-fill-lower,
-    input[type="range"]::-ms-fill-upper,
-    input[type="range"]::-ms-thumb {
-      border-radius: 0;
-    }
-
-    /* 2) Smaller, side-by-side Observer buttons */
-    .leaflet-popup-content-wrapper #lock-observer,
-    .leaflet-popup-content-wrapper #unlock-observer {
-      display: inline-block;
-      font-size: 0.9em;
-      padding: 4px 6px;
-      margin: 2px 4px 2px 0;
-    }
-</style>
-    <style>
-      /* Remove glow and shadows on text boxes, selects, and buttons */
-      input, select, button {
-        text-shadow: none !important;
-        box-shadow: none !important;
-      }
-    </style>
+  </style>
 </head>
 <body>
 <div id="map"></div>
@@ -1725,13 +768,6 @@ HTML_PAGE = '''
     <div id="activePlaceholder" class="placeholder"></div>
     <h3>Inactive Drones</h3>
     <div id="inactivePlaceholder" class="placeholder"></div>
-    <!-- Staleout Slider -->
-    <div style="margin-top:8px; display:flex; flex-direction:column; align-items:stretch; width:100%; box-sizing:border-box;">
-      <label style="color:lime; font-family:monospace; margin-bottom:4px; display:block; width:100%; text-align:center;">Staleout Time</label>
-      <input type="range" id="staleoutSlider" min="1" max="5" step="1" value="1" 
-             style="width:100%; border:1px solid lime; margin-bottom:4px;">
-      <div id="staleoutValue" style="color:lime; font-family:monospace; width:100%; text-align:center;">1 min</div>
-    </div>
     <!-- Downloads Section -->
     <div id="downloadSection">
       <h4 class="downloadHeader">Download Logs</h4>
@@ -1741,31 +777,15 @@ HTML_PAGE = '''
         <button id="downloadAliases">Aliases</button>
       </div>
     </div>
-    <!-- TAK Mode block -->
-    <div style="margin-top:8px; display:flex; flex-direction:column; align-items:center;">
-      <label style="color:lime; font-family:monospace; margin-bottom:4px;">TAK Mode</label>
-      <label class="switch">
-        <input type="checkbox" id="takModeMainSwitch">
-        <span class="slider"></span>
-      </label>
-      <div id="takStatusIndicator"
-           style="border:1px solid #FF00FF; border-radius:5px; padding:4px 6px; margin-top:8px; color:red; font-family:monospace; font-size:0.8em;">
-        Disconnected
-      </div>
-      <div style="color:#FF00FF; font-family:monospace; font-size:0.75em; text-align:center; margin-top:4px;">
-        Sends CoT messages to TAK server
-      </div>
-    </div>
-    <!-- Node Mode block -->
-    <div style="margin-top:8px; display:flex; flex-direction:column; align-items:center;">
-      <label style="color:lime; font-family:monospace; margin-bottom:4px;">Node Mode</label>
+    <div style="margin-top:8px; text-align:center;">
+      <label style="color:lime; font-family:monospace; margin-right:8px;">Node Mode</label>
       <label class="switch">
         <input type="checkbox" id="nodeModeMainSwitch">
         <span class="slider"></span>
       </label>
-      <div style="color:#FF00FF; font-family:monospace; font-size:0.75em; text-align:center; margin-top:4px;">
-        Polls detections every second instead of every 100 ms to reduce CPU/battery use in Node Mode
-      </div>
+    </div>
+    <div style="color:#FF00FF; font-family:monospace; font-size:0.75em; white-space:normal; line-height:1.2; margin-top:4px; text-align:center;">
+      Polls detections every second instead of every 200 ms to reduce CPU/battery use and optimizes API for Node Mode.
     </div>
   </div>
 </div>
@@ -1783,26 +803,6 @@ HTML_PAGE = '''
   })();
 // --- Node Mode Main Switch & Polling Interval Sync ---
 document.addEventListener('DOMContentLoaded', () => {
-  // Restore filter collapsed state
-  const filterBox = document.getElementById('filterBox');
-  const filterToggle = document.getElementById('filterToggle');
-  const wasCollapsed = localStorage.getItem('filterCollapsed') === 'true';
-  if (wasCollapsed) {
-    filterBox.classList.add('collapsed');
-    filterToggle.textContent = '[+]';
-  }
-  // restore follow-lock on reload
-  const storedLock = localStorage.getItem('followLock');
-  if (storedLock) {
-    try {
-      followLock = JSON.parse(storedLock);
-      if (followLock.type === 'observer') {
-        updateObserverPopupButtons();
-      } else if (followLock.type === 'drone' || followLock.type === 'pilot') {
-        updateMarkerButtons(followLock.type, followLock.id);
-      }
-    } catch (e) { console.error('Failed to restore followLock', e); }
-  }
   // Ensure Node Mode default is off if unset
   if (localStorage.getItem('nodeMode') === null) {
     localStorage.setItem('nodeMode', 'false');
@@ -1815,93 +815,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const enabled = mainSwitch.checked;
       localStorage.setItem('nodeMode', enabled);
       clearInterval(updateDataInterval);
-      updateDataInterval = setInterval(updateData, enabled ? 1000 : 100);
+      updateDataInterval = setInterval(updateData, enabled ? 1000 : 200);
       // Sync popup toggle if open
       const popupSwitch = document.getElementById('nodeModePopupSwitch');
       if (popupSwitch) popupSwitch.checked = enabled;
     };
   }
-    // Sync TAK Mode toggle with backend setting
-    const takSwitch = document.getElementById('takModeMainSwitch');
-    if (takSwitch) {
-        // Load current backend TAK enabled state
-        fetch(window.location.origin + '/api/tak_settings')
-          .then(res => res.json())
-          .then(data => { takSwitch.checked = data.enabled; })
-          .catch(err => console.error('Error loading TAK settings:', err));
-        takSwitch.onchange = () => {
-          fetch(window.location.origin + '/api/tak_settings', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ enabled: takSwitch.checked })
-          })
-          .then(res => res.json())
-          .then(() => {
-            // Immediately refresh detection and TAK status after toggling TAK
-            updateData();
-            updateTakStatus();
-          })
-          .catch(err => console.error('Error updating TAK settings:', err));
-        };
-    }
-    // TAK connection status indicator
-    const takStatusDiv = document.getElementById('takStatusIndicator');
-    async function updateTakStatus() {
-      try {
-        const res = await fetch(window.location.origin + '/api/tak_status');
-        const js = await res.json();
-        takStatusDiv.textContent = js.connected ? 'Connected' : 'Disconnected';
-        takStatusDiv.style.color = js.connected ? 'lime' : 'red';
-      } catch (e) {
-        takStatusDiv.textContent = 'Disconnected';
-        takStatusDiv.style.color = 'red';
-      }
-    }
-    updateTakStatus();
-    setInterval(updateTakStatus, 2000);
   // Start polling based on current setting
   updateData();
-  updateDataInterval = setInterval(updateData, mainSwitch && mainSwitch.checked ? 1000 : 100);
-  // Adaptive polling: slow down during map interactions
-  map.on('zoomstart dragstart', () => {
-    clearInterval(updateDataInterval);
-    updateDataInterval = setInterval(updateData, 500);
-  });
-  map.on('zoomend dragend', () => {
-    clearInterval(updateDataInterval);
-    const interval = mainSwitch && mainSwitch.checked ? 1000 : 100;
-    updateDataInterval = setInterval(updateData, interval);
-  });
-
-  // Staleout slider initialization
-  const staleoutSlider = document.getElementById('staleoutSlider');
-  const staleoutValue = document.getElementById('staleoutValue');
-  if (staleoutSlider && typeof STALE_THRESHOLD !== 'undefined') {
-    staleoutSlider.value = STALE_THRESHOLD / 60;
-    staleoutValue.textContent = (STALE_THRESHOLD / 60) + ' min';
-    staleoutSlider.oninput = () => {
-      const minutes = parseInt(staleoutSlider.value, 10);
-      STALE_THRESHOLD = minutes * 60;
-      staleoutValue.textContent = minutes + ' min';
-      localStorage.setItem('staleoutMinutes', minutes.toString());
-    };
-  }
-  // Filter box toggle persistence
-  if (filterToggle && filterBox) {
-    filterToggle.addEventListener('click', function() {
-      filterBox.classList.toggle('collapsed');
-      filterToggle.textContent = filterBox.classList.contains('collapsed') ? '[+]' : '[-]';
-      // Persist filter collapsed state
-      localStorage.setItem('filterCollapsed', filterBox.classList.contains('collapsed'));
-    });
-  }
-});
-// Fallback collapse handler to ensure filter toggle works
-document.getElementById("filterToggle").addEventListener("click", function() {
-  const box = document.getElementById("filterBox");
-  const isCollapsed = box.classList.toggle("collapsed");
-  this.textContent = isCollapsed ? "[+]" : "[-]";
-  localStorage.setItem('filterCollapsed', isCollapsed);
+  updateDataInterval = setInterval(updateData, mainSwitch && mainSwitch.checked ? 1000 : 200);
 });
 // Optimize tile loading for smooth zoom and aggressive preloading
 L.Map.prototype.options.fadeAnimation = false;
@@ -1952,39 +874,26 @@ if (localStorage.getItem('colorOverrides')) {
   catch(e){ window.colorOverrides = {}; }
 } else { window.colorOverrides = {}; }
 
-// Restore historical drones from localStorage
 if (localStorage.getItem('historicalDrones')) {
   try { window.historicalDrones = JSON.parse(localStorage.getItem('historicalDrones')); }
-  catch(e) { window.historicalDrones = {}; }
-} else {
-  window.historicalDrones = {};
-}
+  catch(e){ window.historicalDrones = {}; }
+} else { window.historicalDrones = {}; }
 
-// Restore map center and zoom from localStorage
 let persistedCenter = localStorage.getItem('mapCenter');
 let persistedZoom = localStorage.getItem('mapZoom');
 if (persistedCenter) {
-  try { persistedCenter = JSON.parse(persistedCenter); } catch(e) { persistedCenter = null; }
-} else {
-  persistedCenter = null;
-}
-persistedZoom = persistedZoom ? parseInt(persistedZoom, 10) : null;
+  try { persistedCenter = JSON.parse(persistedCenter); } catch(e){ persistedCenter = null; }
+} else { persistedCenter = null; }
+persistedZoom = persistedZoom ? parseInt(persistedZoom) : null;
 
-// Application-level globals
 var aliases = {};
 var colorOverrides = window.colorOverrides;
-
-// Load stale-out minutes from localStorage (default 1) and compute threshold in seconds
-if (localStorage.getItem('staleoutMinutes') === null) {
-  localStorage.setItem('staleoutMinutes', '1');
-}
-let STALE_THRESHOLD = parseInt(localStorage.getItem('staleoutMinutes'), 10) * 60;
-
+const STALE_THRESHOLD = 60;  // changed from 300 to 60 seconds for stale threshold in client side code
 var comboListItems = {};
 
 async function updateAliases() {
   try {
-    const response = await fetch(window.location.origin + '/api/aliases');
+    const response = await fetch('/api/aliases');
     aliases = await response.json();
     updateComboList(window.tracked_pairs);
   } catch (error) { console.error("Error fetching aliases:", error); }
@@ -1994,51 +903,6 @@ function safeSetView(latlng, zoom=18) {
   let currentZoom = map.getZoom();
   let newZoom = zoom > currentZoom ? zoom : currentZoom;
   map.setView(latlng, newZoom);
-}
-
-// Transient terminal-style popup for drone events
-function showTerminalPopup(det, isNew) {
-  // Remove any existing popup
-  const old = document.getElementById('dronePopup');
-  if (old) old.remove();
-
-  // Build a new popup container
-  const popup = document.createElement('div');
-  popup.id = 'dronePopup';
-  const isMobile = window.innerWidth <= 600;
-  Object.assign(popup.style, {
-    position: 'fixed',
-    top: isMobile ? '60px' : '10px',
-    left: '50%',
-    transform: 'translateX(-50%)',
-    background: 'rgba(0,0,0,0.8)',
-    color: 'lime',
-    fontFamily: 'monospace',
-    whiteSpace: 'nowrap',
-    padding: isMobile ? '2px 4px' : '4px 8px',
-    border: '1px solid lime',
-    borderRadius: '4px',
-    zIndex: 2000,
-    opacity: 0.9,
-    fontSize: isMobile ? '0.75em' : '',
-    display: 'inline-block',
-  });
-
-  // Build concise popup text
-  const alias = aliases[det.mac];
-  const rid   = det.basic_id || 'N/A';
-  const header = alias
-    ? 'Known drone detected'
-    : (isNew ? 'New drone detected' : 'Previously seen non-aliased drone detected');
-  const namePart = alias ? alias : '';
-  const content = alias
-    ? `${header} - ${namePart} - RID:${rid} MAC:${det.mac}`
-    : `${header} - RID:${rid} MAC:${det.mac}`;
-  popup.textContent = content;
-  document.body.appendChild(popup);
-
-  // Auto-remove after 4 seconds
-  setTimeout(() => popup.remove(), 4000);
 }
 
 var followLock = { type: null, id: null, enabled: false };
@@ -2059,14 +923,12 @@ function generateObserverPopup() {
        <option value="🥷" ${storedObserverEmoji === "🥷" ? "selected" : ""}>🥷</option>
        <option value="👁️" ${storedObserverEmoji === "👁️" ? "selected" : ""}>👁️</option>
     </select><br>
-    <div style="display:flex; gap:4px; justify-content:center; margin-top:4px;">
-        <button id="lock-observer" onclick="lockObserver()" style="background-color: ${observerLocked ? 'green' : ''};">
-          ${observerLocked ? 'Locked on Observer' : 'Lock on Observer'}
-        </button>
-        <button id="unlock-observer" onclick="unlockObserver()" style="background-color: ${observerLocked ? '' : 'green'};">
-          ${observerLocked ? 'Unlock Observer' : 'Unlocked Observer'}
-        </button>
-    </div>
+    <button id="lock-observer" onclick="lockObserver()" style="background-color: ${observerLocked ? 'green' : ''};">
+      ${observerLocked ? 'Locked on Observer' : 'Lock on Observer'}
+    </button>
+    <button id="unlock-observer" onclick="unlockObserver()" style="background-color: ${observerLocked ? '' : 'green'};">
+      ${observerLocked ? 'Unlock Observer' : 'Unlocked Observer'}
+    </button>
   </div>
   `;
 }
@@ -2081,12 +943,8 @@ function updateObserverEmoji() {
   }
 }
 
-function lockObserver() { followLock = { type: 'observer', id: 'observer', enabled: true }; updateObserverPopupButtons();
-  localStorage.setItem('followLock', JSON.stringify(followLock));
-}
-function unlockObserver() { followLock = { type: null, id: null, enabled: false }; updateObserverPopupButtons();
-  localStorage.setItem('followLock', JSON.stringify(followLock));
-}
+function lockObserver() { followLock = { type: 'observer', id: 'observer', enabled: true }; updateObserverPopupButtons(); }
+function unlockObserver() { followLock = { type: null, id: null, enabled: false }; updateObserverPopupButtons(); }
 function updateObserverPopupButtons() {
   var observerLocked = (followLock.enabled && followLock.type === 'observer');
   var lockBtn = document.getElementById("lock-observer");
@@ -2100,13 +958,11 @@ function generatePopupContent(detection, markerType) {
   let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
   content += '<strong>ID:</strong> <span id="aliasDisplay_' + detection.mac + '" style="color:#FF00FF;">' + aliasText + '</span> (MAC: ' + detection.mac + ')<br>';
   
-  if (detection.basic_id || detection.faa_data) {
-    if (detection.basic_id) {
-      content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div>';
-    }
-    if (detection.basic_id) {
-      content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA API</button>';
-    }
+  if (detection.basic_id) {
+    content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div>';
+    // Button for querying FAA API.
+    content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA API</button>';
+    // FAA data display container.
     content += '<div id="faaResult_' + detection.mac + '" style="margin-top:5px;">';
     if (detection.faa_data) {
       let faaData = detection.faa_data;
@@ -2115,6 +971,7 @@ function generatePopupContent(detection, markerType) {
         item = faaData.data.items[0];
       }
       if (item) {
+        // Only display specific fields in the desired order.
         const fields = ["makeName", "modelName", "series", "trackingNumber", "complianceCategories", "updatedAt"];
         content += '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">';
         fields.forEach(function(field) {
@@ -2147,44 +1004,33 @@ function generatePopupContent(detection, markerType) {
   content += `<hr style="border: 1px solid lime;">
               <label for="aliasInput">Alias:</label>
               <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" 
-                     style="background-color: #222; color: #87CEEB; border: 1px solid #FF00FF;" 
+                     style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" 
                      value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
-              <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:4px;">
-                <button
-                  onclick="saveAlias('${detection.mac}'); this.style.backgroundColor='purple'; setTimeout(()=>this.style.backgroundColor='#333',300);"
-                  style="flex:1; margin:0 2px; padding:4px 0;"
-                >Save Alias</button>
-                <button
-                  onclick="clearAlias('${detection.mac}'); this.style.backgroundColor='purple'; setTimeout(()=>this.style.backgroundColor='#333',300);"
-                  style="flex:1; margin:0 2px; padding:4px 0;"
-                >Clear Alias</button>
-              </div>`;
+              <button onclick="saveAlias('${detection.mac}')">Save Alias</button>
+              <button onclick="clearAlias('${detection.mac}')">Clear Alias</button><br>`;
   
   content += `<div style="border-top:2px solid lime; margin:10px 0;"></div>`;
   
-    var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
-    var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" style="flex:${isDroneLocked ? 1.2 : 0.8}; margin:0 2px; padding:4px 0; background-color: ${isDroneLocked ? 'green' : ''};">
-      ${isDroneLocked ? 'Locked on Drone' : 'Lock on Drone'}
-    </button>`;
-    var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" style="flex:${isDroneLocked ? 0.8 : 1.2}; margin:0 2px; padding:4px 0; background-color: ${isDroneLocked ? '' : 'green'};">
-      ${isDroneLocked ? 'Unlock Drone' : 'Unlocked Drone'}
-    </button>`;
-    var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
-    var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" style="flex:${isPilotLocked ? 1.2 : 0.8}; margin:0 2px; padding:4px 0; background-color: ${isPilotLocked ? 'green' : ''};">
-      ${isPilotLocked ? 'Locked on Pilot' : 'Lock on Pilot'}
-    </button>`;
-    var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" style="flex:${isPilotLocked ? 0.8 : 1.2}; margin:0 2px; padding:4px 0; background-color: ${isPilotLocked ? '' : 'green'};">
-      ${isPilotLocked ? 'Unlock Pilot' : 'Unlocked Pilot'}
-    </button>`;
-    content += `
-      <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:4px;">
-        ${droneLockButton}
-        ${droneUnlockButton}
-      </div>
-      <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:4px;">
-        ${pilotLockButton}
-        ${pilotUnlockButton}
-      </div>`;
+  var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
+  var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" 
+                      style="background-color: ${isDroneLocked ? 'green' : ''};">
+                      ${isDroneLocked ? 'Locked on Drone' : 'Lock on Drone'}
+                    </button>`;
+  var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" 
+                      style="background-color: ${isDroneLocked ? '' : 'green'};">
+                      ${isDroneLocked ? 'Unlock Drone' : 'Unlocked Drone'}
+                    </button>`;
+  var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
+  var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" 
+                      style="background-color: ${isPilotLocked ? 'green' : ''};">
+                      ${isPilotLocked ? 'Locked on Pilot' : 'Lock on Pilot'}
+                    </button>`;
+  var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" 
+                      style="background-color: ${isPilotLocked ? '' : 'green'};">
+                      ${isPilotLocked ? 'Unlock Pilot' : 'Unlocked Pilot'}
+                    </button>`;
+  content += `${droneLockButton} ${droneUnlockButton} <br>
+                ${pilotLockButton} ${pilotUnlockButton}`;
   
   let defaultHue = colorOverrides[detection.mac] !== undefined ? colorOverrides[detection.mac] : (function(){
       let hash = 0;
@@ -2213,7 +1059,7 @@ async function queryFaaAPI(mac, remote_id) {
         button.style.backgroundColor = "gray";
     }
     try {
-        const response = await fetch(window.location.origin + '/api/query_faa', {
+        const response = await fetch('/api/query_faa', {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({mac: mac, remote_id: remote_id})
@@ -2256,29 +1102,15 @@ async function queryFaaAPI(mac, remote_id) {
 }
 
 function lockMarker(markerType, id) {
-  // Remember previous lock so we can clear its buttons
-  const prevId = followLock.id;
-  // Set new lock
   followLock = { type: markerType, id: id, enabled: true };
-  // Update buttons for this id in both drone and pilot sections
   updateMarkerButtons('drone', id);
   updateMarkerButtons('pilot', id);
-  localStorage.setItem('followLock', JSON.stringify(followLock));
-  // If another id was locked before, clear its button states
-  if (prevId && prevId !== id) {
-    updateMarkerButtons('drone', prevId);
-    updateMarkerButtons('pilot', prevId);
-  }
 }
 
 function unlockMarker(markerType, id) {
   if (followLock.enabled && followLock.type === markerType && followLock.id === id) {
-    // Clear the lock
     followLock = { type: null, id: null, enabled: false };
-    // Update buttons for this id in both drone and pilot sections
-    updateMarkerButtons('drone', id);
-    updateMarkerButtons('pilot', id);
-    localStorage.setItem('followLock', JSON.stringify(followLock));
+    updateMarkerButtons(markerType, id);
   }
 }
 
@@ -2309,7 +1141,7 @@ function openAliasPopup(mac) {
 async function saveAlias(mac) {
   let alias = document.getElementById("aliasInput").value;
   try {
-    const response = await fetch(window.location.origin + '/api/set_alias', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mac: mac, alias: alias}) });
+    const response = await fetch('/api/set_alias', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mac: mac, alias: alias}) });
     const data = await response.json();
     if (data.status === "ok") {
       // Immediately update local alias map so popup content uses new alias
@@ -2335,15 +1167,13 @@ async function saveAlias(mac) {
         aliasSpan.style.backgroundColor = 'purple';
         setTimeout(() => { aliasSpan.style.backgroundColor = prevBg; }, 300);
       }
-      // Ensure the alias list updates immediately
-      updateComboList(window.tracked_pairs);
     }
   } catch (error) { console.error("Error saving alias:", error); }
 }
 
 async function clearAlias(mac) {
   try {
-    const response = await fetch(window.location.origin + '/api/clear_alias/' + mac, {method: 'POST'});
+    const response = await fetch('/api/clear_alias/' + mac, {method: 'POST'});
     const data = await response.json();
     if (data.status === "ok") {
       updateAliases();
@@ -2420,7 +1250,6 @@ const map = L.map('map', {
   attributionControl: false,
   maxZoom: initialLayer.options.maxZoom
 });
-var canvasRenderer = L.canvas();
 // create custom Leaflet panes for z-ordering
 map.createPane('pilotCirclePane');
 map.getPane('pilotCirclePane').style.zIndex = 600;
@@ -2431,7 +1260,7 @@ map.getPane('droneCirclePane').style.zIndex = 650;
 map.createPane('droneIconPane');
 map.getPane('droneIconPane').style.zIndex = 651;
 
-map.on('moveend zoomend', function() {
+map.on('moveend', function() {
   let center = map.getCenter();
   let zoom = map.getZoom();
   localStorage.setItem('mapCenter', JSON.stringify(center));
@@ -2443,7 +1272,7 @@ map.on('zoomend', function() {
   // Scale circle and ring radii based on current zoom
   const zoomLevel = map.getZoom();
   const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
-  const circleRadius = size * 0.45;
+  const circleRadius = size * 0.34;
   Object.keys(droneMarkers).forEach(mac => {
     const color = get_color_for_mac(mac);
     droneMarkers[mac].setIcon(createIcon('🛸', color));
@@ -2489,8 +1318,8 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   map.options.maxZoom = maxAllowed;
   localStorage.setItem('basemap', value);
   this.style.backgroundColor = "rgba(0,0,0,0.8)";
-  this.style.color = "lime";
-  setTimeout(() => { this.style.backgroundColor = "rgba(0,0,0,0.8)"; this.style.color = "lime"; }, 500);
+  this.style.color = "#FF00FF";
+  setTimeout(() => { this.style.backgroundColor = "rgba(0,0,0,0.8)"; this.style.color = "#FF00FF"; }, 500);
 });
 
 let persistentMACs = [];
@@ -2528,28 +1357,12 @@ if (navigator.geolocation) {
 } else { console.error("Geolocation is not supported by this browser."); }
 
 function zoomToDrone(mac, detection) {
-  // Only zoom if we have valid, non-zero coordinates
-  if (
-    detection &&
-    detection.drone_lat !== undefined &&
-    detection.drone_long !== undefined &&
-    detection.drone_lat !== 0 &&
-    detection.drone_long !== 0
-  ) {
+  if (detection && detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
     safeSetView([detection.drone_lat, detection.drone_long], 18);
   }
 }
 
 function showHistoricalDrone(mac, detection) {
-  // Only map drones with valid, non-zero coordinates
-  if (
-    detection.drone_lat === undefined ||
-    detection.drone_long === undefined ||
-    detection.drone_lat === 0 ||
-    detection.drone_long === 0
-  ) {
-    return;
-  }
   const color = get_color_for_mac(mac);
   if (!droneMarkers[mac]) {
     droneMarkers[mac] = L.marker([detection.drone_lat, detection.drone_long], {
@@ -2568,9 +1381,8 @@ function showHistoricalDrone(mac, detection) {
     const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
     droneCircles[mac] = L.circleMarker([detection.drone_lat, detection.drone_long],
                                        {
-                                         renderer: canvasRenderer,
                                          pane: 'droneCirclePane',
-                                         radius: size * 0.45,
+                                         radius: size * 0.34,
                                          color: color,
                                          fillColor: color,
                                          fillOpacity: 0.7
@@ -2581,10 +1393,7 @@ function showHistoricalDrone(mac, detection) {
   const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
   if (!lastDrone || lastDrone[0] != detection.drone_lat || lastDrone[1] != detection.drone_long) { dronePathCoords[mac].push([detection.drone_lat, detection.drone_long]); }
   if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
-  dronePolylines[mac] = L.polyline(dronePathCoords[mac], {
-    renderer: canvasRenderer,
-    color: color
-  }).addTo(map);
+  dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
     if (!pilotMarkers[mac]) {
       pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {
@@ -2603,7 +1412,6 @@ function showHistoricalDrone(mac, detection) {
       const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
       pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long],
                                           {
-                                            renderer: canvasRenderer,
                                             pane: 'pilotCirclePane',
                                             radius: size * 0.34,
                                             color: color,
@@ -2619,11 +1427,7 @@ function showHistoricalDrone(mac, detection) {
       pilotPathCoords[mac].push([detection.pilot_lat, detection.pilot_long]);
     }
     if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
-    pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {
-      renderer: canvasRenderer,
-      color: color,
-      dashArray: '5,5'
-    }).addTo(map);
+    pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], { color: color, dashArray: '5,5' }).addTo(map);
   }
 }
 
@@ -2646,17 +1450,10 @@ function updateComboList(data) {
   
   persistentMACs.forEach(mac => {
     let detection = data[mac];
-    let isActive = detection && ((currentTime - detection.last_update) <= STALE_THRESHOLD);
+    let isActive = detection && ((currentTime - detection.last_update) <= 60);  // changed from 300 to 60 seconds
     let item = comboListItems[mac];
     if (!item) {
       item = document.createElement("div");
-      // Tooltip for drones without valid GPS
-      const det = data[mac];
-      const hasGps = det && det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0;
-      if (!hasGps) {
-        item.classList.add('no-gps');
-        item.setAttribute('data-tooltip', 'awaiting valid gps coordinates');
-      }
       comboListItems[mac] = item;
       item.className = "drone-item";
       item.addEventListener("dblclick", () => {
@@ -2684,9 +1481,6 @@ function updateComboList(data) {
     const color = get_color_for_mac(mac);
     item.style.borderColor = color;
     item.style.color = color;
-    // Mark items seen in the last 5 second
-    const isRecent = detection && ((currentTime - detection.last_update) <= 5);
-    item.classList.toggle('recent', isRecent);
     if (isActive) {
       if (item.parentNode !== activePlaceholder) { activePlaceholder.appendChild(item); }
     } else {
@@ -2695,27 +1489,9 @@ function updateComboList(data) {
   });
 }
 
-// Only zoom on truly new detections—never on the initial restore
-var initialLoad    = true;
-var seenDrones     = {};
-var seenAliased    = {};
-var previousActive = {};
-// Initialize seenDrones and previousActive from persisted trackedPairs to suppress reload popups
-(function() {
-  const stored = localStorage.getItem("trackedPairs");
-  if (stored) {
-    try {
-      const storedPairs = JSON.parse(stored);
-      for (const mac in storedPairs) {
-        seenDrones[mac] = true;
-        // previousActive[mac] = true;
-      }
-    } catch(e) { console.error("Failed to parse persisted trackedPairs", e); }
-  }
-})();
 async function updateData() {
   try {
-    const response = await fetch(window.location.origin + '/api/detections')
+    const response = await fetch('/api/detections');
     const data = await response.json();
     window.tracked_pairs = data;
     // Persist current detection data to localStorage so that markers & paths remain on reload.
@@ -2724,14 +1500,14 @@ async function updateData() {
     for (const mac in data) { if (!persistentMACs.includes(mac)) { persistentMACs.push(mac); } }
     for (const mac in data) {
       if (historicalDrones[mac]) {
-        if (data[mac].last_update > historicalDrones[mac].lockTime || (currentTime - historicalDrones[mac].lockTime) > STALE_THRESHOLD) {
+        if (data[mac].last_update > historicalDrones[mac].lockTime || (currentTime - historicalDrones[mac].lockTime) > 60) {  // changed from 300 to 60
           delete historicalDrones[mac];
           localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
           if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
         } else { continue; }
       }
       const det = data[mac];
-      if (!det.last_update || (currentTime - det.last_update > STALE_THRESHOLD)) {
+      if (!det.last_update || (currentTime - det.last_update > 60)) {  // changed from 300 to 60 seconds
         if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
         if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
         if (droneCircles[mac]) { map.removeLayer(droneCircles[mac]); delete droneCircles[mac]; }
@@ -2741,47 +1517,15 @@ async function updateData() {
         if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
         delete dronePathCoords[mac];
         delete pilotPathCoords[mac];
-        // Mark as inactive to enable revival popups
-        previousActive[mac] = false;
         continue;
       }
       const droneLat = det.drone_lat, droneLng = det.drone_long;
       const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
       const validDrone = (droneLat !== 0 && droneLng !== 0);
-      // State-change popup logic
-      const alias     = aliases[mac];
-      const wasActive = previousActive[mac] || false;
-      const isNew     = !seenDrones[mac];
-
-      // Only fire popup on transition from inactive to active, after initial load
-      if (!initialLoad && validDrone && !wasActive) {
-        if (alias) {
-          // Aliased drone: first-ever sight only
-          if (!seenAliased[mac]) {
-            seenAliased[mac] = true;
-            showTerminalPopup(det, false);
-          }
-        } else {
-          if (!seenDrones[mac]) {
-            // New unaliased drone
-            seenDrones[mac] = true;
-            safeSetView([droneLat, droneLng]);
-            showTerminalPopup(det, true);
-          } else {
-            // Previously seen non-aliased drone revival
-            showTerminalPopup(det, false);
-          }
-        }
-      }
-      // Persist for next update
-      previousActive[mac] = validDrone;
-
       const validPilot = (pilotLat !== 0 && pilotLng !== 0);
-    // Allow popups after initial load completes
-    initialLoad = false;
       if (!validDrone && !validPilot) continue;
       const color = get_color_for_mac(mac);
-      if (!initialLoad && !firstDetectionZoomed && validDrone) {
+      if (!firstDetectionZoomed && validDrone) {
         firstDetectionZoomed = true;
         safeSetView([droneLat, droneLng], 18);
       }
@@ -2804,7 +1548,7 @@ async function updateData() {
           const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
           droneCircles[mac] = L.circleMarker([droneLat, droneLng], {
             pane: 'droneCirclePane',
-            radius: size * 0.45,
+            radius: size * 0.34,
             color: color,
             fillColor: color,
             fillOpacity: 0.7
@@ -2815,8 +1559,8 @@ async function updateData() {
         if (!lastDrone || lastDrone[0] != droneLat || lastDrone[1] != droneLng) { dronePathCoords[mac].push([droneLat, droneLng]); }
         if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
         dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
-        if (currentTime - det.last_update <= 5) {
-          const dynamicRadius = getDynamicSize() * 0.45;
+        if (currentTime - det.last_update <= 15) {
+          const dynamicRadius = getDynamicSize() * 0.34;
           const ringWeight = 3 * 0.8;  // 20% thinner
           const ringRadius = dynamicRadius + ringWeight / 2;  // sit just outside the main circle
           if (droneBroadcastRings[mac]) {
@@ -2872,14 +1616,9 @@ async function updateData() {
         pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
         if (followLock.enabled && followLock.type === 'pilot' && followLock.id === mac) { map.setView([pilotLat, pilotLng], map.getZoom()); }
       }
-      // At end of loop iteration, remember this state for next time
-      previousActive[mac] = validDrone;
     }
-    initialLoad = false;
     updateComboList(data);
     updateAliases();
-    // Mark that the first restore/update is done
-    initialLoad = false;
   } catch (error) { console.error("Error fetching detection data:", error); }
 }
 
@@ -2907,7 +1646,7 @@ function getDynamicSize() {
 // Updated function: now updates all selected USB port statuses.
 async function updateSerialStatus() {
   try {
-    const response = await fetch(window.location.origin + '/api/serial_status')
+    const response = await fetch('/api/serial_status');
     const data = await response.json();
     const statusDiv = document.getElementById('serialStatus');
     statusDiv.innerHTML = "";
@@ -2948,7 +1687,7 @@ document.getElementById("filterToggle").addEventListener("click", function() {
 
 async function restorePaths() {
   try {
-    const response = await fetch(window.location.origin + '/api/paths')
+    const response = await fetch('/api/paths');
     const data = await response.json();
     for (const mac in data.dronePaths) {
       let isActive = false;
@@ -3066,33 +1805,23 @@ def select_ports_get():
     ports = list(serial.tools.list_ports.comports())
     return render_template_string(PORT_SELECTION_PAGE, ports=ports, logo_ascii=LOGO_ASCII, bottom_ascii=BOTTOM_ASCII)
 
-
 @app.route('/select_ports', methods=['POST'])
 def select_ports_post():
     global SELECTED_PORTS
-    # Get up to 3 ports; ignore empty values
-    for i in range(1, 4):
-        port = request.form.get(f'port{i}')
-        if port:
-            SELECTED_PORTS[f'port{i}'] = port
-
-    # Start serial-reader threads for selected ports
-    for port in SELECTED_PORTS.values():
-        serial_connected_status[port] = False
+    # Get up to 3 ports; if empty string, ignore.
+    port1 = request.form.get('port1')
+    port2 = request.form.get('port2')
+    port3 = request.form.get('port3')
+    if port1:
+        SELECTED_PORTS['port1'] = port1
+    if port2:
+        SELECTED_PORTS['port2'] = port2
+    if port3:
+        SELECTED_PORTS['port3'] = port3
+    # Start threads for each selected port.
+    for key, port in SELECTED_PORTS.items():
+        serial_connected_status[port] = False  # initialize status
         start_serial_thread(port)
-
-    # Initialize TAK client if enabled
-    if TAK_SETTINGS.get('enabled', False):
-        p12_path = os.path.join(BASE_DIR, 'tak.p12')
-        pw_path = os.path.join(BASE_DIR, 'tak_password.txt')
-        p12_password = None
-        if os.path.isfile(pw_path):
-            with open(pw_path, 'rb') as pf:
-                p12_password = pf.read()
-        global_tls_context = setup_tls_context(p12_path, p12_password, TAK_SETTINGS.get('skipVerify', True))
-        init_tak_client()
-
-    # Redirect to main page
     return redirect(url_for('index'))
 
 
@@ -3343,310 +2072,3 @@ def download_aliases():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-#!/usr/bin/env python3
-import os
-import json
-import csv
-import time
-from datetime import datetime
-from flask import Flask, request, jsonify
-
-# --- TAK TLS/PKCS#12 Helper ---
-import ssl
-
-from io import BytesIO
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-def init_tak_client(p12_path, p12_password, host, port, skip_verify=False):
-    # Load PKCS#12 bundle
-    with open(p12_path, "rb") as f:
-        p12 = crypto.load_pkcs12(f.read(), p12_password.encode())
-    cert_pem = crypto.dump_certificate(crypto.FILETYPE_PEM, p12.get_certificate())
-    key_pem = crypto.dump_privatekey(crypto.FILETYPE_PEM, p12.get_privatekey())
-    # Build SSL context
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    if skip_verify:
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-    context.load_cert_chain(certfile=BytesIO(cert_pem), keyfile=BytesIO(key_pem))
-    # Create, wrap, and connect socket
-    raw_sock = socket.create_connection((host, port))
-    tls_sock = context.wrap_socket(raw_sock, server_hostname=host)
-    return tls_sock
-
-# --- ZMQ & TAK Settings (persist in memory for now) ---
-ZMQ_SETTINGS = {'enabled': False, 'endpoint': 'tcp://127.0.0.1:4224'}
-TAK_SETTINGS = {'enabled': False, 'endpoint': '127.0.0.1:8087', 'skipVerify': False}
-
-app = Flask(__name__)
-
-# --- FAA Data Cache (simple in-memory for example) ---
-FAA_CACHE = {}  # key: (mac, remote_id) or (mac, ""), value: faa_data dict
-TRACKED_PAIRS = {}  # key: mac, value: dict with at least 'basic_id' and 'faa_data'
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FAA_LOG_FILENAME = os.path.join(BASE_DIR, "faa_log.csv")
-
-# --- FAA Query API Endpoint ---
-@app.route('/api/query_faa', methods=['POST'])
-def api_query_faa():
-    data = request.get_json()
-    mac = data.get("mac")
-    remote_id = data.get("remote_id")
-    if not mac or not remote_id:
-        return jsonify({"status": "error", "message": "Missing mac or remote_id"}), 400
-    # Simulate FAA API query
-    faa_result = {
-        "data": {
-            "items": [
-                {
-                    "makeName": "ExampleMake",
-                    "modelName": "ModelX",
-                    "series": "A1",
-                    "trackingNumber": "123456",
-                    "complianceCategories": "Standard",
-                    "updatedAt": datetime.now().isoformat()
-                }
-            ]
-        }
-    }
-    # Save to cache and tracked_pairs
-    FAA_CACHE[(mac, remote_id)] = faa_result
-    TRACKED_PAIRS[mac] = {"basic_id": remote_id, "faa_data": faa_result}
-    # Log to CSV
-    if FAA_LOG_FILENAME:
-        try:
-            file_exists = os.path.isfile(FAA_LOG_FILENAME)
-            with open(FAA_LOG_FILENAME, "a", newline='') as csvfile:
-                fieldnames = ["timestamp", "mac", "remote_id", "faa_response"]
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow({
-                    "timestamp": datetime.now().isoformat(),
-                    "mac": mac,
-                    "remote_id": remote_id,
-                    "faa_response": json.dumps(faa_result)
-                })
-        except Exception as e:
-            print("Error writing to FAA log CSV:", e)
-    return jsonify({"status": "ok", "faa_data": faa_result})
-
-# --- FAA Data GET API Endpoint (by MAC or basic_id) ---
-@app.route('/api/faa/<identifier>', methods=['GET'])
-def api_get_faa(identifier):
-    """
-    Retrieve cached FAA data by MAC address or by basic_id (remote ID).
-    """
-    # Lookup by MAC in tracked_pairs
-    if identifier in TRACKED_PAIRS and 'faa_data' in TRACKED_PAIRS[identifier]:
-        return jsonify({'status': 'ok', 'faa_data': TRACKED_PAIRS[identifier]['faa_data']})
-    # Lookup by basic_id in tracked_pairs
-    for mac, det in TRACKED_PAIRS.items():
-        if det.get('basic_id') == identifier and 'faa_data' in det:
-            return jsonify({'status': 'ok', 'faa_data': det['faa_data']})
-    # FAA_CACHE search by remote_id then by MAC
-    for (c_mac, c_rid), faa_data in FAA_CACHE.items():
-        if c_rid == identifier:
-            return jsonify({'status': 'ok', 'faa_data': faa_data})
-    for (c_mac, c_rid), faa_data in FAA_CACHE.items():
-        if c_mac == identifier:
-            return jsonify({'status': 'ok', 'faa_data': faa_data})
-    return jsonify({'status': 'error', 'message': 'No FAA data found for this identifier'}), 404
-
-# --- ZMQ & TAK Settings API Endpoints ---
-@app.route('/api/zmq_settings', methods=['GET'])
-def api_get_zmq_settings():
-    return jsonify(ZMQ_SETTINGS)
-
-@app.route('/api/zmq_settings', methods=['POST'])
-def api_post_zmq_settings():
-    data = request.get_json()
-    ZMQ_SETTINGS['enabled'] = data.get('enabled', ZMQ_SETTINGS['enabled'])
-    ZMQ_SETTINGS['endpoint'] = data.get('endpoint', ZMQ_SETTINGS['endpoint'])
-    return jsonify(ZMQ_SETTINGS)
-
-@app.route('/api/tak_settings', methods=['GET'])
-def api_get_tak_settings():
-    return jsonify(TAK_SETTINGS)
-
-@app.route('/api/tak_settings', methods=['POST'])
-def api_post_tak_settings():
-    data = request.get_json()
-    TAK_SETTINGS['enabled'] = data.get('enabled', TAK_SETTINGS['enabled'])
-    TAK_SETTINGS['endpoint'] = data.get('endpoint', TAK_SETTINGS['endpoint'])
-    TAK_SETTINGS['skipVerify'] = data.get('skipVerify', TAK_SETTINGS['skipVerify'])
-    return jsonify(TAK_SETTINGS)
-
-@app.route('/api/upload_tak_certs', methods=['POST'])
-def api_upload_tak_certs():
-    if 'p12' not in request.files:
-        return jsonify({'status': 'error', 'message': 'No P12 file provided'}), 400
-    p12 = request.files['p12']
-    password = request.form.get('password', '')
-    cert_path = os.path.join(BASE_DIR, 'tak.p12')
-    p12.save(cert_path)
-    with open(os.path.join(BASE_DIR, 'tak_password.txt'), 'w') as f:
-        f.write(password)
-    return jsonify({'status': 'ok'})
-
-# --- HTML Template (with TAK section and prefilled inputs) ---
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mesh Mapper</title>
-  <style>
-    body { background-color: black; color: lime; font-family: monospace; }
-    #zmqSection, #takSection { margin-top: 8px; text-align: center; }
-    .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .4s; border-radius: 20px; }
-    .slider:before {
-      position: absolute;
-      content: "";
-      height: 16px;
-      width: 16px;
-      left: 2px;
-      top: 50%;
-      background-color: lime;
-      border: 1px solid #9B30FF;
-      transition: .4s;
-      border-radius: 50%;
-      transform: translateY(-50%);
-    }
-    .switch input:checked + .slider { background-color: lime; }
-    .switch input:checked + .slider:before {
-      transform: translateX(20px) translateY(-50%);
-      border: 1px solid #9B30FF;
-    }
-    input[type="text"], input[type="password"] { background-color: #222; color: #FF00FF; border: 1px solid #FF00FF; padding: 4px; }
-    button { padding: 5px; border: 1px solid lime; background: #333; color: lime; border-radius: 5px; font-family: monospace; }
-    input, select, button {
-      text-shadow: none !important;
-      box-shadow: none !important;
-    }
-  </style>
-</head>
-<body>
-  <h1>Mesh Mapper</h1>
-  <div id="zmqSection">
-    <div style="margin-top:8px; display:flex; align-items:center; justify-content:center; height:20px;">
-      <label style="color:lime; font-family:monospace; margin-right:8px;">ZMQ Mode</label>
-      <label class="switch">
-        <input type="checkbox" id="zmqModeSwitch">
-        <span class="slider"></span>
-      </label>
-    </div>
-    <div style="margin-top:5px;">
-      <div style="display:flex; justify-content:center; align-items:center; margin-top:5px;">
-        <input type="text" id="zmqIP" value="127.0.0.1" style="margin-right:5px;width:auto;">
-        <span style="color:lime;">:</span>
-        <input type="text" id="zmqPort" value="4224" style="margin-left:5px;width:auto;">
-      </div>
-      <button id="applyZmqSettings" style="margin-top:5px;">Update ZMQ</button>
-    </div>
-    <div style="color:#FF00FF;font-size:0.75em;margin-top:4px;">Connect to ZMQ decoder via direct IP connection</div>
-  </div>
-  <div id="takSection">
-    <div style="margin-top:8px; display:flex; align-items:center; justify-content:center; height:20px;">
-      <label style="color:lime; font-family:monospace; margin-right:8px;">TAK Mode</label>
-      <label class="switch">
-        <input type="checkbox" id="takModeSwitch">
-        <span class="slider"></span>
-      </label>
-    </div>
-    <div id="takSettings" style="margin-top:5px; text-align:center;">
-      <div style="display:flex; justify-content:center; align-items:center; margin-top:5px;">
-        <input type="text" id="takIP" value="127.0.0.1" style="margin-right:5px;width:auto;">
-        <span style="color:lime;">:</span>
-        <input type="text" id="takPort" value="8087" style="margin-left:5px;width:auto;">
-      </div>
-      <div style="margin-top:5px; display:flex; align-items:center; justify-content:center;">
-        <label for="takSkipVerify" style="color:lime; font-family:monospace; margin-right:8px;">Skip Verify</label>
-        <input type="checkbox" id="takSkipVerify" style="transform: scale(1.2);"/>
-      </div>
-      <div style="margin-top:5px; display:flex; align-items:center; justify-content:center;">
-        <button id="takP12Button">Upload P12</button>
-        <input type="file" id="takP12" accept=".p12" style="display:none;"/>
-        <input type="password" id="takP12Pass" placeholder="Password" style="margin-left:8px;width:auto;">
-      </div>
-      <div id="takP12Filename" style="color:#FF00FF;margin-top:4px;text-align:center;"></div>
-      <button id="applyTakSettings" style="margin-top:5px;">Update TAK</button>
-      <div style="height:8px;"></div>
-    </div>
-  </div>
-  <script>
-    // ZMQ Settings
-    const zmqSwitch = document.getElementById('zmqModeSwitch');
-    const zmqIP = document.getElementById('zmqIP');
-    const zmqPort = document.getElementById('zmqPort');
-    const applyZmqSettings = document.getElementById('applyZmqSettings');
-    // Load ZMQ settings from server
-    fetch('/api/zmq_settings').then(res => res.json()).then(data => {
-      zmqSwitch.checked = data.enabled;
-      try {
-        const url = new URL(data.endpoint);
-        zmqIP.value = url.hostname;
-        zmqPort.value = url.port;
-      } catch (e) {}
-    });
-    applyZmqSettings.onclick = function() {
-      const endpoint = `tcp://${zmqIP.value.trim()}:${zmqPort.value.trim()}`;
-      fetch('/api/zmq_settings', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({enabled: zmqSwitch.checked, endpoint: endpoint})
-      });
-    };
-    // TAK Settings
-    const takSwitch = document.getElementById('takModeSwitch');
-    const takIP = document.getElementById('takIP');
-    const takPort = document.getElementById('takPort');
-    const takSkipVerify = document.getElementById('takSkipVerify');
-    const takP12 = document.getElementById('takP12');
-    const takP12Button = document.getElementById('takP12Button');
-    const takP12Filename = document.getElementById('takP12Filename');
-    const takP12Pass = document.getElementById('takP12Pass');
-    const applyTakSettings = document.getElementById('applyTakSettings');
-    // Load TAK settings from server
-    fetch('/api/tak_settings').then(res => res.json()).then(data => {
-      takSwitch.checked = data.enabled;
-      try {
-        const [h, p] = data.endpoint.split(':');
-        takIP.value = h;
-        takPort.value = p;
-      } catch (e) {}
-      takSkipVerify.checked = data.skipVerify;
-    });
-    takP12Button.onclick = () => takP12.click();
-    takP12.onchange = () => {
-      takP12Filename.textContent = takP12.files.length ? takP12.files[0].name : '';
-    };
-    applyTakSettings.onclick = function() {
-      const endpoint = `${takIP.value.trim()}:${takPort.value.trim()}`;
-      fetch('/api/tak_settings', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({enabled: takSwitch.checked, endpoint, skipVerify: takSkipVerify.checked})
-      });
-      const formData = new FormData();
-      if (takP12.files.length) formData.append('p12', takP12.files[0]);
-      formData.append('password', takP12Pass.value);
-      fetch('/api/upload_tak_certs', { method: 'POST', body: formData });
-    };
-  </script>
-</body>
-</html>
-'''
-
-@app.route('/')
-def index():
-    return HTML_TEMPLATE
-
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
-    
