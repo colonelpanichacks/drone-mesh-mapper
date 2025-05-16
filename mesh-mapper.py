@@ -1,24 +1,103 @@
-
-import requests
+import os
+import time
 import json
+import csv
 import logging
+import colorsys
 import threading
+import subprocess
+import socket
+import requests
+import urllib3
 import serial
 import serial.tools.list_ports
-import time
-import csv
-import os
-from datetime import datetime
-from flask import Flask, request, jsonify, redirect, url_for, render_template_string, send_file
+from datetime import datetime, timedelta
+from urllib.parse import urlparse
+from typing import Optional, List
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from flask import Flask, request, jsonify, redirect, url_for, render_template, render_template_string, send_file
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Ensure file paths are absolute
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ # Helper: consistent color per MAC via hashing
+def get_color_for_mac(mac: str) -> str:
+    # Compute hue from MAC string hash
+    hue = sum(ord(c) for c in mac) % 360
+    r, g, b = colorsys.hsv_to_rgb(hue/360.0, 1.0, 1.0)
+    ri, gi, bi = int(r*255), int(g*255), int(b*255)
+    # Return ABGR format
+    return f"ff{bi:02x}{gi:02x}{ri:02x}"
 
+def append_to_cumulative_kml(prev: dict, curr: dict):
+    """
+    Append only new segment and icons for MAC curr['mac'] to cumulative.kml.
+    """
+    mac = curr['mac']
+    alias = ALIASES.get(mac, '')
+    aliasStr = f"{alias} " if alias else ""
+    color = get_color_for_mac(mac)
+    lines = []
+    # Drone segment
+    if prev and prev.get('drone_lat') and curr.get('drone_lat'):
+        coords = f"{prev['drone_long']},{prev['drone_lat']},0 " \
+                 f"{curr['drone_long']},{curr['drone_lat']},0"
+        lines += [
+            f'<Placemark><name>Drone Segment {aliasStr}{mac}</name>',
+            f'<Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style>',
+            '<LineString><tessellate>1</tessellate>',
+            f'<coordinates>{coords}</coordinates></LineString></Placemark>'
+        ]
+    # Drone icon
+    if curr.get('drone_lat') and curr.get('drone_long'):
+        lines += [
+            f'<Placemark><name>Drone {aliasStr}{mac}</name>',
+            f'<Style><IconStyle><color>{color}</color><scale>1.2</scale>'
+            '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon>'
+            '</IconStyle></Style>',
+            f'<Point><coordinates>{curr["drone_long"]},{curr["drone_lat"]},0</coordinates></Point>',
+            '</Placemark>'
+        ]
+    # Pilot segment
+    if prev and prev.get('pilot_lat') and curr.get('pilot_lat'):
+        coords = f"{prev['pilot_long']},{prev['pilot_lat']},0 " \
+                 f"{curr['pilot_long']},{curr['pilot_lat']},0"
+        lines += [
+            f'<Placemark><name>Pilot Segment {aliasStr}{mac}</name>',
+            f'<Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style>',
+            '<LineString><tessellate>1</tessellate>',
+            f'<coordinates>{coords}</coordinates></LineString></Placemark>'
+        ]
+    # Pilot icon
+    if curr.get('pilot_lat') and curr.get('pilot_long'):
+        lines += [
+            f'<Placemark><name>Pilot {aliasStr}{mac}</name>',
+            f'<Style><IconStyle><color>{color}</color><scale>1.2</scale>'
+            '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon>'
+            '</IconStyle></Style>',
+            f'<Point><coordinates>{curr["pilot_long"]},{curr["pilot_lat"]},0</coordinates></Point>',
+            '</Placemark>'
+        ]
+    # Append to cumulative.kml before closing tags
+    with open(CUMULATIVE_KML_FILENAME, "r+") as f:
+        raw = f.read()
+        # Remove the last closing tags exactly once
+        parts = raw.rsplit("</Document>\n</kml>", 1)
+        content = parts[0]
+        f.seek(0)
+        f.write(content + "\n" + "\n".join(lines) + "\n</Document>\n</kml>")
+        f.truncate()
 
+# Server-side webhook URL (set via API)
+WEBHOOK_URL = None
+
+def set_server_webhook_url(url: str):
+    global WEBHOOK_URL
+    WEBHOOK_URL = url
 
 app = Flask(__name__)
+# Initialize Socket.IO for browser and peer-server synchronization
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ----------------------
 # Global Variables & Files
@@ -45,14 +124,36 @@ CSV_FILENAME = os.path.join(BASE_DIR, f"detections_{startup_timestamp}.csv")
 KML_FILENAME = os.path.join(BASE_DIR, f"detections_{startup_timestamp}.kml")
 FAA_LOG_FILENAME = os.path.join(BASE_DIR, "faa_log.csv")  # FAA log CSV remains basic
 
+# Cumulative KML file for all detections
+CUMULATIVE_KML_FILENAME = os.path.join(BASE_DIR, "cumulative.kml")
+# Initialize cumulative KML on first run
+if not os.path.exists(CUMULATIVE_KML_FILENAME):
+    with open(CUMULATIVE_KML_FILENAME, "w") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        f.write('<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">\n')
+        f.write('<Document>\n')
+        f.write(f'<name>Cumulative Detections</name>\n')
+        f.write('</Document>\n</kml>')
+
 # Write CSV header for detections.
 with open(CSV_FILENAME, mode='w', newline='') as csvfile:
     fieldnames = [
-        'timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long',
+        'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
         'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
     ]
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
+
+# Cumulative CSV file for all detections
+CUMULATIVE_CSV_FILENAME = os.path.join(BASE_DIR, f"cumulative_detections.csv")
+# Initialize cumulative CSV on first run
+if not os.path.exists(CUMULATIVE_CSV_FILENAME):
+    with open(CUMULATIVE_CSV_FILENAME, mode='w', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=[
+            'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
+            'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+        ])
+        writer.writeheader()
 
 # Create FAA log CSV with header if not exists.
 if not os.path.exists(FAA_LOG_FILENAME):
@@ -118,39 +219,116 @@ def write_to_faa_cache(mac, remote_id, faa_data):
 # KML Generation (including FAA data)
 # ----------------------
 def generate_kml():
+    # Build sorted list of all MACs seen so far
+    macs = sorted({d['mac'] for d in detection_history})
+
+    # Dynamically generate one distinct ABGR color per MAC
+    mac_colors = {}
+    n = len(macs) or 1
+    for i, m in enumerate(macs):
+        # evenly‐spaced hue 0.0–1.0
+        h = i / n
+        # full saturation & value → RGB floats 0–1
+        r, g, b = colorsys.hsv_to_rgb(h, 1.0, 1.0)
+        # scale to 0–255 ints
+        ri, gi, bi = int(r*255), int(g*255), int(b*255)
+        # format for KML (ABGR hex, alpha=ff)
+        mac_colors[m] = f"ff{bi:02x}{gi:02x}{ri:02x}"
+
+    # Start KML document template
     kml_lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<kml xmlns="http://www.opengis.net/kml/2.2">',
+        '<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">',
         '<Document>',
         f'<name>Detections {startup_timestamp}</name>'
     ]
-    for mac, det in tracked_pairs.items():
-        remoteIdStr = ""
-        if det.get("basic_id"):
-            remoteIdStr = " (RemoteID: " + det.get("basic_id") + ")"
-        if det.get("faa_data"):
-            remoteIdStr += " FAA: " + json.dumps(det.get("faa_data"))
-        # Drone placemark
-        kml_lines.append(f'<Placemark><name>Drone {mac}{remoteIdStr}</name>')
-        kml_lines.append('<Style><IconStyle><scale>1.2</scale>'
-                         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon>'
-                         '</IconStyle></Style>')
-        kml_lines.append(f'<Point><coordinates>{det.get("drone_long",0)},{det.get("drone_lat",0)},0</coordinates></Point>')
-        kml_lines.append('</Placemark>')
-        # Pilot placemark
-        kml_lines.append(f'<Placemark><name>Pilot {mac}{remoteIdStr}</name>')
-        kml_lines.append('<Style><IconStyle><scale>1.2</scale>'
-                         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon>'
-                         '</IconStyle></Style>')
-        kml_lines.append(f'<Point><coordinates>{det.get("pilot_long",0)},{det.get("pilot_lat",0)},0</coordinates></Point>')
-        kml_lines.append('</Placemark>')
+
+    for mac in macs:
+        alias = ALIASES.get(mac, "")
+        aliasStr = f"{alias} " if alias else ""
+        color    = mac_colors[mac]
+
+        # --- Drone flight path ---
+        drone_coords = [
+            f"{d['drone_long']},{d['drone_lat']},0"
+            for d in detection_history
+            if d.get('mac') == mac and d.get('drone_lat') and d.get('drone_long')
+        ]
+        if drone_coords:
+            kml_lines.append(f'<Placemark><name>Drone Path {aliasStr}{mac}</name>')
+            kml_lines.append(
+                f'<Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style>'
+            )
+            kml_lines.append('<LineString><tessellate>1</tessellate>')
+            kml_lines.append(
+                f'<coordinates>{" ".join(drone_coords)}</coordinates>'
+                '</LineString></Placemark>'
+            )
+
+        # --- Pilot flight path (dashed segments for valid runs) ---
+        runs = []
+        current_run = []
+        for d in detection_history:
+            if d.get('mac') == mac and d.get('pilot_lat') and d.get('pilot_long'):
+                # collect valid consecutive points
+                current_run.append(f"{d['pilot_long']},{d['pilot_lat']},0")
+            else:
+                if len(current_run) > 1:
+                    runs.append(current_run)
+                current_run = []
+        # finalize last run
+        if len(current_run) > 1:
+            runs.append(current_run)
+        # emit one Placemark per run with dashed style
+        for run in runs:
+            coords = " ".join(run)
+            kml_lines.append(f'<Placemark><name>Pilot Path {aliasStr}{mac}</name>')
+            kml_lines.append(f'<Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style>')
+            kml_lines.append('<LineString><tessellate>1</tessellate>')
+            kml_lines.append(f'<coordinates>{coords}</coordinates></LineString></Placemark>')
+
+        # --- Current position icons ---
+        det = tracked_pairs.get(mac, {})
+        # Drone icon
+        if det.get("drone_lat") and det.get("drone_long"):
+            kml_lines.append(f'<Placemark><name>Drone {aliasStr}{mac}</name>')
+            kml_lines.append(
+                f'<Style><IconStyle><color>{color}</color><scale>1.2</scale>'
+                '<Icon>'
+                  '<href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href>'
+                '</Icon>'
+                '</IconStyle></Style>'
+            )
+            kml_lines.append(
+                f'<Point><coordinates>{det["drone_long"]},{det["drone_lat"]},0</coordinates></Point>'
+            )
+            kml_lines.append('</Placemark>')
+        # Pilot icon
+        if det.get("pilot_lat") and det.get("pilot_long"):
+            kml_lines.append(f'<Placemark><name>Pilot {aliasStr}{mac}</name>')
+            kml_lines.append(
+                f'<Style><IconStyle><color>{color}</color><scale>1.2</scale>'
+                '<Icon>'
+                  '<href>http://maps.google.com/mapfiles/kml/shapes/man.png</href>'
+                '</Icon>'
+                '</IconStyle></Style>'
+            )
+            kml_lines.append(
+                f'<Point><coordinates>{det["pilot_long"]},{det["pilot_lat"]},0</coordinates></Point>'
+            )
+            kml_lines.append('</Placemark>')
+
+    # Close document
     kml_lines.append('</Document></kml>')
+
+    # Write only session KML
     with open(KML_FILENAME, "w") as f:
         f.write("\n".join(kml_lines))
-    print("Updated KML file:", KML_FILENAME)
+    print("Updated session KML:", KML_FILENAME)
 
 # Generate initial KML so the file exists from startup
 generate_kml()
+
 
 # ----------------------
 # Detection Update & CSV Logging
@@ -159,34 +337,69 @@ def update_detection(detection):
     mac = detection.get("mac")
     if not mac:
         return
+    prev = tracked_pairs.get(mac)
 
     # Retrieve new drone coordinates from the detection
     new_drone_lat = detection.get("drone_lat", 0)
     new_drone_long = detection.get("drone_long", 0)
     valid_drone = (new_drone_lat != 0 and new_drone_long != 0)
 
-    # If the new detection has invalid (0) drone coordinates...
     if not valid_drone:
-        # If there is an existing record with valid coordinates, update only non-coordinate fields.
-        if mac in tracked_pairs:
-            existing = tracked_pairs[mac]
-            if existing.get("drone_lat", 0) != 0 and existing.get("drone_long", 0) != 0:
-                # Update fields other than drone coordinates
-                for field in ['rssi', 'basic_id', 'drone_altitude']:
-                    if field in detection:
-                        existing[field] = detection[field]
-                # Update pilot coordinates only if they are valid (non zero)
-                new_pilot_lat = detection.get("pilot_lat", 0)
-                new_pilot_long = detection.get("pilot_long", 0)
-                if new_pilot_lat != 0:
-                    existing["pilot_lat"] = new_pilot_lat
-                if new_pilot_long != 0:
-                    existing["pilot_long"] = new_pilot_long
-                existing["last_update"] = time.time()
-                print(f"Ignored update for {mac} due to invalid drone coordinates, preserving previous valid coordinates.")
-                return
-        # No previous valid record exists: ignore the detection entirely.
-        print(f"Ignored detection for {mac} because drone coordinates are zero.")
+        print(f"No-GPS detection for {mac}; forwarding for popup and webhook.")
+        # Forward this no-GPS detection to the client
+        tracked_pairs[mac] = detection
+        detection_history.append(detection.copy())
+        # Server-side webhook firing for no-GPS detection
+        if WEBHOOK_URL:
+            try:
+                requests.post(WEBHOOK_URL, json=detection, timeout=5)
+            except Exception as e:
+                logging.error(f"Server webhook error: {e}")
+        # Write to session CSV even for no-GPS
+        with open(CSV_FILENAME, mode='a', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=[
+                'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
+                'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+            ])
+            writer.writerow({
+                'timestamp': datetime.now().isoformat(),
+                'alias': ALIASES.get(mac, ''),
+                'mac': mac,
+                'rssi': detection.get('rssi', ''),
+                'drone_lat': new_drone_lat,
+                'drone_long': new_drone_long,
+                'drone_altitude': detection.get('drone_altitude', ''),
+                'pilot_lat': detection.get('pilot_lat', ''),
+                'pilot_long': detection.get('pilot_long', ''),
+                'basic_id': detection.get('basic_id', ''),
+                'faa_data': json.dumps(detection.get('faa_data', {}))
+            })
+
+        # Append to cumulative CSV for no-GPS
+        with open(CUMULATIVE_CSV_FILENAME, mode='a', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=[
+                'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
+                'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+            ])
+            writer.writerow({
+                'timestamp': datetime.now().isoformat(),
+                'alias': ALIASES.get(mac, ''),
+                'mac': mac,
+                'rssi': detection.get('rssi', ''),
+                'drone_lat': new_drone_lat,
+                'drone_long': new_drone_long,
+                'drone_altitude': detection.get('drone_altitude', ''),
+                'pilot_lat': detection.get('pilot_lat', ''),
+                'pilot_long': detection.get('pilot_long', ''),
+                'basic_id': detection.get('basic_id', ''),
+                'faa_data': json.dumps(detection.get('faa_data', {}))
+            })
+
+        # Cache FAA data even for no-GPS
+        if detection.get('basic_id'):
+            write_to_faa_cache(mac, detection['basic_id'], detection.get('faa_data', {}))
+        # Update KMLs
+        generate_kml()
         return
 
     # Otherwise, use the provided non-zero coordinates.
@@ -197,23 +410,46 @@ def update_detection(detection):
     detection["pilot_long"] = detection.get("pilot_long", 0)
     detection["last_update"] = time.time()
 
+    # Preserve previous basic_id if new detection lacks one
+    if not detection.get("basic_id") and mac in tracked_pairs and tracked_pairs[mac].get("basic_id"):
+        detection["basic_id"] = tracked_pairs[mac]["basic_id"]
     remote_id = detection.get("basic_id")
-    if mac and remote_id:
-        cached = FAA_CACHE.get((mac, remote_id))
-        if cached:
-            detection["faa_data"] = cached
-    if mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
-        detection["faa_data"] = tracked_pairs[mac]["faa_data"]
+    # Try exact cache lookup by (mac, remote_id), then fallback to any cached data for this mac, then to previous tracked_pairs entry
+    if mac:
+        # Exact match if basic_id provided
+        if remote_id:
+            key = (mac, remote_id)
+            if key in FAA_CACHE:
+                detection["faa_data"] = FAA_CACHE[key]
+        # Fallback: any cached FAA data for this mac
+        if "faa_data" not in detection:
+            for (c_mac, _), faa_data in FAA_CACHE.items():
+                if c_mac == mac:
+                    detection["faa_data"] = faa_data
+                    break
+        # Fallback: last known FAA data in tracked_pairs
+        if "faa_data" not in detection and mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
+            detection["faa_data"] = tracked_pairs[mac]["faa_data"]
+        # Always cache FAA data by MAC and current basic_id for fallback
+        if "faa_data" in detection:
+            write_to_faa_cache(mac, detection.get("basic_id", ""), detection["faa_data"])
+
     tracked_pairs[mac] = detection
+    # Broadcast this detection to all connected clients and peer servers
+    try:
+        socketio.emit('detection', detection, broadcast=True)
+    except Exception:
+        pass
     detection_history.append(detection.copy())
     print("Updated tracked_pairs:", tracked_pairs)
     with open(CSV_FILENAME, mode='a', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=[
-            'timestamp', 'mac', 'rssi', 'drone_lat', 'drone_long',
+            'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
             'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
         ])
         writer.writerow({
             'timestamp': datetime.now().isoformat(),
+            'alias': ALIASES.get(mac, ''),
             'mac': mac,
             'rssi': detection.get('rssi', ''),
             'drone_lat': detection.get('drone_lat', ''),
@@ -224,6 +460,27 @@ def update_detection(detection):
             'basic_id': detection.get('basic_id', ''),
             'faa_data': json.dumps(detection.get('faa_data', {}))
         })
+    # Append to cumulative CSV
+    with open(CUMULATIVE_CSV_FILENAME, mode='a', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=[
+            'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
+            'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+        ])
+        writer.writerow({
+            'timestamp': datetime.now().isoformat(),
+            'alias': ALIASES.get(mac, ''),
+            'mac': mac,
+            'rssi': detection.get('rssi', ''),
+            'drone_lat': detection.get('drone_lat', ''),
+            'drone_long': detection.get('drone_long', ''),
+            'drone_altitude': detection.get('drone_altitude', ''),
+            'pilot_lat': detection.get('pilot_lat', ''),
+            'pilot_long': detection.get('pilot_long', ''),
+            'basic_id': detection.get('basic_id', ''),
+            'faa_data': json.dumps(detection.get('faa_data', {}))
+        })
+    # Append new segments and icons to cumulative KML
+    append_to_cumulative_kml(prev, detection)
     generate_kml()
 
 # ----------------------
@@ -289,10 +546,27 @@ def query_remote_id(session, remote_id):
         return None
 
 # ----------------------
+# Webhook popup API Endpoint 
+# ----------------------
+@app.route('/api/webhook_popup', methods=['POST'])
+def webhook_popup():
+    data = request.get_json()
+    webhook_url = data.get("webhook_url")
+    if not webhook_url:
+        return jsonify({"status": "error", "reason": "No webhook URL provided"}), 400
+    try:
+        clean_data = data.get("payload", {})
+        response = requests.post(webhook_url, json=clean_data, timeout=5)
+        return jsonify({"status": "ok", "response": response.status_code}), 200
+    except Exception as e:
+        logging.error(f"Webhook send error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ----------------------
 # New FAA Query API Endpoint
 # ----------------------
 @app.route('/api/query_faa', methods=['POST'])
-def api_query_faa():
+def api_query_faa(): 
     data = request.get_json()
     mac = data.get("mac")
     remote_id = data.get("remote_id")
@@ -301,6 +575,12 @@ def api_query_faa():
     session = create_retry_session()
     refresh_cookie(session)
     faa_result = query_remote_id(session, remote_id)
+    # Fallback: if FAA API query failed or returned no records, try cached FAA data by MAC
+    if not faa_result or not faa_result.get("data", {}).get("items"):
+        for (c_mac, _), cached_data in FAA_CACHE.items():
+            if c_mac == mac:
+                faa_result = cached_data
+                break
     if faa_result is None:
         return jsonify({"status": "error", "message": "FAA query failed"}), 500
     if mac in tracked_pairs:
@@ -325,6 +605,36 @@ def api_query_faa():
     return jsonify({"status": "ok", "faa_data": faa_result})
 
 # ----------------------
+# FAA Data GET API Endpoint (by MAC or basic_id)
+# ----------------------
+
+@app.route('/api/faa/<identifier>', methods=['GET'])
+def api_get_faa(identifier):
+    """
+    Retrieve cached FAA data by MAC address or by basic_id (remote ID).
+    """
+    # First try lookup by MAC
+    if identifier in tracked_pairs and 'faa_data' in tracked_pairs[identifier]:
+        return jsonify({'status': 'ok', 'faa_data': tracked_pairs[identifier]['faa_data']})
+    # Then try lookup by basic_id
+    for mac, det in tracked_pairs.items():
+        if det.get('basic_id') == identifier and 'faa_data' in det:
+            return jsonify({'status': 'ok', 'faa_data': det['faa_data']})
+    # Fallback: search cached FAA data by remote_id first, then by MAC
+    for (c_mac, c_rid), faa_data in     FAA_CACHE.items():
+        if c_rid == identifier:
+            return jsonify({'status': 'ok', 'faa_data': faa_data})
+    for (c_mac, c_rid), faa_data in FAA_CACHE.items():
+        if c_mac == identifier:
+            return jsonify({'status': 'ok', 'faa_data': faa_data})
+    return jsonify({'status': 'error', 'message': 'No FAA data found for this identifier'}), 404
+
+
+
+# ----------------------
+
+
+# ----------------------
 # HTML & JS (UI) Section
 # ----------------------
 # Updated: The selection page now has three dropdowns.
@@ -334,8 +644,14 @@ PORT_SELECTION_PAGE = '''
 <head>
   <meta charset="UTF-8">
   <title>Select USB Serial Ports</title>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
   <style>
-    /* Hide tile seams */
+    /* Highlight non-GPS drones in inactive list */
+    #inactivePlaceholder .drone-item.no-gps {
+      border: 2px solid lightblue !important;
+      background-color: transparent !important;
+      color: inherit !important;
+    }
     .leaflet-tile {
       border: none !important;
       box-shadow: none !important;
@@ -345,49 +661,93 @@ PORT_SELECTION_PAGE = '''
     .leaflet-container {
       background-color: black !important;
     }
-    body { background-color: black; color: lime; font-family: monospace; text-align: center;
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Orbitron', monospace;
+      background-color: #0a001f;
+      color: #0ff;
+      text-shadow: 0 0 8px #0ff, 0 0 16px #f0f;
+      text-align: center;
       zoom: 1.15;
     }
-    pre { font-size: 16px; margin: 20px auto; }
+    pre { font-size: 16px; margin: 10px auto; }
     form {
       display: inline-block;
-      text-align: left;
+      text-align: center;
     }
     li { list-style: none; margin: 10px 0; }
-    select { background-color: #333; color: lime; border: none; padding: 3px; margin-bottom: 10px; }
+    select {
+      background-color: #333;
+      color: lime;
+      border: none;
+      padding: 3px;
+      margin-bottom: 5px;
+      box-shadow: 0 0 4px #0ff;
+    }
     label { font-size: 18px; }
-    /* Style and center the select-ports submit button */
     button[type="submit"] {
       display: block;
-      margin: 10px auto;
+      margin: 1em auto 5px auto;
       padding: 5px;
       border: 1px solid lime;
-      background: linear-gradient(to right, lime, yellow);
-      color: black;
-      font-family: monospace;
+      background-color: #333;
+      color: lime;
+      font-family: 'Orbitron', monospace;
       cursor: pointer;
       outline: none;
       border-radius: 10px;
+      box-shadow: 0 0 8px #f0f, 0 0 16px #0ff;
     }
-    /* Shrink only the logo ASCII block */
     pre.logo-art {
       display: inline-block;
-      margin: 2px auto 0;
+      margin: 0 auto;
+      margin-bottom: 10px;
     }
-    /* Gradient styling for ASCII art below the button */
     pre.ascii-art {
+      margin: 0;
+      padding: 5px;
       background: linear-gradient(to right, blue, purple, pink, lime, green);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       font-family: monospace;
-      padding: 10px;
       font-size: 90%;
     }
     h1 {
-      background: linear-gradient(to right, lime, yellow);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      margin: 2px 0;
+      font-size: 18px;
+      font-family: 'Orbitron', monospace;
+      margin: 1em 0 4px 0;
+    }
+    /* Rounded toggle switch styling */
+    .switch {
+      position: relative; display: inline-block; width: 40px; height: 20px;
+    }
+    .switch input {
+      opacity: 0; width: 0; height: 0;
+    }
+    .switch .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #555;
+      transition: .4s;
+      border-radius: 20px;
+    }
+    .switch .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px; width: 16px;
+      left: 2px; top: 2px;
+      background-color: lime;
+      border: 1px solid #9B30FF;
+      transition: .4s;
+      border-radius: 50%;
+    }
+    .switch input:checked + .slider {
+      background-color: lime;
+    }
+    .switch input:checked + .slider:before {
+      transform: translateX(20px);
     }
   </style>
 </head>
@@ -416,11 +776,36 @@ PORT_SELECTION_PAGE = '''
         <option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>
       {% endfor %}
     </select><br>
-    <button type="submit">Select Ports</button>
+    <div style="margin-bottom:8px;"></div>
+    <div style="margin-top:4px; margin-bottom:4px; text-align:center;">
+      <label for="webhookUrl" style="font-size:18px; font-family:'Orbitron', monospace; color:#87CEEB;">Webhook URL</label><br>
+      <input type="text" id="webhookUrl" placeholder="https://example.com/webhook"
+             style="width:300px; background-color:#222; color:#87CEEB; border:1px solid #FF00FF; padding:4px; font-size:1em; outline:none;">
+    </div>
+    <div style="margin-top:4px; margin-bottom:4px; text-align:center;">
+      <button id="updateWebhookButton" style="border:1px solid lime; background-color:#333; color:#FF00FF; font-family:'Orbitron',monospace; padding:4px 8px; cursor:pointer; border-radius:4px;">
+        Update Webhook
+      </button>
+    </div>
+    <button id="beginMapping" type="submit" style="
+        display: block;
+        margin: 15px auto 0;
+        padding: 8px 15px;
+        min-width: 150px;
+        border: 1px solid lime;
+        background-color: #333;
+        color: lime;
+        font-family: 'Orbitron', monospace;
+        font-size: 1.2em;
+        text-shadow: 0 0 8px #0ff;
+        cursor: pointer;
+    ">
+      Begin Mapping
+    </button>
+    <div style="margin-bottom:8px;"></div>
   </form>
   <pre class="ascii-art">{{ bottom_ascii }}</pre>
   <script>
-    // Dynamically refresh available USB port list every 0.5 seconds
     function refreshPortOptions() {
       fetch('/api/ports')
         .then(res => res.json())
@@ -429,7 +814,6 @@ PORT_SELECTION_PAGE = '''
             const select = document.getElementById(name);
             if (!select) return;
             const current = select.value;
-            // rebuild options
             select.innerHTML = '<option value="">--None--</option>' +
               data.ports.map(p => `<option value="${p.device}">${p.device} - ${p.description}</option>`).join('');
             select.value = current;
@@ -437,13 +821,11 @@ PORT_SELECTION_PAGE = '''
         })
         .catch(err => console.error('Error refreshing ports:', err));
     }
-    // Refresh ports every 500ms until the user interacts
-    var refreshInterval = setInterval(refreshPortOptions, 500);
+    var refreshInterval = setInterval(refreshPortOptions, 2000);
     ['port1','port2','port3'].forEach(function(name) {
       var select = document.getElementById(name);
       if (select) {
-        // Stop auto-refresh on user interaction (focus, mouse, or touch)
-        ['focus', 'mousedown', 'touchstart'].forEach(function(evt) {
+        ['focus', 'mousedown'].forEach(function(evt) {
           select.addEventListener(evt, function() { clearInterval(refreshInterval); });
         });
         select.addEventListener('change', function() { clearInterval(refreshInterval); });
@@ -452,12 +834,25 @@ PORT_SELECTION_PAGE = '''
     window.onload = function() {
       refreshPortOptions();
     }
+    const webhookInput = document.getElementById('webhookUrl');
+    const storedWebhookUrl = localStorage.getItem('popupWebhookUrl') || '';
+    webhookInput.value = storedWebhookUrl;
+    webhookInput.addEventListener('change', () => {
+      localStorage.setItem('popupWebhookUrl', webhookInput.value.trim());
+    });
+    document.getElementById('updateWebhookButton').addEventListener('click', function(e) {
+      e.preventDefault();
+      const url = document.getElementById('webhookUrl').value.trim();
+      localStorage.setItem('popupWebhookUrl', url);
+      console.log('Webhook URL updated to', url);
+    });
+
   </script>
 </body>
 </html>
 '''
 
-# Updated: The main mapping page now shows serial statuses for all selected USB devices.
+    # Updated: The main mapping page now shows serial statuses for all selected USB devices.
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -466,6 +861,7 @@ HTML_PAGE = '''
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mesh Mapper</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <style>
     /* Hide tile seams on all map layers */
@@ -480,13 +876,33 @@ HTML_PAGE = '''
       background-color: black !important;
     }
     /* Toggle switch styling */
-    .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
+    .switch { position: relative; display: inline-block; vertical-align: middle; width: 40px; height: 20px; }
     .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #333; transition: .4s; border-radius: 20px; }
-    .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: lime; transition: .4s; border-radius: 50%; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .4s; border-radius: 20px; }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 2px;
+      top: 50%;
+      background-color: lime;
+      border: 1px solid #9B30FF;
+      transition: .4s;
+      border-radius: 50%;
+      transform: translateY(-50%);
+    }
     .switch input:checked + .slider { background-color: lime; }
-    .switch input:checked + .slider:before { transform: translateX(20px); }
-    body, html { margin: 0; padding: 0; background-color: black; }
+    .switch input:checked + .slider:before {
+      transform: translateX(20px) translateY(-50%);
+      border: 1px solid #9B30FF;
+    }
+    body, html {
+      margin: 0;
+      padding: 0;
+      background-color: #0a001f;
+      font-family: 'Orbitron', monospace;
+    }
     #map { height: 100vh; }
     /* Layer control styling (bottom left) reduced by 30% */
     #layerControl {
@@ -497,63 +913,94 @@ HTML_PAGE = '''
       padding: 3.5px; /* reduced from 5px */
       border: 0.7px solid lime; /* reduced border thickness */
       border-radius: 7px; /* reduced from 10px */
-      color: lime;
+      color: #FF00FF;
       font-family: monospace;
       font-size: 0.7em; /* scale font by 70% */
       z-index: 1000;
     }
+    /* Basemap label always neon pink */
+    #layerControl > label {
+      color: #FF00FF;
+    }
     #layerControl select,
     #layerControl select option {
       background-color: #333;
-      color: #FF00FF;
+      color: lime;
       border: none;
       padding: 2.1px;
       font-size: 0.7em;
     }
     
-    #filterBox {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      width: 220px;
-      background: rgba(0,0,0,0.8);
-      padding: 8px;
-      border: 1px solid lime;
-      border-radius: 10px;
-      color: lime;
-      font-family: monospace;
-      max-height: 80vh;
-      overflow: hidden;
-      transition: max-height 0.3s ease;
-      z-index: 1000;
-      transform: scale(0.85);
-      transform-origin: top right;
-    }
-    /* Collapsed filterBox shows only header, emoji, and toggle */
-    #filterBox.collapsed {
-      overflow: hidden;
-      width: auto;         /* shrink width to content */
-      padding: 4px;        /* minimal padding around header */
-    }
+        #filterBox {
+          position: absolute;
+          top: 10px;
+          right: 10px;
+          background: rgba(0,0,0,0.8);
+          padding: 8px;
+          width: 18.75vw;
+          border: 1px solid lime;
+          border-radius: 10px;
+          color: lime;
+          font-family: monospace;
+          max-height: 95vh;
+          overflow-y: auto;
+          overflow-x: hidden;
+          z-index: 1000;
+        }
+        @media (max-width: 600px) {
+          #filterBox {
+            width: 37.5vw;
+            max-width: 90vw;
+          }
+        }
+        /* Auto-size inputs inside filterBox */
+        #filterBox input[type="text"],
+        #filterBox input[type="password"],
+        #filterBox input[type="range"],
+        #filterBox select {
+          width: auto !important;
+          min-width: 0;
+        }
     #filterBox.collapsed #filterContent {
+      display: none;
+    }
+    /* Tighten header when collapsed */
+    #filterBox.collapsed {
+      padding: 4px;
+      width: auto;
+    }
+    #filterBox.collapsed #filterHeader {
+      padding: 0;
+    }
+    #filterBox.collapsed #filterHeader h3 {
+      display: inline-block;
+      flex: none;
+      width: auto;
+      margin: 0;
+      color: #FF00FF;
+    }
+# Add margin to filterToggle when collapsed
+    #filterBox.collapsed #filterHeader #filterToggle {
+      margin-left: 5px;
+    }
+    #filterBox:not(.collapsed) #filterHeader h3 {
       display: none;
     }
     #filterHeader {
       display: flex;
       align-items: center;
     }
+    #filterBox:not(.collapsed) #filterHeader {
+      justify-content: flex-end;
+    }
     #filterHeader h3 {
-      flex: 1;
+      flex: none;
       text-align: center;
       margin: 0;
       font-size: 1em;
       display: block;
       width: 100%;
       color: #FF00FF;
-    }
-    /* Hide the header text when the box is expanded */
-    #filterBox:not(.collapsed) #filterHeader h3 {
-      display: none;
     }
     
     /* USB status box styling (bottom right) - now even with the map layer select */
@@ -582,6 +1029,30 @@ HTML_PAGE = '''
       padding: 3px;
       cursor: pointer;
     }
+    .drone-item.no-gps {
+      position: relative;
+      border: 1px solid deepskyblue !important;
+    }
+    #activePlaceholder .drone-item.no-gps:hover::after {
+      content: "no gps lock";
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: black;
+      color: #FF00FF;               /* neon pink text */
+      padding: 4px 6px;
+      border: 1px solid #FF00FF;    /* neon pink border */
+      border-radius: 2px;
+      white-space: nowrap;
+      font-family: monospace;
+      font-size: 0.75em;
+      z-index: 2000;
+    }
+    /* Highlight recently seen drones */
+    .drone-item.recent {
+      box-shadow: 0 0 0 1px lime;
+    }
     .placeholder {
       border: 2px solid transparent;
       border-image: linear-gradient(to right, lime 85%, yellow 15%) 1;
@@ -592,7 +1063,7 @@ HTML_PAGE = '''
       max-height: 200px;
     }
     .selected { background-color: rgba(255,255,255,0.2); }
-    .leaflet-popup-content-wrapper { background-color: black; color: lime; font-family: monospace; border: 2px solid lime; border-radius: 10px;
+    .leaflet-popup > .leaflet-popup-content-wrapper { background-color: black; color: lime; font-family: monospace; border: 2px solid lime; border-radius: 10px;
       width: 220px !important;
       max-width: 220px;
       zoom: 1.15;
@@ -603,8 +1074,51 @@ HTML_PAGE = '''
       white-space: normal;
     }
     .leaflet-popup-tip { background: lime; }
-    button { margin-top: 4px; padding: 3px; font-size: 0.8em; border: none; background-color: #333; color: lime; cursor: pointer; }
-    select { background-color: #333; color: lime; border: none; padding: 3px; }
+    /* Collapse inner Leaflet popup layers into the outer wrapper */
+    .leaflet-popup-content {
+      background: transparent !important;
+      padding: 0 !important;
+      box-shadow: none !important;
+      color: inherit !important;
+    }
+    .leaflet-popup-tip-container,
+    .leaflet-popup-tip {
+      background: transparent !important;
+      box-shadow: none !important;
+    }
+    /* Collapse inner popup layers for no-GPS popups */
+    .leaflet-popup.no-gps-popup > .leaflet-popup-content-wrapper {
+      /* ensure outer wrapper styling persists */
+      background-color: black !important;
+      color: lime !important;
+    }
+    .leaflet-popup.no-gps-popup .leaflet-popup-content {
+      background: transparent !important;
+      padding: 0 !important;
+      box-shadow: none !important;
+      color: inherit !important;
+    }
+    .leaflet-popup.no-gps-popup .leaflet-popup-tip-container,
+    .leaflet-popup.no-gps-popup .leaflet-popup-tip {
+      background: transparent !important;
+      box-shadow: none !important;
+    }
+    button {
+      margin-top: 4px;
+      padding: 3px;
+      font-size: 0.8em;
+      border: 1px solid lime;
+      background-color: #333;
+      color: lime;
+      cursor: pointer;
+      width: auto;
+    }
+    select {
+      background-color: #333;
+      color: lime;
+      border: none;
+      padding: 3px;
+    }
     .leaflet-control-zoom-in, .leaflet-control-zoom-out {
       background: rgba(0,0,0,0.8);
       color: lime;
@@ -641,18 +1155,40 @@ HTML_PAGE = '''
     .leaflet-control-zoom-in:hover, .leaflet-control-zoom-out:hover { background-color: #222; }
     input#aliasInput {
       background-color: #222;
-      color: #FF00FF;
+      color: #87CEEB;         /* pastel blue (updated) */
       border: 1px solid #FF00FF;
-      padding: 2px;
-      font-size: 0.8em;
-      caret-color: transparent;
+      padding: 4px;
+      font-size: 1.06em;
+      caret-color: #87CEEB;
       outline: none;
     }
-    /* Popup button and input sizing */
+    .leaflet-popup-content-wrapper input:not(#aliasInput) {
+      caret-color: transparent;
+    }
+    /* Popup button styling */
     .leaflet-popup-content-wrapper button {
+      display: inline-block;
+      margin: 2px 4px 2px 0;
+      padding: 4px 6px;
       font-size: 0.9em;
-      padding: 4px;
-      margin-top: 5px;
+      width: auto;
+      background-color: #333;
+      border: 1px solid lime;
+      color: lime;
+      box-shadow: none;
+      text-shadow: none;
+    }
+
+    /* Locked button styling */
+    .leaflet-popup-content-wrapper button[style*="background-color: green"] {
+      background-color: green;
+      color: black;
+      border-color: green;
+    }
+
+    /* Hover effect */
+    .leaflet-popup-content-wrapper button:hover {
+      background-color: rgba(255,255,255,0.1);
     }
     .leaflet-popup-content-wrapper input[type="text"],
     .leaflet-popup-content-wrapper input[type="range"] {
@@ -685,20 +1221,21 @@ HTML_PAGE = '''
     }
     /* Cyberpunk styling for filter headings */
     #filterContent > h3:nth-of-type(1) {
-      color: #BA55D3;         /* Active Drones in purple */
+      color: #FF00FF;         /* Active Drones in magenta */
       text-align: center;     /* center text */
       font-size: 1.1em;       /* slightly larger font */
     }
     #filterContent > h3:nth-of-type(2) {
-      color: #BA55D3;        /* more pastel purple */
+      color: #FF00FF;        /* more magenta */
       text-align: center;    /* center text */
       font-size: 1.1em;      /* slightly larger font */
     }
     /* Lime-green hacky dashes around filter headers */
     #filterContent > h3 {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
+      display: block;
+      width: 100%;
+      text-align: center;
+      margin: 0.5em 0;
     }
     #filterContent > h3::before,
     #filterContent > h3::after {
@@ -709,17 +1246,18 @@ HTML_PAGE = '''
     /* Download buttons styling */
     #downloadButtons {
       display: flex;
-      justify-content: space-between;
+      width: 100%;
+      gap: 4px;
       margin-top: 8px;
     }
     #downloadButtons button {
       flex: 1;
-      margin: 0 4px;
+      margin: 0;
       padding: 4px;
       font-size: 0.8em;
       border: 1px solid lime;
       border-radius: 5px;
-      background: #333;
+      background-color: #333;
       color: lime;
       font-family: monospace;
       cursor: pointer;
@@ -741,7 +1279,143 @@ HTML_PAGE = '''
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
-  </style>
+    /* Staleout slider styling – match popup sliders */
+    #staleoutSlider {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 3px;
+      background: transparent;
+      border: none;
+      outline: none;
+    }
+    #staleoutSlider::-webkit-slider-runnable-track {
+      width: 100%;
+      height: 3px;
+      background: #9B30FF;
+      border: none;
+      border-radius: 0;
+    }
+    #staleoutSlider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      margin-top: -6.5px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    /* Firefox */
+    #staleoutSlider::-moz-range-track {
+      width: 100%;
+      height: 3px;
+      background: #9B30FF;
+      border: none;
+      border-radius: 0;
+    }
+    #staleoutSlider::-moz-range-thumb {
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      margin-top: -6.5px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    /* IE */
+    #staleoutSlider::-ms-fill-lower,
+    #staleoutSlider::-ms-fill-upper {
+      background: #9B30FF;
+      border: none;
+      border-radius: 2px;
+    }
+    #staleoutSlider::-ms-thumb {
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      border-radius: 50%;
+      cursor: pointer;
+      margin-top: -6.5px;
+    }
+
+    /* Popup range sliders styling */
+    .leaflet-popup-content-wrapper input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 3px;
+      background: transparent;
+      border: none;
+    }
+    .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      margin-top: -6.5px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-thumb {
+      height: 16px;
+      width: 16px;
+      background: lime;
+      border: 1px solid #9B30FF;
+      margin-top: -6.5px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    /* Ensure popup sliders have the same track styling */
+    .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-runnable-track {
+      width: 100%;
+      height: 3px;
+      background: #9B30FF;
+      border: 1px solid lime;
+      border-radius: 0;
+    }
+    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-track {
+      width: 100%;
+      height: 3px;
+      background: #9B30FF;
+      border: 1px solid lime;
+      border-radius: 0;
+    }
+
+    /* 1) Remove rounded corners from all sliders */
+    /* WebKit */
+    input[type="range"]::-webkit-slider-runnable-track,
+    input[type="range"]::-webkit-slider-thumb {
+      border-radius: 0;
+    }
+    /* Firefox */
+    input[type="range"]::-moz-range-track,
+    input[type="range"]::-moz-range-thumb {
+      border-radius: 0;
+    }
+    /* IE */
+    input[type="range"]::-ms-fill-lower,
+    input[type="range"]::-ms-fill-upper,
+    input[type="range"]::-ms-thumb {
+      border-radius: 0;
+    }
+
+    /* 2) Smaller, side-by-side Observer buttons */
+    .leaflet-popup-content-wrapper #lock-observer,
+    .leaflet-popup-content-wrapper #unlock-observer {
+      display: inline-block;
+      font-size: 0.9em;
+      padding: 4px 6px;
+      margin: 2px 4px 2px 0;
+    }
+</style>
+    <style>
+      /* Remove glow and shadows on text boxes, selects, and buttons */
+      input, select, button {
+        text-shadow: none !important;
+        box-shadow: none !important;
+      }
+    </style>
 </head>
 <body>
 <div id="map"></div>
@@ -768,6 +1442,13 @@ HTML_PAGE = '''
     <div id="activePlaceholder" class="placeholder"></div>
     <h3>Inactive Drones</h3>
     <div id="inactivePlaceholder" class="placeholder"></div>
+    <!-- Staleout Slider -->
+    <div style="margin-top:8px; display:flex; flex-direction:column; align-items:stretch; width:100%; box-sizing:border-box;">
+      <label style="color:lime; font-family:monospace; margin-bottom:4px; display:block; width:100%; text-align:center;">Staleout Time</label>
+      <input type="range" id="staleoutSlider" min="1" max="5" step="1" value="1" 
+             style="width:100%; border:1px solid lime; margin-bottom:4px;">
+      <div id="staleoutValue" style="color:lime; font-family:monospace; width:100%; text-align:center;">1 min</div>
+    </div>
     <!-- Downloads Section -->
     <div id="downloadSection">
       <h4 class="downloadHeader">Download Logs</h4>
@@ -776,16 +1457,39 @@ HTML_PAGE = '''
         <button id="downloadKml">KML</button>
         <button id="downloadAliases">Aliases</button>
       </div>
+      <div id="downloadCumulativeButtons" style="display:flex; gap:4px; justify-content:center; margin-top:4px;">
+        <button id="downloadCumulativeCsv">Cumulative CSV</button>
+        <button id="downloadCumulativeKml">Cumulative KML</button>
+      </div>
     </div>
-    <div style="margin-top:8px; text-align:center;">
-      <label style="color:lime; font-family:monospace; margin-right:8px;">Node Mode</label>
+    <!-- Node Mode block -->
+    <div style="margin-top:8px; display:flex; flex-direction:column; align-items:center;">
+      <label style="color:lime; font-family:monospace; margin-bottom:4px;">Node Mode</label>
       <label class="switch">
         <input type="checkbox" id="nodeModeMainSwitch">
         <span class="slider"></span>
       </label>
+      <div style="color:#FF00FF; font-family:monospace; font-size:0.75em; text-align:center; margin-top:4px;">
+        Polls detections every second instead of every 100 ms to reduce CPU/battery use in Node Mode
+      </div>
     </div>
-    <div style="color:#FF00FF; font-family:monospace; font-size:0.75em; white-space:normal; line-height:1.2; margin-top:4px; text-align:center;">
-      Polls detections every second instead of every 200 ms to reduce CPU/battery use and optimizes API for Node Mode.
+    <button id="settingsButton"
+            style="display:block;
+                   width:calc(100% - 16px);
+                   margin:6px 8px;
+                   padding:6px;
+                   border:1px solid lime;
+                   background-color:#333;
+                   color:lime;
+                   font-family:monospace;
+                   font-size:0.9em;
+                   border-radius:5px;
+                   cursor:pointer;"
+            onclick="window.location.href='/select_ports'">
+      Settings
+    </button>
+    <div style="color:#FF00FF; font-family:monospace; font-size:0.75em; text-align:center; margin-top:4px;">
+      Return to port selection and settings screen
     </div>
   </div>
 </div>
@@ -793,6 +1497,9 @@ HTML_PAGE = '''
   <!-- USB port statuses will be injected here -->
 </div>
 <script>
+  // Do not clear trackedPairs; persist across reloads
+  // Track drones already alerted for no GPS
+  const alertedNoGpsDrones = new Set();
   // Round tile positions to integer pixels to eliminate seams
   L.DomUtil.setPosition = (function() {
     var original = L.DomUtil.setPosition;
@@ -803,6 +1510,26 @@ HTML_PAGE = '''
   })();
 // --- Node Mode Main Switch & Polling Interval Sync ---
 document.addEventListener('DOMContentLoaded', () => {
+  // Restore filter collapsed state
+  const filterBox = document.getElementById('filterBox');
+  const filterToggle = document.getElementById('filterToggle');
+  const wasCollapsed = localStorage.getItem('filterCollapsed') === 'true';
+  if (wasCollapsed) {
+    filterBox.classList.add('collapsed');
+    filterToggle.textContent = '[+]';
+  }
+  // restore follow-lock on reload
+  const storedLock = localStorage.getItem('followLock');
+  if (storedLock) {
+    try {
+      followLock = JSON.parse(storedLock);
+      if (followLock.type === 'observer') {
+        updateObserverPopupButtons();
+      } else if (followLock.type === 'drone' || followLock.type === 'pilot') {
+        updateMarkerButtons(followLock.type, followLock.id);
+      }
+    } catch (e) { console.error('Failed to restore followLock', e); }
+  }
   // Ensure Node Mode default is off if unset
   if (localStorage.getItem('nodeMode') === null) {
     localStorage.setItem('nodeMode', 'false');
@@ -815,7 +1542,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const enabled = mainSwitch.checked;
       localStorage.setItem('nodeMode', enabled);
       clearInterval(updateDataInterval);
-      updateDataInterval = setInterval(updateData, enabled ? 1000 : 200);
+      updateDataInterval = setInterval(updateData, enabled ? 1000 : 100);
       // Sync popup toggle if open
       const popupSwitch = document.getElementById('nodeModePopupSwitch');
       if (popupSwitch) popupSwitch.checked = enabled;
@@ -823,19 +1550,59 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   // Start polling based on current setting
   updateData();
-  updateDataInterval = setInterval(updateData, mainSwitch && mainSwitch.checked ? 1000 : 200);
+  updateDataInterval = setInterval(updateData, mainSwitch && mainSwitch.checked ? 1000 : 100);
+  // Adaptive polling: slow down during map interactions
+  map.on('zoomstart dragstart', () => {
+    clearInterval(updateDataInterval);
+    updateDataInterval = setInterval(updateData, 500);
+  });
+  map.on('zoomend dragend', () => {
+    clearInterval(updateDataInterval);
+    const interval = mainSwitch && mainSwitch.checked ? 1000 : 100;
+    updateDataInterval = setInterval(updateData, interval);
+  });
+
+  // Staleout slider initialization
+  const staleoutSlider = document.getElementById('staleoutSlider');
+  const staleoutValue = document.getElementById('staleoutValue');
+  if (staleoutSlider && typeof STALE_THRESHOLD !== 'undefined') {
+    staleoutSlider.value = STALE_THRESHOLD / 60;
+    staleoutValue.textContent = (STALE_THRESHOLD / 60) + ' min';
+    staleoutSlider.oninput = () => {
+      const minutes = parseInt(staleoutSlider.value, 10);
+      STALE_THRESHOLD = minutes * 60;
+      staleoutValue.textContent = minutes + ' min';
+      localStorage.setItem('staleoutMinutes', minutes.toString());
+    };
+  }
+  // Filter box toggle persistence
+  if (filterToggle && filterBox) {
+    filterToggle.addEventListener('click', function() {
+      filterBox.classList.toggle('collapsed');
+      filterToggle.textContent = filterBox.classList.contains('collapsed') ? '[+]' : '[-]';
+      // Persist filter collapsed state
+      localStorage.setItem('filterCollapsed', filterBox.classList.contains('collapsed'));
+    });
+  }
 });
-// Optimize tile loading for smooth zoom and aggressive preloading
-L.Map.prototype.options.fadeAnimation = false;
+// Fallback collapse handler to ensure filter toggle works
+document.getElementById("filterToggle").addEventListener("click", function() {
+  const box = document.getElementById("filterBox");
+  const isCollapsed = box.classList.toggle("collapsed");
+  this.textContent = isCollapsed ? "[+]" : "[-]";
+  localStorage.setItem('filterCollapsed', isCollapsed);
+});
+// Configure tile loading for smooth zoom transitions
+L.Map.prototype.options.fadeAnimation = true;
+L.Map.prototype.options.zoomAnimation = true;
 L.TileLayer.prototype.options.updateWhenZooming = true;
-L.TileLayer.prototype.options.updateInterval = 50;
-L.TileLayer.prototype.options.keepBuffer = 200;
-// Prevent tile unload and reuse cached tiles to eliminate blanking
-L.GridLayer.prototype.options.unloadInvisibleTiles = false;
-L.TileLayer.prototype.options.reuseTiles = true;
-L.TileLayer.prototype.options.updateWhenIdle = false;
-// Aggressively preload surrounding tiles during zoom
-L.TileLayer.prototype.options.preload = true;
+L.TileLayer.prototype.options.updateWhenIdle = true;
+// Use default tileSize for crisp rendering
+L.TileLayer.prototype.options.detectRetina = false;
+// Keep a moderate tile buffer for smoother panning
+L.TileLayer.prototype.options.keepBuffer = 50;
+// Disable aggressive preloading to avoid stutters
+L.TileLayer.prototype.options.preload = false;
 // On window load, restore persisted detection data (trackedPairs) and re-add markers.
 window.onload = function() {
   let stored = localStorage.getItem("trackedPairs");
@@ -863,6 +1630,8 @@ window.onload = function() {
           }
         }
       }
+      // Prevent webhook/alert firing for restored drones on page reload
+      Object.keys(window.tracked_pairs).forEach(mac => alertedNoGpsDrones.add(mac));
     } catch(e) {
       console.error("Error parsing trackedPairs from localStorage", e);
     }
@@ -874,35 +1643,186 @@ if (localStorage.getItem('colorOverrides')) {
   catch(e){ window.colorOverrides = {}; }
 } else { window.colorOverrides = {}; }
 
+// Restore historical drones from localStorage
 if (localStorage.getItem('historicalDrones')) {
   try { window.historicalDrones = JSON.parse(localStorage.getItem('historicalDrones')); }
-  catch(e){ window.historicalDrones = {}; }
-} else { window.historicalDrones = {}; }
+  catch(e) { window.historicalDrones = {}; }
+} else {
+  window.historicalDrones = {};
+}
 
+// Restore map center and zoom from localStorage
 let persistedCenter = localStorage.getItem('mapCenter');
 let persistedZoom = localStorage.getItem('mapZoom');
 if (persistedCenter) {
-  try { persistedCenter = JSON.parse(persistedCenter); } catch(e){ persistedCenter = null; }
-} else { persistedCenter = null; }
-persistedZoom = persistedZoom ? parseInt(persistedZoom) : null;
+  try { persistedCenter = JSON.parse(persistedCenter); } catch(e) { persistedCenter = null; }
+} else {
+  persistedCenter = null;
+}
+persistedZoom = persistedZoom ? parseInt(persistedZoom, 10) : null;
 
+// Application-level globals
 var aliases = {};
 var colorOverrides = window.colorOverrides;
-const STALE_THRESHOLD = 60;  // changed from 300 to 60 seconds for stale threshold in client side code
+
+// Load stale-out minutes from localStorage (default 1) and compute threshold in seconds
+if (localStorage.getItem('staleoutMinutes') === null) {
+  localStorage.setItem('staleoutMinutes', '1');
+}
+let STALE_THRESHOLD = parseInt(localStorage.getItem('staleoutMinutes'), 10) * 60;
+
 var comboListItems = {};
 
 async function updateAliases() {
   try {
-    const response = await fetch('/api/aliases');
+    const response = await fetch(window.location.origin + '/api/aliases');
     aliases = await response.json();
     updateComboList(window.tracked_pairs);
+      // Persist detection state across page reloads
+      localStorage.setItem("trackedPairs", JSON.stringify(window.tracked_pairs));
   } catch (error) { console.error("Error fetching aliases:", error); }
 }
 
 function safeSetView(latlng, zoom=18) {
-  let currentZoom = map.getZoom();
-  let newZoom = zoom > currentZoom ? zoom : currentZoom;
-  map.setView(latlng, newZoom);
+  const currentZoom = map.getZoom();
+  // make sure we have a Leaflet LatLng
+  const target = L.latLng(latlng);
+  // if it's already on-screen, do just a small “quarter” zoom
+  if (map.getBounds().contains(target)) {
+    const smallZoom = currentZoom + (zoom - currentZoom) * 0.25;
+    map.flyTo(target, smallZoom, { duration: 0.4 });
+    return;
+  }
+  // otherwise do the full zoom-out + zoom-in
+  const midZoom = Math.max(Math.min(currentZoom, zoom) - 3, 8);
+  map.flyTo(target, midZoom, { duration: 0.3 });
+  setTimeout(() => {
+    map.flyTo(target, zoom, { duration: 0.5 });
+  }, 300);
+}
+
+// Transient terminal-style popup for drone events
+function showTerminalPopup(det, isNew) {
+  // Remove any existing popup
+  const old = document.getElementById('dronePopup');
+  if (old) old.remove();
+
+  // Build a new popup container
+  const popup = document.createElement('div');
+  popup.id = 'dronePopup';
+  const isMobile = window.innerWidth <= 600;
+  Object.assign(popup.style, {
+    position: 'fixed',
+    top: isMobile ? '50px' : '10px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    background: 'rgba(0,0,0,0.8)',
+    color: 'lime',
+    fontFamily: 'monospace',
+    whiteSpace: 'normal',
+    padding: isMobile ? '2px 4px' : '4px 8px',
+    border: '1px solid lime',
+    borderRadius: '4px',
+    zIndex: 2000,
+    opacity: 0.9,
+    fontSize: isMobile ? '0.6em' : '',
+    maxWidth: isMobile ? '80vw' : 'none',
+    display: 'inline-block',
+    textAlign: 'center',
+  });
+
+  // Build concise popup text
+  const alias = aliases[det.mac];
+  const rid   = det.basic_id || 'N/A';
+  let header;
+  if (!det.drone_lat || !det.drone_long || det.drone_lat === 0 || det.drone_long === 0) {
+    header = 'Drone with no GPS lock detected';
+  } else if (alias) {
+    header = `Known drone detected – ${alias}`;
+  } else {
+    header = isNew ? 'New drone detected' : 'Previously seen non-aliased drone detected';
+  }
+  const content = alias
+    ? `${header} - RID:${rid} MAC:${det.mac}`
+    : `${header} - RID:${rid} MAC:${det.mac}`;
+  // Build popup HTML and button using new logic
+  // Build popup text
+  // (BEGIN PATCHED BUTTON & POPUP LOGIC)
+  // Build popup text
+  const isMobileBtn = window.innerWidth <= 600;
+  const headerDiv = `<div>${content}</div>`;
+  let buttonDiv = '';
+  if (det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0) {
+    const btnStyle = [
+      'display:block',
+      'width:100%',
+      'margin-top:4px',
+      'padding:' + (isMobileBtn ? '2px 0' : '4px 6px'),
+      'border:1px solid #FF00FF',
+      'border-radius:4px',
+      'background:transparent',
+      'color:lime',
+      'font-size:' + (isMobileBtn ? '0.8em' : '0.9em'),
+      'cursor:pointer'
+    ].join('; ');
+    buttonDiv = `<div><button id="zoomBtn" style="${btnStyle}">Zoom to Drone</button></div>`;
+  }
+  popup.innerHTML = headerDiv + buttonDiv;
+
+  if (buttonDiv) {
+    const zoomBtn = popup.querySelector('#zoomBtn');
+    zoomBtn.addEventListener('click', () => {
+      zoomBtn.style.backgroundColor = 'purple';
+      setTimeout(() => { zoomBtn.style.backgroundColor = 'transparent'; }, 200);
+      safeSetView([det.drone_lat, det.drone_long]);
+    });
+  }
+  // (END PATCHED BUTTON & POPUP LOGIC)
+
+  // --- Webhook logic (scoped, non-intrusive) ---
+  try {
+    const webhookUrl = localStorage.getItem('popupWebhookUrl');
+    if (webhookUrl && webhookUrl.startsWith("http")) {
+      const alias = aliases[det.mac];
+      let header;
+      if (!det.drone_lat || !det.drone_long || det.drone_lat === 0 || det.drone_long === 0) {
+        header = 'Drone with no GPS lock detected';
+      } else if (alias) {
+        header = `Known drone detected – ${alias}`;
+      } else {
+        header = isNew ? 'New drone detected' : 'Previously seen non-aliased drone detected';
+      }
+      const payload = {
+        alert: header,
+        mac: det.mac,
+        basic_id: det.basic_id || null,
+        alias: alias || null,
+        drone_lat: det.drone_lat || null,
+        drone_long: det.drone_long || null,
+        pilot_lat: det.pilot_lat || null,
+        pilot_long: det.pilot_long || null,
+        faa_data: (det.faa_data && det.faa_data.data && Array.isArray(det.faa_data.data.items) && det.faa_data.data.items.length > 0)
+          ? det.faa_data.data.items[0]
+          : null,
+        drone_gmap: det.drone_lat && det.drone_long ? `https://www.google.com/maps?q=${det.drone_lat},${det.drone_long}` : null,
+        pilot_gmap: det.pilot_lat && det.pilot_long ? `https://www.google.com/maps?q=${det.pilot_lat},${det.pilot_long}` : null,
+        isNew: isNew
+      };
+      fetch('/api/webhook_popup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payload, webhook_url: webhookUrl })
+      }).catch(e => console.warn('Silent webhook fail:', e));
+    }
+  } catch (e) {
+    console.warn('Webhook logic skipped due to error', e);
+  }
+  // --- End webhook logic ---
+
+  document.body.appendChild(popup);
+
+  // Auto-remove after 4 seconds
+  setTimeout(() => popup.remove(), 4000);
 }
 
 var followLock = { type: null, id: null, enabled: false };
@@ -923,12 +1843,14 @@ function generateObserverPopup() {
        <option value="🥷" ${storedObserverEmoji === "🥷" ? "selected" : ""}>🥷</option>
        <option value="👁️" ${storedObserverEmoji === "👁️" ? "selected" : ""}>👁️</option>
     </select><br>
-    <button id="lock-observer" onclick="lockObserver()" style="background-color: ${observerLocked ? 'green' : ''};">
-      ${observerLocked ? 'Locked on Observer' : 'Lock on Observer'}
-    </button>
-    <button id="unlock-observer" onclick="unlockObserver()" style="background-color: ${observerLocked ? '' : 'green'};">
-      ${observerLocked ? 'Unlock Observer' : 'Unlocked Observer'}
-    </button>
+    <div style="display:flex; gap:4px; justify-content:center; margin-top:4px;">
+        <button id="lock-observer" onclick="lockObserver()" style="background-color: ${observerLocked ? 'green' : ''};">
+          ${observerLocked ? 'Locked on Observer' : 'Lock on Observer'}
+        </button>
+        <button id="unlock-observer" onclick="unlockObserver()" style="background-color: ${observerLocked ? '' : 'green'};">
+          ${observerLocked ? 'Unlock Observer' : 'Unlocked Observer'}
+        </button>
+    </div>
   </div>
   `;
 }
@@ -943,8 +1865,12 @@ function updateObserverEmoji() {
   }
 }
 
-function lockObserver() { followLock = { type: 'observer', id: 'observer', enabled: true }; updateObserverPopupButtons(); }
-function unlockObserver() { followLock = { type: null, id: null, enabled: false }; updateObserverPopupButtons(); }
+function lockObserver() { followLock = { type: 'observer', id: 'observer', enabled: true }; updateObserverPopupButtons();
+  localStorage.setItem('followLock', JSON.stringify(followLock));
+}
+function unlockObserver() { followLock = { type: null, id: null, enabled: false }; updateObserverPopupButtons();
+  localStorage.setItem('followLock', JSON.stringify(followLock));
+}
 function updateObserverPopupButtons() {
   var observerLocked = (followLock.enabled && followLock.type === 'observer');
   var lockBtn = document.getElementById("lock-observer");
@@ -958,11 +1884,13 @@ function generatePopupContent(detection, markerType) {
   let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
   content += '<strong>ID:</strong> <span id="aliasDisplay_' + detection.mac + '" style="color:#FF00FF;">' + aliasText + '</span> (MAC: ' + detection.mac + ')<br>';
   
-  if (detection.basic_id) {
-    content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div>';
-    // Button for querying FAA API.
-    content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA API</button>';
-    // FAA data display container.
+  if (detection.basic_id || detection.faa_data) {
+    if (detection.basic_id) {
+      content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div>';
+    }
+    if (detection.basic_id) {
+      content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA API</button>';
+    }
     content += '<div id="faaResult_' + detection.mac + '" style="margin-top:5px;">';
     if (detection.faa_data) {
       let faaData = detection.faa_data;
@@ -971,7 +1899,6 @@ function generatePopupContent(detection, markerType) {
         item = faaData.data.items[0];
       }
       if (item) {
-        // Only display specific fields in the desired order.
         const fields = ["makeName", "modelName", "series", "trackingNumber", "complianceCategories", "updatedAt"];
         content += '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">';
         fields.forEach(function(field) {
@@ -1004,33 +1931,44 @@ function generatePopupContent(detection, markerType) {
   content += `<hr style="border: 1px solid lime;">
               <label for="aliasInput">Alias:</label>
               <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" 
-                     style="background-color: #222; color: #FF00FF; border: 1px solid #FF00FF;" 
+                     style="background-color: #222; color: #87CEEB; border: 1px solid #FF00FF;" 
                      value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
-              <button onclick="saveAlias('${detection.mac}')">Save Alias</button>
-              <button onclick="clearAlias('${detection.mac}')">Clear Alias</button><br>`;
+              <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:4px;">
+                <button
+                  onclick="saveAlias('${detection.mac}'); this.style.backgroundColor='purple'; setTimeout(()=>this.style.backgroundColor='#333',300);"
+                  style="flex:1; margin:0 2px; padding:4px 0;"
+                >Save Alias</button>
+                <button
+                  onclick="clearAlias('${detection.mac}'); this.style.backgroundColor='purple'; setTimeout(()=>this.style.backgroundColor='#333',300);"
+                  style="flex:1; margin:0 2px; padding:4px 0;"
+                >Clear Alias</button>
+              </div>`;
   
   content += `<div style="border-top:2px solid lime; margin:10px 0;"></div>`;
   
-  var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
-  var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" 
-                      style="background-color: ${isDroneLocked ? 'green' : ''};">
-                      ${isDroneLocked ? 'Locked on Drone' : 'Lock on Drone'}
-                    </button>`;
-  var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" 
-                      style="background-color: ${isDroneLocked ? '' : 'green'};">
-                      ${isDroneLocked ? 'Unlock Drone' : 'Unlocked Drone'}
-                    </button>`;
-  var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
-  var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" 
-                      style="background-color: ${isPilotLocked ? 'green' : ''};">
-                      ${isPilotLocked ? 'Locked on Pilot' : 'Lock on Pilot'}
-                    </button>`;
-  var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" 
-                      style="background-color: ${isPilotLocked ? '' : 'green'};">
-                      ${isPilotLocked ? 'Unlock Pilot' : 'Unlocked Pilot'}
-                    </button>`;
-  content += `${droneLockButton} ${droneUnlockButton} <br>
-                ${pilotLockButton} ${pilotUnlockButton}`;
+    var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
+    var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" style="flex:${isDroneLocked ? 1.2 : 0.8}; margin:0 2px; padding:4px 0; background-color: ${isDroneLocked ? 'green' : ''};">
+      ${isDroneLocked ? 'Locked on Drone' : 'Lock on Drone'}
+    </button>`;
+    var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" style="flex:${isDroneLocked ? 0.8 : 1.2}; margin:0 2px; padding:4px 0; background-color: ${isDroneLocked ? '' : 'green'};">
+      ${isDroneLocked ? 'Unlock Drone' : 'Unlocked Drone'}
+    </button>`;
+    var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
+    var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" style="flex:${isPilotLocked ? 1.2 : 0.8}; margin:0 2px; padding:4px 0; background-color: ${isPilotLocked ? 'green' : ''};">
+      ${isPilotLocked ? 'Locked on Pilot' : 'Lock on Pilot'}
+    </button>`;
+    var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" style="flex:${isPilotLocked ? 0.8 : 1.2}; margin:0 2px; padding:4px 0; background-color: ${isPilotLocked ? '' : 'green'};">
+      ${isPilotLocked ? 'Unlock Pilot' : 'Unlocked Pilot'}
+    </button>`;
+    content += `
+      <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:4px;">
+        ${droneLockButton}
+        ${droneUnlockButton}
+      </div>
+      <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:4px;">
+        ${pilotLockButton}
+        ${pilotUnlockButton}
+      </div>`;
   
   let defaultHue = colorOverrides[detection.mac] !== undefined ? colorOverrides[detection.mac] : (function(){
       let hash = 0;
@@ -1059,13 +1997,17 @@ async function queryFaaAPI(mac, remote_id) {
         button.style.backgroundColor = "gray";
     }
     try {
-        const response = await fetch('/api/query_faa', {
+        const response = await fetch(window.location.origin + '/api/query_faa', {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({mac: mac, remote_id: remote_id})
         });
         const result = await response.json();
         if (result.status === "ok") {
+            // Immediately update the in-memory tracked_pairs with the returned FAA data
+            if (window.tracked_pairs && window.tracked_pairs[mac]) {
+              window.tracked_pairs[mac].faa_data = result.faa_data;
+            }
             const faaDiv = document.getElementById("faaResult_" + mac);
             if (faaDiv) {
                 let faaData = result.faa_data;
@@ -1086,6 +2028,22 @@ async function queryFaaAPI(mac, remote_id) {
                   faaDiv.innerHTML = '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">No FAA data available</div>';
                 }
             }
+            // Immediately refresh popups with new FAA data
+            const key = result.mac || mac;
+            if (typeof tracked_pairs !== "undefined" && tracked_pairs[key]) {
+              if (droneMarkers[key]) {
+                droneMarkers[key].setPopupContent(generatePopupContent(tracked_pairs[key], 'drone'));
+                if (droneMarkers[key].isPopupOpen()) {
+                  droneMarkers[key].openPopup();
+                }
+              }
+              if (pilotMarkers[key]) {
+                pilotMarkers[key].setPopupContent(generatePopupContent(tracked_pairs[key], 'pilot'));
+                if (pilotMarkers[key].isPopupOpen()) {
+                  pilotMarkers[key].openPopup();
+                }
+              }
+            }
         } else {
             alert("FAA API error: " + result.message);
         }
@@ -1102,15 +2060,29 @@ async function queryFaaAPI(mac, remote_id) {
 }
 
 function lockMarker(markerType, id) {
+  // Remember previous lock so we can clear its buttons
+  const prevId = followLock.id;
+  // Set new lock
   followLock = { type: markerType, id: id, enabled: true };
+  // Update buttons for this id in both drone and pilot sections
   updateMarkerButtons('drone', id);
   updateMarkerButtons('pilot', id);
+  localStorage.setItem('followLock', JSON.stringify(followLock));
+  // If another id was locked before, clear its button states
+  if (prevId && prevId !== id) {
+    updateMarkerButtons('drone', prevId);
+    updateMarkerButtons('pilot', prevId);
+  }
 }
 
 function unlockMarker(markerType, id) {
   if (followLock.enabled && followLock.type === markerType && followLock.id === id) {
+    // Clear the lock
     followLock = { type: null, id: null, enabled: false };
-    updateMarkerButtons(markerType, id);
+    // Update buttons for this id in both drone and pilot sections
+    updateMarkerButtons('drone', id);
+    updateMarkerButtons('pilot', id);
+    localStorage.setItem('followLock', JSON.stringify(followLock));
   }
 }
 
@@ -1141,7 +2113,7 @@ function openAliasPopup(mac) {
 async function saveAlias(mac) {
   let alias = document.getElementById("aliasInput").value;
   try {
-    const response = await fetch('/api/set_alias', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mac: mac, alias: alias}) });
+    const response = await fetch(window.location.origin + '/api/set_alias', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mac: mac, alias: alias}) });
     const data = await response.json();
     if (data.status === "ok") {
       // Immediately update local alias map so popup content uses new alias
@@ -1167,13 +2139,15 @@ async function saveAlias(mac) {
         aliasSpan.style.backgroundColor = 'purple';
         setTimeout(() => { aliasSpan.style.backgroundColor = prevBg; }, 300);
       }
+      // Ensure the alias list updates immediately
+      updateComboList(window.tracked_pairs);
     }
   } catch (error) { console.error("Error saving alias:", error); }
 }
 
 async function clearAlias(mac) {
   try {
-    const response = await fetch('/api/clear_alias/' + mac, {method: 'POST'});
+    const response = await fetch(window.location.origin + '/api/clear_alias/' + mac, {method: 'POST'});
     const data = await response.json();
     if (data.status === "ok") {
       updateAliases();
@@ -1250,6 +2224,7 @@ const map = L.map('map', {
   attributionControl: false,
   maxZoom: initialLayer.options.maxZoom
 });
+var canvasRenderer = L.canvas();
 // create custom Leaflet panes for z-ordering
 map.createPane('pilotCirclePane');
 map.getPane('pilotCirclePane').style.zIndex = 600;
@@ -1260,7 +2235,7 @@ map.getPane('droneCirclePane').style.zIndex = 650;
 map.createPane('droneIconPane');
 map.getPane('droneIconPane').style.zIndex = 651;
 
-map.on('moveend', function() {
+map.on('moveend zoomend', function() {
   let center = map.getCenter();
   let zoom = map.getZoom();
   localStorage.setItem('mapCenter', JSON.stringify(center));
@@ -1272,7 +2247,7 @@ map.on('zoomend', function() {
   // Scale circle and ring radii based on current zoom
   const zoomLevel = map.getZoom();
   const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
-  const circleRadius = size * 0.34;
+  const circleRadius = size * 0.45;
   Object.keys(droneMarkers).forEach(mac => {
     const color = get_color_for_mac(mac);
     droneMarkers[mac].setIcon(createIcon('🛸', color));
@@ -1300,7 +2275,7 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   else if (value === "osmHumanitarian") newLayer = osmHumanitarian;
   else if (value === "cartoPositron") newLayer = cartoPositron;
   else if (value === "cartoDarkMatter") newLayer = cartoDarkMatter;
-  else if (value === "esriWorldImagery") newLayer = esriWorldImagery;
+  else if (value === "esriWorldImagery") nareewLayer = esriWorldImagery;
   else if (value === "esriWorldTopo") newLayer = esriWorldTopo;
   else if (value === "esriDarkGray") newLayer = esriDarkGray;
   else if (value === "openTopoMap") newLayer = openTopoMap;
@@ -1318,8 +2293,8 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   map.options.maxZoom = maxAllowed;
   localStorage.setItem('basemap', value);
   this.style.backgroundColor = "rgba(0,0,0,0.8)";
-  this.style.color = "#FF00FF";
-  setTimeout(() => { this.style.backgroundColor = "rgba(0,0,0,0.8)"; this.style.color = "#FF00FF"; }, 500);
+  this.style.color = "lime";
+  setTimeout(() => { this.style.backgroundColor = "rgba(0,0,0,0.8)"; this.style.color = "lime"; }, 500);
 });
 
 let persistentMACs = [];
@@ -1350,19 +2325,33 @@ if (navigator.geolocation) {
                         .addTo(map)
                         .on('popupopen', function() { updateObserverPopupButtons(); })
                         .on('click', function() { safeSetView(observerMarker.getLatLng(), 18); });
-      safeSetView([lat, lng], 18);
     } else { observerMarker.setLatLng([lat, lng]); }
-    if (followLock.enabled && followLock.type === 'observer') { map.setView([lat, lng], map.getZoom()); }
   }, function(error) { console.error("Error watching location:", error); }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 });
 } else { console.error("Geolocation is not supported by this browser."); }
 
 function zoomToDrone(mac, detection) {
-  if (detection && detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
+  // Only zoom if we have valid, non-zero coordinates
+  if (
+    detection &&
+    detection.drone_lat !== undefined &&
+    detection.drone_long !== undefined &&
+    detection.drone_lat !== 0 &&
+    detection.drone_long !== 0
+  ) {
     safeSetView([detection.drone_lat, detection.drone_long], 18);
   }
 }
 
 function showHistoricalDrone(mac, detection) {
+  // Only map drones with valid, non-zero coordinates
+  if (
+    detection.drone_lat === undefined ||
+    detection.drone_long === undefined ||
+    detection.drone_lat === 0 ||
+    detection.drone_long === 0
+  ) {
+    return;
+  }
   const color = get_color_for_mac(mac);
   if (!droneMarkers[mac]) {
     droneMarkers[mac] = L.marker([detection.drone_lat, detection.drone_long], {
@@ -1381,8 +2370,9 @@ function showHistoricalDrone(mac, detection) {
     const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
     droneCircles[mac] = L.circleMarker([detection.drone_lat, detection.drone_long],
                                        {
+                                         renderer: canvasRenderer,
                                          pane: 'droneCirclePane',
-                                         radius: size * 0.34,
+                                         radius: size * 0.45,
                                          color: color,
                                          fillColor: color,
                                          fillOpacity: 0.7
@@ -1393,7 +2383,10 @@ function showHistoricalDrone(mac, detection) {
   const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
   if (!lastDrone || lastDrone[0] != detection.drone_lat || lastDrone[1] != detection.drone_long) { dronePathCoords[mac].push([detection.drone_lat, detection.drone_long]); }
   if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
-  dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
+  dronePolylines[mac] = L.polyline(dronePathCoords[mac], {
+    renderer: canvasRenderer,
+    color: color
+  }).addTo(map);
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
     if (!pilotMarkers[mac]) {
       pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {
@@ -1412,6 +2405,7 @@ function showHistoricalDrone(mac, detection) {
       const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
       pilotCircles[mac] = L.circleMarker([detection.pilot_lat, detection.pilot_long],
                                           {
+                                            renderer: canvasRenderer,
                                             pane: 'pilotCirclePane',
                                             radius: size * 0.34,
                                             color: color,
@@ -1427,7 +2421,11 @@ function showHistoricalDrone(mac, detection) {
       pilotPathCoords[mac].push([detection.pilot_lat, detection.pilot_long]);
     }
     if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
-    pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], { color: color, dashArray: '5,5' }).addTo(map);
+    pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {
+      renderer: canvasRenderer,
+      color: color,
+      dashArray: '5,5'
+    }).addTo(map);
   }
 }
 
@@ -1450,10 +2448,17 @@ function updateComboList(data) {
   
   persistentMACs.forEach(mac => {
     let detection = data[mac];
-    let isActive = detection && ((currentTime - detection.last_update) <= 60);  // changed from 300 to 60 seconds
+    let isActive = detection && ((currentTime - detection.last_update) <= STALE_THRESHOLD);
     let item = comboListItems[mac];
     if (!item) {
       item = document.createElement("div");
+      // Tooltip for drones without valid GPS
+      const det = data[mac];
+      const hasGps = det && det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0;
+      if (!hasGps) {
+        item.classList.add('no-gps');
+        item.setAttribute('data-tooltip', 'awaiting valid gps coordinates');
+      }
       comboListItems[mac] = item;
       item.className = "drone-item";
       item.addEventListener("dblclick", () => {
@@ -1481,6 +2486,9 @@ function updateComboList(data) {
     const color = get_color_for_mac(mac);
     item.style.borderColor = color;
     item.style.color = color;
+    // Mark items seen in the last 5 second
+    const isRecent = detection && ((currentTime - detection.last_update) <= 5);
+    item.classList.toggle('recent', isRecent);
     if (isActive) {
       if (item.parentNode !== activePlaceholder) { activePlaceholder.appendChild(item); }
     } else {
@@ -1489,9 +2497,27 @@ function updateComboList(data) {
   });
 }
 
+// Only zoom on truly new detections—never on the initial restore
+var initialLoad    = true;
+var seenDrones     = {};
+var seenAliased    = {};
+var previousActive = {};
+// Initialize seenDrones and previousActive from persisted trackedPairs to suppress reload popups
+(function() {
+  const stored = localStorage.getItem("trackedPairs");
+  if (stored) {
+    try {
+      const storedPairs = JSON.parse(stored);
+      for (const mac in storedPairs) {
+        seenDrones[mac] = true;
+        // previousActive[mac] = true;
+      }
+    } catch(e) { console.error("Failed to parse persisted trackedPairs", e); }
+  }
+})();
 async function updateData() {
   try {
-    const response = await fetch('/api/detections');
+    const response = await fetch(window.location.origin + '/api/detections')
     const data = await response.json();
     window.tracked_pairs = data;
     // Persist current detection data to localStorage so that markers & paths remain on reload.
@@ -1500,14 +2526,14 @@ async function updateData() {
     for (const mac in data) { if (!persistentMACs.includes(mac)) { persistentMACs.push(mac); } }
     for (const mac in data) {
       if (historicalDrones[mac]) {
-        if (data[mac].last_update > historicalDrones[mac].lockTime || (currentTime - historicalDrones[mac].lockTime) > 60) {  // changed from 300 to 60
+        if (data[mac].last_update > historicalDrones[mac].lockTime || (currentTime - historicalDrones[mac].lockTime) > STALE_THRESHOLD) {
           delete historicalDrones[mac];
           localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
           if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
         } else { continue; }
       }
       const det = data[mac];
-      if (!det.last_update || (currentTime - det.last_update > 60)) {  // changed from 300 to 60 seconds
+      if (!det.last_update || (currentTime - det.last_update > STALE_THRESHOLD)) {
         if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
         if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
         if (droneCircles[mac]) { map.removeLayer(droneCircles[mac]); delete droneCircles[mac]; }
@@ -1517,15 +2543,35 @@ async function updateData() {
         if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
         delete dronePathCoords[mac];
         delete pilotPathCoords[mac];
+        // Mark as inactive to enable revival popups
+        previousActive[mac] = false;
         continue;
       }
       const droneLat = det.drone_lat, droneLng = det.drone_long;
       const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
       const validDrone = (droneLat !== 0 && droneLng !== 0);
+      // State-change popup logic
+      const alias     = aliases[mac];
+      // New state calculation: consider time-based staleness
+      const activeNow = validDrone && det.last_update && (currentTime - det.last_update <= STALE_THRESHOLD);
+      const wasActive = previousActive[mac] || false;
+      const isNew     = !seenDrones[mac];
+
+      // Only fire popup on transition from inactive to active, after initial load, and within stale threshold
+      if (!initialLoad && det.last_update && (currentTime - det.last_update <= STALE_THRESHOLD) && !wasActive) {
+        showTerminalPopup(det, alias ? false : !seenDrones[mac]);
+        seenDrones[mac] = true;
+      }
+      // Persist for next update
+      previousActive[mac] = activeNow;
+
       const validPilot = (pilotLat !== 0 && pilotLng !== 0);
+      // Allow popups after initial load completes
+      initialLoad = false;
       if (!validDrone && !validPilot) continue;
       const color = get_color_for_mac(mac);
-      if (!firstDetectionZoomed && validDrone) {
+      // First detection zoom block (keep this block only)
+      if (!initialLoad && !firstDetectionZoomed && validDrone) {
         firstDetectionZoomed = true;
         safeSetView([droneLat, droneLng], 18);
       }
@@ -1540,7 +2586,9 @@ async function updateData() {
           })
                                 .bindPopup(generatePopupContent(det, 'drone'))
                                 .addTo(map)
-                                .on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
+                                // Remove automatic zoom on marker click:
+                                //.on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
+                                ;
         }
         if (droneCircles[mac]) { droneCircles[mac].setLatLng([droneLat, droneLng]); }
         else {
@@ -1548,7 +2596,7 @@ async function updateData() {
           const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
           droneCircles[mac] = L.circleMarker([droneLat, droneLng], {
             pane: 'droneCirclePane',
-            radius: size * 0.34,
+            radius: size * 0.45,
             color: color,
             fillColor: color,
             fillOpacity: 0.7
@@ -1559,8 +2607,8 @@ async function updateData() {
         if (!lastDrone || lastDrone[0] != droneLat || lastDrone[1] != droneLng) { dronePathCoords[mac].push([droneLat, droneLng]); }
         if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
         dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color}).addTo(map);
-        if (currentTime - det.last_update <= 15) {
-          const dynamicRadius = getDynamicSize() * 0.34;
+        if (currentTime - det.last_update <= 5) {
+          const dynamicRadius = getDynamicSize() * 0.45;
           const ringWeight = 3 * 0.8;  // 20% thinner
           const ringRadius = dynamicRadius + ringWeight / 2;  // sit just outside the main circle
           if (droneBroadcastRings[mac]) {
@@ -1582,6 +2630,8 @@ async function updateData() {
             delete droneBroadcastRings[mac];
           }
         }
+        // Remove automatic follow-zoom (except for followLock, which is allowed)
+        // (auto-zoom disabled except for followLock)
         if (followLock.enabled && followLock.type === 'drone' && followLock.id === mac) { map.setView([droneLat, droneLng], map.getZoom()); }
       }
       if (validPilot) {
@@ -1595,7 +2645,9 @@ async function updateData() {
           })
                                 .bindPopup(generatePopupContent(det, 'pilot'))
                                 .addTo(map)
-                                .on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
+                                // Remove automatic zoom on marker click:
+                                //.on('click', function(){ map.setView(this.getLatLng(), map.getZoom()); });
+                                ;
         }
         if (pilotCircles[mac]) { pilotCircles[mac].setLatLng([pilotLat, pilotLng]); }
         else {
@@ -1614,11 +2666,37 @@ async function updateData() {
         if (!lastPilot || lastPilot[0] != pilotLat || lastPilot[1] != pilotLng) { pilotPathCoords[mac].push([pilotLat, pilotLng]); }
         if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
         pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'}).addTo(map);
+        // Remove automatic follow-zoom (except for followLock, which is allowed)
+        // (auto-zoom disabled except for followLock)
         if (followLock.enabled && followLock.type === 'pilot' && followLock.id === mac) { map.setView([pilotLat, pilotLng], map.getZoom()); }
       }
+      // At end of loop iteration, remember this state for next time
+      previousActive[mac] = validDrone;
     }
+    initialLoad = false;
     updateComboList(data);
     updateAliases();
+    // Mark that the first restore/update is done
+    initialLoad = false;
+
+    // Handle no-GPS styling and alerts in the inactive list
+    for (const mac in data) {
+      const det = data[mac];
+      const droneElem = comboListItems[mac];
+      if (!droneElem) continue;
+      if (!det.drone_lat || !det.drone_long || det.drone_lat === 0 || det.drone_long === 0) {
+        // Apply no-GPS styling and one-time alert
+        droneElem.classList.add('no-gps');
+        if (!alertedNoGpsDrones.has(det.mac)) {
+          showTerminalPopup(det, true);
+          alertedNoGpsDrones.add(det.mac);
+        }
+      } else {
+        // Remove no-GPS styling and reset alert state
+        droneElem.classList.remove('no-gps');
+        alertedNoGpsDrones.delete(det.mac);
+      }
+    }
   } catch (error) { console.error("Error fetching detection data:", error); }
 }
 
@@ -1646,7 +2724,7 @@ function getDynamicSize() {
 // Updated function: now updates all selected USB port statuses.
 async function updateSerialStatus() {
   try {
-    const response = await fetch('/api/serial_status');
+    const response = await fetch(window.location.origin + '/api/serial_status')
     const data = await response.json();
     const statusDiv = document.getElementById('serialStatus');
     statusDiv.innerHTML = "";
@@ -1687,7 +2765,7 @@ document.getElementById("filterToggle").addEventListener("click", function() {
 
 async function restorePaths() {
   try {
-    const response = await fetch('/api/paths');
+    const response = await fetch(window.location.origin + '/api/paths')
     const data = await response.json();
     for (const mac in data.dronePaths) {
       let isActive = false;
@@ -1745,6 +2823,12 @@ function updateColor(mac, hue) {
     this.style.backgroundColor = 'purple';
     setTimeout(() => { this.style.backgroundColor = '#333'; }, 300);
     window.location.href = '/download/aliases';
+  });
+  document.getElementById('downloadCumulativeCsv').addEventListener('click', function() {
+    window.location = '/download/cumulative_detections.csv';
+  });
+  document.getElementById('downloadCumulativeKml').addEventListener('click', function() {
+    window.location = '/download/cumulative.kml';
   });
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js')
@@ -1805,23 +2889,30 @@ def select_ports_get():
     ports = list(serial.tools.list_ports.comports())
     return render_template_string(PORT_SELECTION_PAGE, ports=ports, logo_ascii=LOGO_ASCII, bottom_ascii=BOTTOM_ASCII)
 
+
 @app.route('/select_ports', methods=['POST'])
 def select_ports_post():
     global SELECTED_PORTS
-    # Get up to 3 ports; if empty string, ignore.
-    port1 = request.form.get('port1')
-    port2 = request.form.get('port2')
-    port3 = request.form.get('port3')
-    if port1:
-        SELECTED_PORTS['port1'] = port1
-    if port2:
-        SELECTED_PORTS['port2'] = port2
-    if port3:
-        SELECTED_PORTS['port3'] = port3
-    # Start threads for each selected port.
-    for key, port in SELECTED_PORTS.items():
-        serial_connected_status[port] = False  # initialize status
+    # Get up to 3 ports; ignore empty values
+    for i in range(1, 4):
+        port = request.form.get(f'port{i}')
+        if port:
+            SELECTED_PORTS[f'port{i}'] = port
+
+    # Start serial-reader threads for selected ports
+    for port in SELECTED_PORTS.values():
+        serial_connected_status[port] = False
         start_serial_thread(port)
+    # Send watchdog reset to each microcontroller over USB
+    with serial_objs_lock:
+        for ser in serial_objs.values():
+            try:
+                ser.write(b'WATCHDOG_RESET\n')
+            except Exception as e:
+                logging.error(f"Failed to send watchdog reset: {e}")
+
+
+    # Redirect to main page
     return redirect(url_for('index'))
 
 
@@ -2070,5 +3161,107 @@ def download_aliases():
     save_aliases()
     return send_file(ALIASES_FILE, as_attachment=True)
 
+
+# --- Cumulative download endpoints ---
+@app.route('/download/cumulative_detections.csv')
+def download_cumulative_csv():
+    return send_file(
+        CUMULATIVE_CSV_FILENAME,
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name='cumulative_detections.csv'
+    )
+
+@app.route('/download/cumulative.kml')
+def download_cumulative_kml():
+    return send_file(
+        CUMULATIVE_KML_FILENAME,
+        mimetype='application/vnd.google-earth.kml+xml',
+        as_attachment=True,
+        download_name='cumulative.kml'
+    )
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
+
+app = Flask(__name__)
+
+# --- FAA Data Cache (simple in-memory for example) ---
+FAA_CACHE = {}  # key: (mac, remote_id) or (mac, ""), value: faa_data dict
+TRACKED_PAIRS = {}  # key: mac, value: dict with at least 'basic_id' and 'faa_data'
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FAA_LOG_FILENAME = os.path.join(BASE_DIR, "faa_log.csv")
+
+# --- FAA Query API Endpoint ---
+@app.route('/api/query_faa', methods=['POST'])
+def api_query_faa():
+    data = request.get_json()
+    mac = data.get("mac")
+    remote_id = data.get("remote_id")
+    if not mac or not remote_id:
+        return jsonify({"status": "error", "message": "Missing mac or remote_id"}), 400
+    # Simulate FAA API query
+    faa_result = {
+        "data": {
+            "items": [
+                {
+                    "makeName": "ExampleMake",
+                    "modelName": "ModelX",
+                    "series": "A1",
+                    "trackingNumber": "123456",
+                    "complianceCategories": "Standard",
+                    "updatedAt": datetime.now().isoformat()
+                }
+            ]
+        }
+    }
+    # Save to cache and tracked_pairs
+    FAA_CACHE[(mac, remote_id)] = faa_result
+    TRACKED_PAIRS[mac] = {"basic_id": remote_id, "faa_data": faa_result}
+    # Log to CSV
+    if FAA_LOG_FILENAME:
+        try:
+            file_exists = os.path.isfile(FAA_LOG_FILENAME)
+            with open(FAA_LOG_FILENAME, "a", newline='') as csvfile:
+                fieldnames = ["timestamp", "mac", "remote_id", "faa_response"]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow({
+                    "timestamp": datetime.now().isoformat(),
+                    "mac": mac,
+                    "remote_id": remote_id,
+                    "faa_response": json.dumps(faa_result)
+                })
+        except Exception as e:
+            print("Error writing to FAA log CSV:", e)
+    return jsonify({"status": "ok", "faa_data": faa_result})
+
+# --- FAA Data GET API Endpoint (by MAC or basic_id) ---
+@app.route('/api/faa/<identifier>', methods=['GET'])
+def api_get_faa(identifier):
+    """
+    Retrieve cached FAA data by MAC address or by basic_id (remote ID).
+    """
+    # Lookup by MAC in tracked_pairs
+    if identifier in TRACKED_PAIRS and 'faa_data' in TRACKED_PAIRS[identifier]:
+        return jsonify({'status': 'ok', 'faa_data': TRACKED_PAIRS[identifier]['faa_data']})
+    # Lookup by basic_id in tracked_pairs
+    for mac, det in TRACKED_PAIRS.items():
+        if det.get('basic_id') == identifier and 'faa_data' in det:
+            return jsonify({'status': 'ok', 'faa_data': det['faa_data']})
+    # FAA_CACHE search by remote_id then by MAC
+    for (c_mac, c_rid), faa_data in FAA_CACHE.items():
+        if c_rid == identifier:
+            return jsonify({'status': 'ok', 'faa_data': faa_data})
+    for (c_mac, c_rid), faa_data in FAA_CACHE.items():
+        if c_mac == identifier:
+            return jsonify({'status': 'ok', 'faa_data': faa_data})
+    return jsonify({'status': 'error', 'message': 'No FAA data found for this identifier'}), 404
+
+
+
+
+    
