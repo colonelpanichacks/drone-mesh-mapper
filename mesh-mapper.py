@@ -2275,7 +2275,7 @@ document.getElementById("layerSelect").addEventListener("change", function() {
   else if (value === "osmHumanitarian") newLayer = osmHumanitarian;
   else if (value === "cartoPositron") newLayer = cartoPositron;
   else if (value === "cartoDarkMatter") newLayer = cartoDarkMatter;
-  else if (value === "esriWorldImagery") nareewLayer = esriWorldImagery;
+  else if (value === "esriWorldImagery") newLayer = esriWorldImagery;
   else if (value === "esriWorldTopo") newLayer = esriWorldTopo;
   else if (value === "esriDarkGray") newLayer = esriDarkGray;
   else if (value === "openTopoMap") newLayer = openTopoMap;
