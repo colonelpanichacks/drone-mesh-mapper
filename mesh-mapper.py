@@ -398,7 +398,8 @@ def update_detection(detection):
         # Cache FAA data even for no-GPS
         if detection.get('basic_id'):
             write_to_faa_cache(mac, detection['basic_id'], detection.get('faa_data', {}))
-        # Update KMLs
+        # Append to cumulative KML for continuity
+        append_to_cumulative_kml(prev, detection)
         generate_kml()
         return
 
@@ -3260,8 +3261,3 @@ def api_get_faa(identifier):
         if c_mac == identifier:
             return jsonify({'status': 'ok', 'faa_data': faa_data})
     return jsonify({'status': 'error', 'message': 'No FAA data found for this identifier'}), 404
-
-
-
-
-    
