@@ -206,7 +206,10 @@ def generate_kml():
                     if len(current_flight) >= 1:
                         # start folder
                         kml_lines.append('<Folder>')
-                        kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac}</name>')
+                        # include start timestamp for this flight
+                        start_dt  = datetime.fromtimestamp(current_flight[0][2])
+                        start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+                        kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
                         # drone path
                         coords = " ".join(f"{x[0]},{x[1]},0" for x in current_flight)
                         kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
@@ -230,7 +233,10 @@ def generate_kml():
         # flush final flight if any
         if current_flight:
             kml_lines.append('<Folder>')
-            kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac}</name>')
+            # include start timestamp for this flight
+            start_dt  = datetime.fromtimestamp(current_flight[0][2])
+            start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+            kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
             coords = " ".join(f"{x[0]},{x[1]},0" for x in current_flight)
             kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
             end_lon, end_lat, end_ts = current_flight[-1]
@@ -311,7 +317,10 @@ def generate_cumulative_kml():
                     if current_flight:
                         # open folder
                         kml_lines.append('<Folder>')
-                        kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac}</name>')
+                        # include start timestamp for this flight
+                        start_dt  = current_flight[0][2]  # already a datetime
+                        start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+                        kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
                         # drone path
                         coords = " ".join(f"{lo},{la},0" for lo, la, _ in current_flight)
                         kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
@@ -337,7 +346,10 @@ def generate_cumulative_kml():
         # flush last flight
         if current_flight:
             kml_lines.append('<Folder>')
-            kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac}</name>')
+            # include start timestamp for this flight
+            start_dt  = current_flight[0][2]  # already a datetime
+            start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+            kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
             coords = " ".join(f"{lo},{la},0" for lo, la, _ in current_flight)
             kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
             end_lo, end_la, end_ts = current_flight[-1]
