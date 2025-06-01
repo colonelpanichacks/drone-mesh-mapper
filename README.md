@@ -163,24 +163,6 @@ python3 mesh-mapper.py --no-auto-start
 
 ## 🎯 **Testing & Validation**
 
-### 🏜️ **Arizona Desert Test Suite**
-
-Comprehensive test simulation with 5 virtual drones flying in Arizona's safe airspace:
-
-```bash
-# Run the test simulation (requires mapper to be running)
-python3 test_arizona_drones.py
-
-# Or use the integrated launcher
-python3 run_test.py
-```
-
-**Test Features:**
-- ✈️ **5 Simulated Drones** with realistic flight patterns (circular, figure-8, grid, sweep, spiral)
-- 🏜️ **Safe Airspace Zones** (Yuma, Phoenix, Tucson, Flagstaff, Lake Havasu)
-- 📊 **Realistic Data** including FAA registration, RSSI variation, altitude changes
-- ⏱️ **5-minute simulation** with 2-second update intervals
-- 📈 **Performance Metrics** and success rate reporting
 
 ---
 
@@ -320,8 +302,8 @@ This project is licensed under the MIT License
 
 ## 🙏 **Acknowledgments**
 
-- **Cemaxacutor** - Original drone detection firmware
-- **Luke Switzer** - Protocol analysis and testing
+- **Cemaxacutor** 
+- **Luke Switzer**
 - **OpenDroneID Community** - Standards and specifications
 
 
