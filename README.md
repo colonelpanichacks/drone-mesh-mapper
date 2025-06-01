@@ -1,4 +1,4 @@
-<div align="center"> # **Drone Remote ID Mapper**
+ # **Drone Remote ID Mapper**
 
 <div align="center">
 
