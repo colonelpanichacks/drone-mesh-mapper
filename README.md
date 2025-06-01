@@ -1,4 +1,4 @@
- # <div align="center"> **Drone Remote ID Mapper** </div>
+# 🚁 **Drone Remote ID Mapper**
 
 <div align="center">
 
@@ -14,6 +14,49 @@
 <img src="eye.png" alt="Drone Detection Eye" style="width:50%; height:25%;">
 
 </div>
+
+---
+
+## 🛠️ **Hardware Options**
+
+### **🎯 Ready-to-Use Solution**
+
+Get professional, pre-built detection hardware designed specifically for this project:
+
+<a href="https://www.tindie.com/stores/colonel_panic/?ref=offsite_badges&utm_source=sellers_colonel_panic&utm_medium=badges&utm_campaign=badge_large">
+    <img src="https://d2ss6ovg47m0r5.cloudfront.net/badges/tindie-larges.png" alt="I sell on Tindie" width="200" height="104">
+</a>
+
+**✅ Professional PCBs**  
+**✅ Complete kits with all components included**  
+**✅ Pre-flashed firmware ready to use**  
+**✅ Technical support and documentation**
+
+**🔋 Completely Standalone Operation**
+- **No Raspberry Pi Required**: Boards operate independently for mesh detection
+- **No Computer Needed**: Self-contained drone detection and mesh communication
+- **Battery Powered**: Portable operation anywhere
+- **Instant Setup**: Just power on and start detecting
+
+**📊 Optional Mapper Integration**
+- **Standalone mesh detection** works great on its own
+- **Add the mapper software** for enhanced visualization and logging
+- **Best of both worlds**: Mesh detection + centralized monitoring
+
+### **🔧 DIY Build Option**
+
+Build your own detection system using readily available components:
+
+**Required Components:**
+- **Xiao ESP32-S3** (dual-core with WiFi + Bluetooth)
+- **Heltec WiFi LoRa 32 V3** (for mesh networking)
+- Basic wiring connections
+
+**Perfect for:**
+- Learning and experimentation
+- Custom modifications
+- Budget-conscious builds
+- Educational projects
 
 ---
 
@@ -163,6 +206,24 @@ python3 mesh-mapper.py --no-auto-start
 
 ## 🎯 **Testing & Validation**
 
+### 🏜️ **Arizona Desert Test Suite**
+
+Comprehensive test simulation with 5 virtual drones flying in Arizona's safe airspace:
+
+```bash
+# Run the test simulation (requires mapper to be running)
+python3 test_arizona_drones.py
+
+# Or use the integrated launcher
+python3 run_test.py
+```
+
+**Test Features:**
+- ✈️ **5 Simulated Drones** with realistic flight patterns (circular, figure-8, grid, sweep, spiral)
+- 🏜️ **Safe Airspace Zones** (Yuma, Phoenix, Tucson, Flagstaff, Lake Havasu)
+- 📊 **Realistic Data** including FAA registration, RSSI variation, altitude changes
+- ⏱️ **5-minute simulation** with 2-second update intervals
+- 📈 **Performance Metrics** and success rate reporting
 
 ---
 
@@ -245,10 +306,10 @@ Real-time events pushed to connected clients:
 ```
 ESP32 Pin | Mesh Radio Pin
 ----------|---------------
-TX1 (5) D4  | RX 19
-RX1 (6) D5  | TX  20
-3.3V        | VCC
-GND         | GND
+TX1 (17)  | RX
+RX1 (16)  | TX  
+3.3V      | VCC
+GND       | GND
 ```
 
 ---
@@ -302,8 +363,8 @@ This project is licensed under the MIT License
 
 ## 🙏 **Acknowledgments**
 
-- **Cemaxacutor** 
-- **Luke Switzer**
+- **Cemaxacutor** - Original drone detection firmware
+- **Luke Switzer** - Protocol analysis and testing
 - **OpenDroneID Community** - Standards and specifications
 
 
