@@ -20,14 +20,12 @@
 ## 🛠️ **Hardware Options**
 
 ### **🎯 Ready-to-Use Solution**
-
-Get professional, pre-built detection hardware designed specifically for this project:
+Pre-built detection hardware designed specifically for this project:
 
 <a href="https://www.tindie.com/stores/colonel_panic/?ref=offsite_badges&utm_source=sellers_colonel_panic&utm_medium=badges&utm_campaign=badge_large">
     <img src="https://d2ss6ovg47m0r5.cloudfront.net/badges/tindie-larges.png" alt="I sell on Tindie" width="200" height="104">
 </a>
 
-**✅ Professional PCBs**  
 **✅ Complete kits with all components included**  
 **✅ Pre-flashed firmware ready to use**  
 
