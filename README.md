@@ -360,8 +360,8 @@ This project is licensed under the MIT License
 
 ## 🙏 **Acknowledgments**
 
-- **Cemaxacutor** - Original drone detection firmware
-- **Luke Switzer** - Protocol analysis and testing
+- **Cemaxacutor** 
+- **Luke Switzer** 
 - **OpenDroneID Community** - Standards and specifications
 
 
