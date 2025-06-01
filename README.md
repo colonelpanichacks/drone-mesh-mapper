@@ -11,6 +11,8 @@
 
 [🚀 Quick Start](#-quick-start) • [📋 Features](#-features) • [🛠️ API Reference](#-api-reference) • [🔧 Hardware](#-hardware-setup)
 
+<img src="eye.png" alt="Drone Detection Eye" style="width:50%; height:25%;">
+
 </div>
 
 ---
@@ -25,36 +27,53 @@ Advanced drone detection system that captures and maps Remote ID broadcasts from
 
 ### 🔧 **Automated Setup** (Recommended)
 
-Download and install everything automatically:
+Download and install everything automatically using the official RPI setup scripts:
 
 ```bash
-# Download the setup script
-wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/setup_mesh_mapper.py
+# Download the RPI setup script
+wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/RPI/install_rpi.py
 
 # Install from main branch (stable)
-python3 setup_mesh_mapper.py --branch main
+python3 install_rpi.py --branch main
 
-# Or install from Dev branch (latest features)
-python3 setup_mesh_mapper.py --branch Dev
+# Or install from Dev branch (latest features)  
+python3 install_rpi.py --branch Dev
 ```
 
 **Advanced Setup Options:**
 ```bash
 # Custom installation directory
-python3 setup_mesh_mapper.py --branch main --install-dir /opt/drone-mapper
-
-# Skip dependency installation
-python3 setup_mesh_mapper.py --branch Dev --no-deps
+python3 install_rpi.py --branch main --install-dir /opt/mesh-mapper
 
 # Skip auto-start cron job
-python3 setup_mesh_mapper.py --branch main --no-cron
+python3 install_rpi.py --branch main --no-cron
+
+# Force overwrite existing installation
+python3 install_rpi.py --branch Dev --force
 ```
+
+### 📦 **Dependency Installation**
+
+Install all required dependencies automatically:
+
+```bash
+# Download and run the universal dependency installer
+wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/RPI/rpi_dependancies.py
+python3 rpi_dependancies.py
+```
+
+This installer handles:
+- ✅ **System Detection**: Automatically detects Linux, macOS, Windows
+- ✅ **Package Manager Support**: apt, yum, dnf, pacman, brew, pkg
+- ✅ **Python & pip**: Ensures compatible Python 3.7+ and pip installation
+- ✅ **Core Dependencies**: Flask, Flask-SocketIO, pyserial, requests, urllib3
+- ✅ **Optional Packages**: Performance and development tools
 
 ### 📖 **Manual Setup**
 
 1. **Download mapper**
    ```bash
-   wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/mapper.py
+   wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/mesh-mapper.py
    ```
 
 2. **Install dependencies**
@@ -69,7 +88,7 @@ python3 setup_mesh_mapper.py --branch main --no-cron
 
 4. **Run Mapper**
    ```bash
-   python3 mapper.py
+   python3 mesh-mapper.py
    ```
 
 ---
@@ -113,7 +132,7 @@ python3 setup_mesh_mapper.py --branch main --no-cron
 ### **Command Line Options**
 
 ```bash
-python3 mapper.py [OPTIONS]
+python3 mesh-mapper.py [OPTIONS]
 ```
 
 | Option | Description | Default |
@@ -128,20 +147,42 @@ python3 mapper.py [OPTIONS]
 
 ```bash
 # Standard operation with web interface
-python3 mapper.py
+python3 mesh-mapper.py
 
 # Headless operation for dedicated server
-python3 mapper.py --headless --debug
+python3 mesh-mapper.py --headless --debug
 
 # Custom web port with verbose logging
-python3 mapper.py --web-port 8080 --debug
+python3 mesh-mapper.py --web-port 8080 --debug
 
 # Disable auto-connection to saved ports
-python3 mapper.py --no-auto-start
+python3 mesh-mapper.py --no-auto-start
 ```
 
 ---
 
+## 🎯 **Testing & Validation**
+
+### 🏜️ **Arizona Desert Test Suite**
+
+Comprehensive test simulation with 5 virtual drones flying in Arizona's safe airspace:
+
+```bash
+# Run the test simulation (requires mapper to be running)
+python3 test_arizona_drones.py
+
+# Or use the integrated launcher
+python3 run_test.py
+```
+
+**Test Features:**
+- ✈️ **5 Simulated Drones** with realistic flight patterns (circular, figure-8, grid, sweep, spiral)
+- 🏜️ **Safe Airspace Zones** (Yuma, Phoenix, Tucson, Flagstaff, Lake Havasu)
+- 📊 **Realistic Data** including FAA registration, RSSI variation, altitude changes
+- ⏱️ **5-minute simulation** with 2-second update intervals
+- 📈 **Performance Metrics** and success rate reporting
+
+---
 
 ## 🛠️ **API Reference**
 
@@ -261,7 +302,7 @@ dmesg | grep tty
 netstat -tlnp | grep :5000
 
 # Review logs
-tail -f mapper.log
+tail -f mesh-mapper.log
 ```
 
 **No Drone Detections**
@@ -282,7 +323,7 @@ This project is licensed under the MIT License
 - **Cemaxacutor** - Original drone detection firmware
 - **Luke Switzer** - Protocol analysis and testing
 - **OpenDroneID Community** - Standards and specifications
-- **ESP32 Community** - Hardware support and optimization
+
 
 ---
 
