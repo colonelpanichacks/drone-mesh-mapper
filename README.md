@@ -303,8 +303,8 @@ Real-time events pushed to connected clients:
 ```
 ESP32 Pin | Mesh Radio Pin
 ----------|---------------
-TX1 (17)  | RX
-RX1 (16)  | TX  
+TX1 (d4)  | RX 19
+RX1 (d5)  | TX 20
 3.3V      | VCC
 GND       | GND
 ```
