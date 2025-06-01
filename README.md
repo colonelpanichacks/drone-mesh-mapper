@@ -30,12 +30,11 @@ Get professional, pre-built detection hardware designed specifically for this pr
 **✅ Professional PCBs**  
 **✅ Complete kits with all components included**  
 **✅ Pre-flashed firmware ready to use**  
-**✅ Technical support and documentation**
+
 
 **🔋 Completely Standalone Operation**
 - **No Raspberry Pi Required**: Boards operate independently for mesh detection
 - **No Computer Needed**: Self-contained drone detection and mesh communication
-- **Battery Powered**: Portable operation anywhere
 - **Instant Setup**: Just power on and start detecting
 
 **📊 Optional Mapper Integration**
