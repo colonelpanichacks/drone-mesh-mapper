@@ -1,139 +1,144 @@
-# 🚁 Advanced Drone Remote ID Mapper with Real-Time Analytics
+# 🚁 **Drone Remote ID Mapper**
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Flask](https://img.shields.io/badge/Flask-2.0+-green.svg)](https://flask.palletsprojects.com/)
+<div align="center">
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub stars](https://img.shields.io/github/stars/colonelpanichacks/drone-mesh-mapper.svg)](https://github.com/colonelpanichacks/drone-mesh-mapper/stargazers)
+[![Python](https://img.shields.io/badge/Python-3.7+-blue.svg)](https://www.python.org/)
+[![ESP32](https://img.shields.io/badge/ESP32-Compatible-green.svg)](https://www.espressif.com/)
+[![Flask](https://img.shields.io/badge/Flask-2.0+-red.svg)](https://flask.palletsprojects.com/)
 
-## 📡 About
+**Real-time drone detection, mapping, and Remote ID compliance monitoring**
 
-**Advanced WiFi & Bluetooth 4/5 Drone Remote ID Scanner with Enhanced Real-Time Mapping**
+[🚀 Quick Start](#-quick-start) • [📋 Features](#-features) • [🛠️ API Reference](#-api-reference) • [🔧 Hardware](#-hardware-setup)
 
-This project provides a comprehensive drone detection and mapping solution that captures WiFi and Bluetooth-based Drone Remote ID transmissions, processes them through an advanced web-based mapping interface, and integrates with mesh networks for distributed monitoring. Built on Cemaxacuter's [drone detection firmware](https://github.com/alphafox02/T-Halow) and enhanced with professional-grade mapping capabilities.
-
-<img src="eye.png" alt="Drone Detection Eye" style="width:50%; height:25%;">
-
----
-
-## 🌟 Key Features
-
-### 🔍 **Advanced Detection Capabilities**
-- **Multi-Protocol Support**: WiFi management frames + Bluetooth 4/5 advertisements
-- **Real-Time Processing**: Sub-second detection and processing pipeline
-- **OpenDroneID Compliance**: Full support for OpenDroneID message formats
-- **ESP32 Optimization**: Optimized for Xiao ESP32-C3/S3 variants with dual-core support
-
-### 🗺️ **Professional Mapping Interface**
-- **Real-Time Visualization**: Live drone and pilot position tracking with Leaflet/OpenStreetMap
-- **Persistent Session Management**: Drones remain visible across sessions (active/inactive states)
-- **Dynamic Path Tracking**: Automatic flight path generation with unique color coding per device
-- **Advanced Controls**: Device locking, alias management, color customization, and zoom controls
-- **Multi-Format Export**: CSV, KML, and GeoJSON export capabilities
-
-### 🔗 **Mesh Network Integration**
-- **UART Mesh Messaging**: Compact message format for Meshtastic networks
-- **Distributed Detection**: Multi-node coordination and data sharing
-- **Real-Time Synchronization**: WebSocket-based live updates across all connected clients
-
-### 📊 **Enterprise-Grade Analytics**
-- **FAA Database Integration**: Automatic registration lookup and caching
-- **Comprehensive Logging**: Session-based CSV logging with timestamps
-- **Webhook Support**: Backend integration for alerts and notifications
-- **Performance Monitoring**: System diagnostics and connection status tracking
-
-### 🛡️ **Reliability & Safety**
-- **Smart Cleanup**: Memory-efficient stale data management
-- **Error Recovery**: Automatic reconnection and fault tolerance
-- **Cross-Platform**: Linux, macOS, Windows compatibility
-- **Auto-Start Support**: Systemd/cron integration for unattended operation
+</div>
 
 ---
 
-## 🏗️ System Architecture
+## 🎯 **Overview**
 
-```mermaid
-graph TD
-    A[ESP32 Scanner] -->|USB Serial| B[Python Mapper]
-    A -->|UART| C[Mesh Network]
-    B --> D[Web Interface]
-    B --> E[SQLite/CSV Storage]
-    B --> F[FAA API]
-    D --> G[Real-Time Map]
-    D --> H[WebSocket Updates]
-    C --> I[Distributed Nodes]
-```
-
-### 🔧 **Core Components**
-
-1. **ESP32 Firmware** (`remoteid-mesh/` directory)
-   - Promiscuous WiFi monitoring on configurable channels
-   - Bluetooth LE advertisement scanning (S3 dual-core only)
-   - JSON serialization with heartbeat monitoring
-   - Dual output: USB Serial + UART mesh messaging
-
-2. **Enhanced Mapper API** (`mapper.py`)
-   - Flask-based REST API with WebSocket support
-   - Advanced session persistence and drone state management
-   - Real-time data processing with configurable thresholds
-   - FAA database integration and caching system
-
-3. **Professional Web Interface**
-   - Responsive design with mobile support
-   - Real-time markers with smooth animations
-   - Advanced filtering and search capabilities
-   - Export tools and data visualization
+Advanced drone detection system that captures and maps Remote ID broadcasts from drones using ESP32 hardware. Features real-time web interface, persistent tracking across sessions, and comprehensive data export capabilities.
 
 ---
 
-## 🚀 Quick Start Installation
+## ⚡ **Quick Start**
 
-### 📥 **Automated Setup (Recommended)**
+### 🔧 **Automated Setup** (Recommended)
 
-We provide an automated setup script that downloads and configures everything:
+Download and install everything automatically:
 
 ```bash
 # Download the setup script
-curl -O https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/setup_mesh_mapper.py
+wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/setup_mesh_mapper.py
 
-# Install latest stable version
+# Install from main branch (stable)
 python3 setup_mesh_mapper.py --branch main
 
-# Or install development version
+# Or install from Dev branch (latest features)
 python3 setup_mesh_mapper.py --branch Dev
-
-# Custom installation directory
-python3 setup_mesh_mapper.py --branch main --install-dir /opt/drone-mapper
 ```
 
-The setup script automatically:
-- ✅ Downloads the latest mesh-mapper.py from GitHub
-- ✅ Creates installation directory and sets permissions
-- ✅ Installs auto-start cron job for system boot
-- ✅ Verifies installation integrity
-- ✅ Provides next steps and usage instructions
+**Advanced Setup Options:**
+```bash
+# Custom installation directory
+python3 setup_mesh_mapper.py --branch main --install-dir /opt/drone-mapper
 
-### 🔧 **Manual Installation**
+# Skip dependency installation
+python3 setup_mesh_mapper.py --branch Dev --no-deps
 
-1. **Clone Repository**
+# Skip auto-start cron job
+python3 setup_mesh_mapper.py --branch main --no-cron
+```
+
+### 📖 **Manual Setup**
+
+1. **Download mapper**
    ```bash
-   git clone https://github.com/colonelpanichacks/drone-mesh-mapper.git
-   cd drone-mesh-mapper
+   wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/mapper.py
    ```
 
-2. **Install Dependencies**
+2. **Install dependencies**
    ```bash
-   pip3 install -r requirements.txt
+   pip3 install Flask Flask-SocketIO pyserial requests urllib3 python-socketio eventlet
    ```
 
-3. **Flash ESP32 Firmware**
+3. **Flash ESP32 firmware**
    - Choose appropriate firmware from `firmware/` directory
    - Use Arduino IDE, PlatformIO, or esptool.py
    - Configure WiFi channel and mesh settings
 
 4. **Run Mapper**
    ```bash
-   python3 mesh-mapper.py
+   python3 mapper.py
    ```
+
+---
+
+## 📋 **Core Features**
+
+### 🗺️ **Real-time Mapping**
+- **Live Detection Display**: Interactive map showing drone positions as they're detected
+- **Flight Path Tracking**: Visual trails showing drone and pilot movement over time
+- **Persistent Sessions**: Drones remain visible across application restarts
+- **Multi-device Support**: Handle multiple ESP32 receivers simultaneously
+
+### 📊 **Data Management**
+- **Detection History**: Complete log of all drone encounters with timestamps
+- **Device Aliases**: Assign friendly names to frequently seen drones
+- **Export Formats**: Download data as CSV, KML (Google Earth), or GeoJSON
+- **Cumulative Logging**: Long-term historical data storage
+
+### 🔧 **ESP32 Integration**
+- **Auto-detection**: Automatically finds and connects to ESP32 devices
+- **Port Management**: Save and restore USB port configurations
+- **Status Monitoring**: Real-time connection health and data flow indicators
+- **Command Interface**: Send diagnostic commands to connected hardware
+
+### 🌐 **Web Interface**
+- **Real-time Updates**: WebSocket-powered live data streaming
+- **Mobile Responsive**: Works on desktop, tablet, and mobile devices
+- **Multiple Views**: Map, detection list, and device status panels
+- **Data Export**: Download detections directly from web interface
+
+### ⚙️ **Configuration & Monitoring**
+- **Headless Operation**: Run without web interface for dedicated deployments
+- **Debug Logging**: Detailed logging for troubleshooting and development
+- **FAA Integration**: Automatic Remote ID registration lookups
+- **Webhook Support**: External system integration via HTTP callbacks
+
+---
+
+## 🚀 **Usage**
+
+### **Command Line Options**
+
+```bash
+python3 mapper.py [OPTIONS]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--headless` | Run without web interface | false |
+| `--debug` | Enable debug logging | false |
+| `--web-port PORT` | Web interface port | 5000 |
+| `--port-interval SECONDS` | Port monitoring interval | 10 |
+| `--no-auto-start` | Disable automatic port connection | false |
+
+### **Examples**
+
+```bash
+# Standard operation with web interface
+python3 mapper.py
+
+# Headless operation for dedicated server
+python3 mapper.py --headless --debug
+
+# Custom web port with verbose logging
+python3 mapper.py --web-port 8080 --debug
+
+# Disable auto-connection to saved ports
+python3 mapper.py --no-auto-start
+```
 
 ---
 
@@ -141,7 +146,7 @@ The setup script automatically:
 
 ### 🏜️ **Arizona Desert Test Suite**
 
-We include a comprehensive test simulation that demonstrates the system with 5 virtual drones flying in Arizona's safe airspace:
+Comprehensive test simulation with 5 virtual drones flying in Arizona's safe airspace:
 
 ```bash
 # Run the test simulation (requires mapper to be running)
@@ -160,76 +165,70 @@ python3 run_test.py
 
 ---
 
-## 🔌 **API Reference**
+## 🛠️ **API Reference**
 
 ### **Core Endpoints**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| `GET` | `/` | Main web interface |
 | `GET` | `/api/detections` | Current active drone detections |
 | `POST` | `/api/detections` | Submit new detection data |
 | `GET` | `/api/detections_history` | Historical detection data (GeoJSON) |
 | `GET` | `/api/paths` | Flight path data for visualization |
+| `POST` | `/api/reactivate/<mac>` | Reactivate inactive drone detection |
+
+### **Device Management**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/aliases` | Get device aliases |
 | `POST` | `/api/set_alias` | Set friendly name for device |
+| `POST` | `/api/clear_alias/<mac>` | Remove device alias |
+| `GET` | `/api/ports` | Available serial ports |
+| `GET` | `/api/serial_status` | ESP32 connection status |
+| `GET` | `/api/selected_ports` | Currently configured ports |
+
+### **FAA & External Integration**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | `GET` | `/api/faa/<identifier>` | FAA registration lookup |
+| `POST` | `/api/query_faa` | Manual FAA query |
+| `POST` | `/api/set_webhook_url` | Configure webhook endpoint |
+| `GET` | `/api/get_webhook_url` | Get current webhook URL |
+| `POST` | `/api/webhook_popup` | Webhook notification handler |
+
+### **Data Export**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/download/csv` | Download current detections (CSV) |
+| `GET` | `/download/kml` | Download current detections (KML) |
+| `GET` | `/download/aliases` | Download device aliases |
+| `GET` | `/download/cumulative_detections.csv` | Download full history (CSV) |
+| `GET` | `/download/cumulative.kml` | Download full history (KML) |
+
+### **System Management**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | `GET` | `/api/diagnostics` | System health and performance |
+| `POST` | `/api/debug_mode` | Toggle debug logging |
+| `POST` | `/api/send_command` | Send command to ESP32 devices |
+| `GET` | `/select_ports` | Port selection interface |
+| `POST` | `/select_ports` | Update port configuration |
 
 ### **WebSocket Events**
 
-- `detection` - New drone detection received
-- `paths` - Updated flight path data
-- `serial_status` - ESP32 connection status
+Real-time events pushed to connected clients:
+
+- `detections` - Updated drone detection data
+- `paths` - Updated flight path data  
+- `serial_status` - ESP32 connection status changes
 - `aliases` - Device alias updates
-
----
-
-## 🛠️ **Advanced Configuration**
-
-### **Environment Variables**
-```bash
-export DRONE_MAPPER_PORT=5000          # Web interface port
-export DRONE_MAPPER_DEBUG=true         # Enable debug logging
-export DRONE_MAPPER_STALE_TIMEOUT=60   # Stale detection threshold (seconds)
-export DRONE_MAPPER_MAX_HISTORY=1000   # Maximum detection history
-```
-
-### **Webhook Integration**
-```python
-# Example webhook payload
-{
-    "timestamp": "2024-12-31T12:00:00Z",
-    "drone": {
-        "mac": "AA:BB:CC:DD:EE:FF",
-        "basic_id": "DRONE123",
-        "lat": 32.8,
-        "lon": -114.3,
-        "altitude": 150
-    },
-    "pilot": {
-        "lat": 32.801,
-        "lon": -114.299
-    },
-    "faa_data": {...}
-}
-```
-
----
-
-## 📱 **Web Interface Guide**
-
-### **Dashboard Features**
-- 🗺️ **Interactive Map**: Real-time drone positions with flight paths
-- 📊 **Detection Statistics**: Live counters and performance metrics
-- 🏷️ **Device Management**: Alias assignment and device information
-- 📥 **Export Tools**: Download CSV, KML, or GeoJSON data
-- ⚙️ **System Status**: Serial connections and health monitoring
-
-### **Keyboard Shortcuts**
-- `Space` - Center map on newest detection
-- `L` - Lock/unlock marker following
-- `A` - Toggle aliases display
-- `P` - Toggle path visibility
-- `F` - Toggle fullscreen mode
+- `cumulative_log` - Historical data updates
+- `faa_cache` - FAA lookup results
 
 ---
 
@@ -237,7 +236,7 @@ export DRONE_MAPPER_MAX_HISTORY=1000   # Maximum detection history
 
 ### **Supported ESP32 Boards**
 - ✅ **Xiao ESP32-C3** (Single core, WiFi only)
-- ✅ **Xiao ESP32-S3** (Dual core, WiFi + Bluetooth)
+- ✅ **Xiao ESP32-S3** (Dual core, WiFi + Bluetooth)  
 - ✅ **ESP32-DevKit** (Development and testing)
 - ✅ **Custom PCBs** (See Tindie store link below)
 
@@ -246,14 +245,14 @@ export DRONE_MAPPER_MAX_HISTORY=1000   # Maximum detection history
 ESP32 Pin | Mesh Radio Pin
 ----------|---------------
 TX1 (17)  | RX
-RX1 (16)  | TX
+RX1 (16)  | TX  
 3.3V      | VCC
 GND       | GND
 ```
 
 ---
 
-## 📊 **Performance Benchmarks**
+## 📊 **Performance**
 
 | Metric | Performance |
 |--------|-------------|
@@ -274,7 +273,7 @@ GND       | GND
 # Check USB connection
 ls -la /dev/tty* | grep USB
 
-# Verify driver installation
+# Verify driver installation  
 dmesg | grep tty
 ```
 
@@ -291,19 +290,6 @@ tail -f mapper.log
 - Verify ESP32 firmware is properly flashed
 - Check WiFi channel configuration (default: channel 6)
 - Ensure drones are transmitting Remote ID (required in many jurisdictions)
-
-
-
-### **Development Setup**
-```bash
-git clone https://github.com/colonelpanichacks/drone-mesh-mapper.git
-cd drone-mesh-mapper
-pip3 install -r requirements-dev.txt
-python3 -m pytest tests/
-```
-
-### **Feature Requests**
-Please open an issue with the `enhancement` label to suggest new features.
 
 ---
 
@@ -329,10 +315,6 @@ Get professional PCBs and complete kits:
 <a href="https://www.tindie.com/stores/colonel_panic/?ref=offsite_badges&utm_source=sellers_colonel_panic&utm_medium=badges&utm_campaign=badge_large">
     <img src="https://d2ss6ovg47m0r5.cloudfront.net/badges/tindie-larges.png" alt="I sell on Tindie" width="200" height="104">
 </a>
-
----
-
-
 
 ---
 
