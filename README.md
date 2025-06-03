@@ -363,6 +363,7 @@ This project is licensed under the MIT License
 - **Cemaxacutor** 
 - **Luke Switzer** 
 - **OpenDroneID Community** - Standards and specifications
+- Thank you PCBway for the awesome boards! The combination of their top tier quality, competitive pricing, fast turnaround times, and stellar customer service makes PCBWay the go-to choice for professional PCB fabrication, whether you're prototyping innovative mesh detection systems or scaling up for full production runs.
 
 
 ---
