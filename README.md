@@ -166,7 +166,7 @@ The cronstall script will:
 
 ### **Data Management**
 - **Detection History**: Complete log of all drone encounters with timestamps
-- **Device Aliases**: Assign friendly names to frequently seen drones
+- **Device Aliases**: Assign friendly names to frequently seen drones (up to 200 aliases per ESP32-S3 device)
 - **Alias Upload to ESP32**: Upload aliases directly to ESP32-S3 devices for persistent storage
 - **Alias File Upload**: Upload aliases from JSON files (replaces all existing aliases)
 - **Export Formats**: Download data as GeoJSON
@@ -176,7 +176,7 @@ The cronstall script will:
 - **Port Management**: Save and restore USB port configurations
 - **Status Monitoring**: Real-time connection health and data flow indicators
 - **Command Interface**: Send diagnostic commands to connected hardware
-- **Alias Storage**: ESP32-S3 devices store aliases in NVS (Non-Volatile Storage) for persistence
+- **Alias Storage**: ESP32-S3 devices store up to 200 aliases in NVS (Non-Volatile Storage) for persistence
 - **Alias-First Output**: Serial output includes alias first, then MAC address when available
 
 ### **Web Interface**
@@ -352,6 +352,7 @@ drone-mesh-mapper/
 
 ### **ESP32-S3 Alias Support**
 - Aliases can now be uploaded directly to ESP32-S3 devices
+- Supports up to 200 aliases per device
 - Aliases are stored in NVS (Non-Volatile Storage) and persist across reboots
 - Serial output includes alias first, then MAC address when available
 - Upload aliases via web interface with optional JSON file upload (replaces all existing aliases)

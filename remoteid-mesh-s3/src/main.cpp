@@ -49,7 +49,7 @@ void process_serial_commands();
 
 #define MAX_UAVS 8
 #define MAX_ALIAS_LEN 64
-#define MAX_ALIASES 50
+#define MAX_ALIASES 200
 id_data uavs[MAX_UAVS] = {0};
 BLEScan* pBLEScan = nullptr;
 ODID_UAS_Data UAS_data;
@@ -211,7 +211,7 @@ void load_aliases_from_nvs() {
   }
   
   // Parse JSON and populate aliases array
-  StaticJsonDocument<4096> doc;
+  StaticJsonDocument<24576> doc;  // 24KB buffer for up to 200 aliases
   DeserializationError error = deserializeJson(doc, aliases_json);
   if (error) {
     free(aliases_json);
@@ -251,7 +251,7 @@ void process_serial_commands() {
       String aliases_json = line.substring(15);  // Skip "UPLOAD_ALIASES:"
       
       // Parse and store aliases
-      StaticJsonDocument<4096> doc;
+      StaticJsonDocument<24576> doc;  // 24KB buffer for up to 200 aliases
       DeserializationError error = deserializeJson(doc, aliases_json);
       if (error) {
         Serial.println("{\"error\":\"Failed to parse aliases JSON\"}");
@@ -515,7 +515,7 @@ void setup() {
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(printerTask, "PrinterTask", 10000, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(serialCommandTask, "SerialCommandTask", 4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(serialCommandTask, "SerialCommandTask", 32768, NULL, 1, NULL, 0);  // 32KB stack for large JSON parsing
   
   memset(uavs, 0, sizeof(uavs));
 }
