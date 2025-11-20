@@ -65,51 +65,7 @@ Advanced drone detection system that captures and maps Remote ID broadcasts from
 
 ## **Quick Start**
 
-### **Automated Setup** (Recommended)
-
-Download and install everything automatically using the official RPI setup scripts:
-
-```bash
-# Download the RPI setup script
-wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/RPI/install_rpi.py
-
-# Install from main branch (stable)
-python3 install_rpi.py --branch main
-
-# Or install from Dev branch (latest features)  
-python3 install_rpi.py --branch Dev
-```
-
-**Advanced Setup Options:**
-```bash
-# Custom installation directory
-python3 install_rpi.py --branch main --install-dir /opt/mesh-mapper
-
-# Skip auto-start cron job
-python3 install_rpi.py --branch main --no-cron
-
-# Force overwrite existing installation
-python3 install_rpi.py --branch Dev --force
-```
-
-### **Dependency Installation**
-
-Install all required dependencies automatically:
-
-```bash
-# Download and run the universal dependency installer
-wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/RPI/rpi_dependancies.py
-python3 rpi_dependancies.py
-```
-
-This installer handles:
-- **System Detection**: Automatically detects Linux, macOS, Windows
-- **Package Manager Support**: apt, yum, dnf, pacman, brew, pkg
-- **Python & pip**: Ensures compatible Python 3.7+ and pip installation
-- **Core Dependencies**: Flask, Flask-SocketIO, pyserial, requests, urllib3
-- **Optional Packages**: Performance and development tools
-
-### **Manual Setup**
+### **Installation**
 
 1. **Clone repository**
    ```bash
@@ -121,11 +77,18 @@ This installer handles:
    ```bash
    cd drone-mapper
    pip3 install -r requirements.txt
+   
+   # Or use the dependency installer script
+   python3 install_requiremants.py
    ```
 
 3. **Flash ESP32 firmware**
    - Navigate to `remoteid-mesh-s3/` or `remoteid-node-mode-s3/` directory
-   - Use PlatformIO or Arduino IDE to flash firmware
+   - Use PlatformIO to flash firmware:
+     ```bash
+     cd remoteid-mesh-s3
+     pio run -e seeed_xiao_esp32s3 -t upload
+     ```
    - Configure WiFi channel and mesh settings
 
 4. **Run Mapper**
@@ -133,10 +96,12 @@ This installer handles:
    cd drone-mapper
    python3 mesh-mapper.py
    ```
+   
+   The web interface will be available at `http://localhost:5000`
 
 ### **Auto-Start Setup (Linux)**
 
-Use the cronstall script to set up automatic startup on system reboot:
+Use the cronstall script to automatically start the mapper on system reboot:
 
 ```bash
 # Navigate to cronstall folder
@@ -150,9 +115,9 @@ python3 cron.py --path /opt/mesh-mapper/drone-mapper/mesh-mapper.py
 ```
 
 The cronstall script will:
-- Find mesh-mapper.py (defaults to parent directory)
-- Set up a cron job to auto-start on system reboot
-- Configure proper paths and permissions
+- Automatically locate `mesh-mapper.py` in the parent directory
+- Set up a cron job to start the mapper on every system reboot
+- Configure proper paths and working directory
 
 ---
 
@@ -165,11 +130,11 @@ The cronstall script will:
 - **Multi-device Support**: Handle multiple ESP32 receivers simultaneously
 
 ### **Data Management**
-- **Detection History**: Complete log of all drone encounters with timestamps
+- **Detection History**: Complete log of all drone encounters with timestamps (GeoJSON format)
 - **Device Aliases**: Assign friendly names to frequently seen drones (up to 200 aliases per ESP32-S3 device)
 - **Alias Upload to ESP32**: Upload aliases directly to ESP32-S3 devices for persistent storage
 - **Alias File Upload**: Upload aliases from JSON files (replaces all existing aliases)
-- **Export Formats**: Download data as GeoJSON
+- **Data Export**: Download aliases as JSON, detection history as GeoJSON
 
 ### **ESP32 Integration**
 - **Auto-detection**: Automatically finds and connects to ESP32 devices
@@ -265,13 +230,18 @@ python3 mesh-mapper.py --no-auto-start
 | `POST` | `/api/query_faa` | Manual FAA query |
 | `POST` | `/api/set_webhook_url` | Configure webhook endpoint |
 | `GET` | `/api/get_webhook_url` | Get current webhook URL |
+| `GET` | `/api/webhook_url` | Get current webhook URL (alternative endpoint) |
 | `POST` | `/api/webhook_popup` | Webhook notification handler |
 
 ### **Data Export**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/download/aliases` | Download device aliases |
+| `GET` | `/download/aliases` | Download device aliases as JSON |
+| `GET` | `/download/csv` | Download current session detections as CSV |
+| `GET` | `/download/kml` | Download current session detections as KML |
+| `GET` | `/download/cumulative_detections.csv` | Download cumulative detections as CSV |
+| `GET` | `/download/cumulative.kml` | Download cumulative detections as KML |
 
 ### **System Management**
 
@@ -282,16 +252,19 @@ python3 mesh-mapper.py --no-auto-start
 | `POST` | `/api/send_command` | Send command to ESP32 devices |
 | `GET` | `/select_ports` | Port selection interface |
 | `POST` | `/select_ports` | Update port configuration |
+| `GET` | `/sw.js` | Service worker for PWA support |
 
 ### **WebSocket Events**
 
 Real-time events pushed to connected clients:
 
 - `detections` - Updated drone detection data
+- `detection` - Single drone detection update
 - `paths` - Updated flight path data  
 - `serial_status` - ESP32 connection status changes
 - `aliases` - Device alias updates
 - `faa_cache` - FAA lookup results
+- `cumulative_log` - Cumulative detection log updates
 
 ---
 
@@ -405,7 +378,8 @@ This project is licensed under the MIT License
 - **Cemaxacutor** 
 - **Luke Switzer** 
 - **OpenDroneID Community** - Standards and specifications
-
+- Thank you PCBway for the awesome boards! The combination of their top tier quality, competitive pricing, fast turnaround times, and stellar customer service makes PCBWay the go-to choice for professional PCB fabrication, whether you're prototyping innovative mesh detection systems or scaling up for full production runs.
+https://www.pcbway.com/
   <div align="center"> <img src="boards.png" alt="boards" style="width:50%; height:25%;">
 
 
