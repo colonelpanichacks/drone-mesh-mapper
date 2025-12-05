@@ -1972,13 +1972,57 @@ HTML_PAGE = '''
     #filterBox::-webkit-scrollbar { width: 4px; }
     #filterBox::-webkit-scrollbar-track { background: transparent; }
     #filterBox::-webkit-scrollbar-thumb { background: var(--border-secondary); border-radius: 2px; }
-        @media (max-width: 600px) {
-          #filterBox {
-        width: 44vw;
-            max-width: 90vw;
+    
+    /* Mobile responsive styles */
+    @media (max-width: 768px) {
+      #filterBox {
+        width: 85vw;
+        max-width: 320px;
+        right: 5px;
+        top: 60px;
         font-size: 0.7rem;
-          }
-        }
+        max-height: 70vh;
+      }
+      .leaflet-popup {
+        max-width: 280px !important;
+      }
+      .leaflet-popup-content-wrapper {
+        max-width: 260px !important;
+        padding: 6px !important;
+      }
+      .leaflet-popup-content {
+        margin: 4px !important;
+        font-size: 0.65rem !important;
+      }
+      #replayControlBar {
+        width: 95vw !important;
+        max-width: 360px !important;
+        padding: 8px 12px !important;
+        gap: 8px !important;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      .placeholder {
+        max-height: 120px;
+      }
+    }
+    @media (max-width: 480px) {
+      #filterBox {
+        width: 92vw;
+        max-width: 280px;
+        right: 4px;
+        top: 50px;
+        font-size: 0.65rem;
+      }
+      .drone-item {
+        font-size: 0.6rem;
+        padding: 3px 5px;
+      }
+      button {
+        font-size: 0.6rem !important;
+        padding: 4px 6px !important;
+      }
+    }
         #filterBox input[type="text"],
         #filterBox input[type="password"],
         #filterBox input[type="range"],
@@ -3590,12 +3634,16 @@ function updateComboList(data) {
       item.classList.remove('no-gps');
     }
     
-    // Mark items seen in the last 5 seconds
-    const isRecent = detection && ((currentTime - detection.last_update) <= 5);
+    // Mark ACTIVE items seen in the last 5 seconds - never flash inactive drones
+    const isRecent = isActive && detection && ((currentTime - detection.last_update) <= 5);
     item.classList.toggle('recent', isRecent);
+    
+    // Move to appropriate container
     if (isActive) {
       if (item.parentNode !== activePlaceholder) { activePlaceholder.appendChild(item); }
     } else {
+      // Ensure inactive drones never have the recent class
+      item.classList.remove('recent');
       if (item.parentNode !== inactivePlaceholder) { inactivePlaceholder.appendChild(item); }
     }
   });
@@ -4390,17 +4438,22 @@ function updateColor(mac, hue) {
       content += `<br><span style="color:#6b7280;font-size:0.6em;">${droneData.timestamp}</span>`;
     }
     
-    // RemoteID
+    // RemoteID and FAA Query
     const liveDetection = window.tracked_pairs && window.tracked_pairs[mac];
-    if (liveDetection && liveDetection.basic_id) {
+    const basicId = (liveDetection && liveDetection.basic_id) || droneData.basic_id || '';
+    
+    if (basicId) {
       content += `<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.65em;word-break:break-all;">
-        <span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">${liveDetection.basic_id}</span>
+        <span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">${basicId}</span>
       </div>`;
+      // FAA Query button
+      content += `<button onclick="event.stopPropagation();queryFaaAPI('${mac}','${basicId}')" style="width:100%;font-size:0.55em;padding:3px;margin-bottom:4px;">Query FAA</button>`;
     }
     
-    // FAA data
-    if (liveDetection && liveDetection.faa_data && liveDetection.faa_data.data && liveDetection.faa_data.data.items && liveDetection.faa_data.data.items.length > 0) {
-      const item = liveDetection.faa_data.data.items[0];
+    // FAA data - show if cached
+    const faaData = (liveDetection && liveDetection.faa_data) || droneData.faa_data;
+    if (faaData && faaData.data && faaData.data.items && faaData.data.items.length > 0) {
+      const item = faaData.data.items[0];
       content += `<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.6em;">`;
       if (item.makeName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
       if (item.modelName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
@@ -4497,17 +4550,23 @@ function updateColor(mac, hue) {
       </div>
     </div>`;
     
-    // Check for RemoteID from live detection data
+    // Check for RemoteID from live detection data or droneData
     const liveDetection = window.tracked_pairs && window.tracked_pairs[mac];
-    if (liveDetection && liveDetection.basic_id) {
+    const basicId = (liveDetection && liveDetection.basic_id) || droneData.basic_id || '';
+    
+    if (basicId) {
       content += `<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.7em;word-break:break-all;">
-        <span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">${liveDetection.basic_id}</span>
+        <span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">${basicId}</span>
       </div>`;
+      // FAA Query button
+      content += `<button onclick="event.stopPropagation();queryFaaAPI('${mac}','${basicId}')" id="histQueryFaaBtn_${mac}" style="width:100%;font-size:0.6em;padding:4px;margin-bottom:4px;">Query FAA</button>`;
+      content += `<div id="histFaaResult_${mac}"></div>`;
     }
     
-    // FAA Data section
-    if (liveDetection && liveDetection.faa_data && liveDetection.faa_data.data && liveDetection.faa_data.data.items && liveDetection.faa_data.data.items.length > 0) {
-      const item = liveDetection.faa_data.data.items[0];
+    // FAA Data section - show if already cached
+    const faaData = (liveDetection && liveDetection.faa_data) || droneData.faa_data;
+    if (faaData && faaData.data && faaData.data.items && faaData.data.items.length > 0) {
+      const item = faaData.data.items[0];
       content += `<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.65em;">`;
       if (item.makeName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
       if (item.modelName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
@@ -4923,7 +4982,7 @@ function updateColor(mac, hue) {
     showReplayControls();
     
     // Start animation - both markers move together through their respective paths
-    const baseInterval = 100; // ms per point at 1x speed
+    const baseInterval = 500; // ms per point at 1x speed (500ms = half second per point)
     replayState.intervalId = setInterval(() => {
       if (replayState.paused) return;
       
@@ -5110,7 +5169,7 @@ function updateColor(mac, hue) {
     // Restart interval with new speed if playing
     if (replayState.active && replayState.intervalId) {
       clearInterval(replayState.intervalId);
-      const baseInterval = 100;
+      const baseInterval = 500;
       replayState.intervalId = setInterval(() => {
         if (replayState.paused) return;
         
