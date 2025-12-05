@@ -692,11 +692,20 @@ def generate_cumulative_kml():
         '<name>Cumulative Detections</name>'
     ]
 
+    # Build basic_id lookup per MAC (use the most recent non-empty basic_id)
+    mac_basic_ids = {}
+    for det in history:
+        mac = det.get('mac')
+        basic_id = det.get('basic_id', '')
+        if mac and basic_id:
+            mac_basic_ids[mac] = basic_id
+    
     # For each MAC, group history into flights with staleThreshold
     for mac in macs:
         alias = ALIASES.get(mac, "")
         aliasStr = f"{alias} " if alias else ""
         color = mac_colors[mac]
+        basic_id = mac_basic_ids.get(mac, "")
 
         flight_idx = 1
         last_ts = None
@@ -712,12 +721,14 @@ def generate_cumulative_kml():
                 if last_ts and (ts - last_ts).total_seconds() > staleThreshold:
                     # flush flight
                     if current_flight:
-                        # open folder
+                        # open folder with basic_id in description
                         kml_lines.append('<Folder>')
                         # include start timestamp for this flight
                         start_dt  = current_flight[0][2]  # already a datetime
                         start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
                         kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
+                        if basic_id:
+                            kml_lines.append(f'<description>RemoteID:{basic_id}</description>')
                         # drone path
                         coords = " ".join(f"{lo},{la},0" for lo, la, _ in current_flight)
                         kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
@@ -750,6 +761,8 @@ def generate_cumulative_kml():
             start_dt  = current_flight[0][2]  # already a datetime
             start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
             kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
+            if basic_id:
+                kml_lines.append(f'<description>RemoteID:{basic_id}</description>')
             coords = " ".join(f"{lo},{la},0" for lo, la, _ in current_flight)
             kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
             # drone start icon
@@ -1538,6 +1551,84 @@ PORT_SELECTION_PAGE = '''
     form {
       display: contents;
     }
+    /* Mobile styles */
+    @media (max-width: 520px) {
+      body {
+        padding: 12px;
+      }
+      .container {
+        max-width: 100%;
+        gap: 12px;
+      }
+      .card {
+        padding: 12px;
+      }
+      .card-header {
+        font-size: 0.7rem;
+      margin-bottom: 10px;
+    }
+      h1 {
+        font-size: 0.95rem;
+      }
+      .port-item {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 4px;
+      }
+      .port-item label {
+        font-size: 0.75rem;
+        min-width: auto;
+      }
+      select {
+        width: 100%;
+        font-size: 16px; /* Prevents iOS zoom */
+        padding: 12px 10px;
+      }
+      input[type="text"] {
+        font-size: 16px; /* Prevents iOS zoom */
+        padding: 12px;
+      }
+      input[type="file"] {
+        font-size: 0.65rem;
+        padding: 8px;
+      }
+      .btn {
+        font-size: 0.7rem;
+        padding: 12px 14px;
+        min-height: 44px;
+      }
+      .button-row {
+        flex-direction: column;
+        gap: 8px;
+      }
+      .button-row .btn {
+        width: 100%;
+      }
+    pre.ascii-art {
+        font-size: clamp(5px, 1.5vw, 8px);
+        padding: 4px;
+      }
+      .input-group label {
+        font-size: 0.7rem;
+      }
+      .status-text {
+        font-size: 0.7rem;
+      }
+    }
+    @media (max-width: 380px) {
+      body {
+        padding: 8px;
+      }
+      .card {
+        padding: 10px;
+      }
+      pre.ascii-art {
+        font-size: clamp(4px, 1.2vw, 6px);
+      }
+      h1 {
+        font-size: 0.85rem;
+      }
+    }
   </style>
 </head>
 <body>
@@ -1950,10 +2041,10 @@ HTML_PAGE = '''
     #map { height: 100vh; }
     
     /* Control Panel */
-    #filterBox {
-      position: absolute;
-      top: 10px;
-      right: 10px;
+        #filterBox {
+          position: absolute;
+          top: 10px;
+          right: 10px;
       background: var(--bg-panel);
       backdrop-filter: blur(12px);
       padding: 12px;
@@ -1965,17 +2056,17 @@ HTML_PAGE = '''
       font-family: 'JetBrains Mono', monospace;
       font-size: 0.75rem;
       max-height: 90vh;
-      overflow-y: auto;
-      overflow-x: hidden;
-      z-index: 1000;
-    }
+          overflow-y: auto;
+          overflow-x: hidden;
+          z-index: 1000;
+        }
     #filterBox::-webkit-scrollbar { width: 4px; }
     #filterBox::-webkit-scrollbar-track { background: transparent; }
     #filterBox::-webkit-scrollbar-thumb { background: var(--border-secondary); border-radius: 2px; }
     
     /* Mobile responsive styles */
     @media (max-width: 768px) {
-      #filterBox {
+          #filterBox {
         width: 85vw;
         max-width: 320px;
         right: 8px;
@@ -2242,7 +2333,7 @@ HTML_PAGE = '''
     
     /* Leaflet Popup Styling - Clean, no scroll, mobile friendly */
     .leaflet-popup {
-      max-width: 290px !important;
+      max-width: 340px !important;
     }
     .leaflet-popup > .leaflet-popup-content-wrapper { 
       background: var(--bg-panel);
@@ -2251,17 +2342,17 @@ HTML_PAGE = '''
       font-family: 'JetBrains Mono', monospace; 
       border: 1px solid rgba(0, 255, 136, 0.4); 
       border-radius: 8px;
-      padding: 8px;
-      max-width: 280px;
+      padding: 10px;
+      max-width: 330px;
       overflow: visible !important;
       box-sizing: border-box;
     }
     .leaflet-popup-content {
-      font-size: 0.75rem;
-      line-height: 1.35;
+      font-size: 0.8rem;
+      line-height: 1.4;
       white-space: normal;
-      margin: 6px !important;
-      width: auto !important;
+      margin: 8px !important;
+      width: 300px !important;
       max-width: 100% !important;
       overflow: visible !important;
       box-sizing: border-box;
@@ -2654,16 +2745,15 @@ HTML_PAGE = '''
       </div>
       
       <!-- Date/Time Filter -->
-      <div style="margin-bottom:10px; padding:8px; background:rgba(0,0,0,0.2); border-radius:4px;">
+      <div style="margin-bottom:10px; padding:8px; background:rgba(0,0,0,0.2); border-radius:4px; overflow:hidden;">
         <label style="color:var(--text-muted); font-size:0.6rem; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:6px;">Date/Time Filter</label>
-        <div style="display:flex; gap:4px; margin-bottom:6px;">
-          <input type="datetime-local" id="histDateFrom" style="flex:1; padding:4px; font-size:0.65rem; background:var(--bg-input); border:1px solid rgba(99,102,241,0.3); border-radius:3px; color:var(--text-cyan);">
-          <span style="color:var(--text-muted); font-size:0.7rem; align-self:center;">to</span>
-          <input type="datetime-local" id="histDateTo" style="flex:1; padding:4px; font-size:0.65rem; background:var(--bg-input); border:1px solid rgba(99,102,241,0.3); border-radius:3px; color:var(--text-cyan);">
+        <div style="display:flex; flex-direction:column; gap:4px; margin-bottom:6px;">
+          <input type="datetime-local" id="histDateFrom" style="width:100%; box-sizing:border-box; padding:6px; font-size:0.7rem; background:var(--bg-input); border:1px solid rgba(99,102,241,0.3); border-radius:3px; color:var(--text-cyan);">
+          <input type="datetime-local" id="histDateTo" style="width:100%; box-sizing:border-box; padding:6px; font-size:0.7rem; background:var(--bg-input); border:1px solid rgba(99,102,241,0.3); border-radius:3px; color:var(--text-cyan);">
         </div>
         <div style="display:flex; gap:4px;">
-          <button id="applyDateFilterBtn" style="flex:1; padding:4px; font-size:0.65rem;">Apply Filter</button>
-          <button id="clearDateFilterBtn" style="flex:1; padding:4px; font-size:0.65rem; background:transparent; border-color:rgba(240,171,252,0.4); color:var(--text-pink);">Clear</button>
+          <button id="applyDateFilterBtn" style="flex:1; padding:6px; font-size:0.65rem;">Apply</button>
+          <button id="clearDateFilterBtn" style="flex:1; padding:6px; font-size:0.65rem; background:transparent; border-color:rgba(240,171,252,0.4); color:var(--text-pink);">Clear</button>
         </div>
       </div>
       
@@ -3184,7 +3274,7 @@ function generatePopupContent(detection, markerType) {
   content += '<span style="color:#00ffd5;font-size:0.7em;">' + (isPilot ? 'Pilot Location' : 'Drone Location') + '</span>';
   
   // RemoteID section
-  if (detection.basic_id) {
+    if (detection.basic_id) {
     content += '<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.75em;word-break:break-all;"><span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">' + detection.basic_id + '</span></div>';
     content += '<button onclick="event.stopPropagation();queryFaaAPI(\\'' + mac + '\\', \\'' + detection.basic_id + '\\')" id="queryFaaButton_' + mac + '" class="popup-btn">Query FAA</button>';
   } else {
@@ -3200,7 +3290,7 @@ function generatePopupContent(detection, markerType) {
     if (item.modelName) content += '<div><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">' + item.modelName + '</span></div>';
     if (item.series) content += '<div><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">' + item.series + '</span></div>';
     if (item.trackingNumber) content += '<div><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">' + item.trackingNumber + '</span></div>';
-    content += '</div>';
+        content += '</div>';
   }
   content += '</div>';
   
@@ -3294,20 +3384,20 @@ async function queryFaaAPI(mac, remote_id) {
             }
             
             // Build FAA result HTML
-            let faaData = result.faa_data;
-            let item = null;
-            if (faaData.data && faaData.data.items && faaData.data.items.length > 0) {
-              item = faaData.data.items[0];
-            }
+                let faaData = result.faa_data;
+                let item = null;
+                if (faaData.data && faaData.data.items && faaData.data.items.length > 0) {
+                  item = faaData.data.items[0];
+                }
             let html = '';
-            if (item) {
+                if (item) {
               html = '<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.7em;">';
               if (item.makeName) html += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">' + item.makeName + '</span></div>';
               if (item.modelName) html += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">' + item.modelName + '</span></div>';
               if (item.series) html += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">' + item.series + '</span></div>';
               if (item.trackingNumber) html += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">' + item.trackingNumber + '</span></div>';
-              html += '</div>';
-            } else {
+                  html += '</div>';
+                } else {
               html = '<div style="border:1px solid rgba(99,102,241,0.3);padding:4px;margin:4px 0;border-radius:4px;color:#6b7280;font-size:0.65em;">No FAA data available</div>';
             }
             
@@ -4592,29 +4682,37 @@ function updateColor(mac, hue) {
       content += `<br><span style="color:#6b7280;font-size:0.6em;">${droneData.timestamp}</span>`;
     }
     
-    // RemoteID and FAA Query
+    // RemoteID and FAA Query - ALWAYS show this section
     const liveDetection = window.tracked_pairs && window.tracked_pairs[mac];
-    const basicId = (liveDetection && liveDetection.basic_id) || droneData.basic_id || '';
+    const basicId = droneData.basic_id || (liveDetection && liveDetection.basic_id) || '';
+    console.log('Replay popup for', mac, '- basicId:', basicId);
+    
+    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(240,171,252,0.3);">`;
     
     if (basicId) {
-      content += `<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.65em;word-break:break-all;">
+      content += `<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:6px;margin-bottom:6px;border-radius:4px;font-size:0.7em;word-break:break-all;">
         <span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">${basicId}</span>
       </div>`;
-      // FAA Query button
-      content += `<button onclick="event.stopPropagation();queryFaaAPI('${mac}','${basicId}')" style="width:100%;font-size:0.55em;padding:3px;margin-bottom:4px;">Query FAA</button>`;
+      content += `<button onclick="event.stopPropagation();queryFaaAPI('${mac}','${basicId}')" style="width:100%;font-size:0.7em;padding:8px;margin-bottom:6px;">Query FAA Registry</button>`;
+    } else {
+      content += `<div style="color:#6b7280;font-size:0.65em;margin-bottom:6px;">No RemoteID - FAA lookup unavailable</div>`;
     }
     
-    // FAA data - show if cached
+    // FAA data container (always present)
+    content += `<div id="replayFaaResult_${mac}">`;
     const faaData = (liveDetection && liveDetection.faa_data) || droneData.faa_data;
     if (faaData && faaData.data && faaData.data.items && faaData.data.items.length > 0) {
       const item = faaData.data.items[0];
-      content += `<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.6em;">`;
-      if (item.makeName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
-      if (item.modelName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
-      if (item.series) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">${item.series}</span></div>`;
-      if (item.trackingNumber) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">${item.trackingNumber}</span></div>`;
+      content += `<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:6px;border-radius:4px;font-size:0.7em;">`;
+      content += `<div style="color:#f0abfc;font-weight:bold;margin-bottom:4px;">FAA Registration</div>`;
+      if (item.makeName) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
+      if (item.modelName) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
+      if (item.series) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">${item.series}</span></div>`;
+      if (item.trackingNumber) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">${item.trackingNumber}</span></div>`;
       content += `</div>`;
     }
+    content += `</div>`; // close replayFaaResult
+    content += `</div>`; // close FAA section
     
     // Coordinates
     if (droneData.droneCoords && droneData.droneCoords.length > 0) {
@@ -4704,30 +4802,40 @@ function updateColor(mac, hue) {
       </div>
     </div>`;
     
-    // Check for RemoteID from live detection data or droneData
+    // Check for RemoteID from droneData (from KML) OR live detection data
     const liveDetection = window.tracked_pairs && window.tracked_pairs[mac];
-    const basicId = (liveDetection && liveDetection.basic_id) || droneData.basic_id || '';
+    const basicId = droneData.basic_id || (liveDetection && liveDetection.basic_id) || '';
+    console.log('Historical popup for', mac, '- basicId:', basicId, 'droneCoords:', droneData.droneCoords ? droneData.droneCoords.length : 0);
+    
+    // ALWAYS show RemoteID/FAA section
+    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(240,171,252,0.3);">`;
     
     if (basicId) {
-      content += `<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.7em;word-break:break-all;">
+      content += `<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:6px;margin-bottom:6px;border-radius:4px;font-size:0.7em;word-break:break-all;">
         <span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">${basicId}</span>
       </div>`;
-      // FAA Query button
-      content += `<button onclick="event.stopPropagation();queryFaaAPI('${mac}','${basicId}')" id="histQueryFaaBtn_${mac}" style="width:100%;font-size:0.6em;padding:4px;margin-bottom:4px;">Query FAA</button>`;
-      content += `<div id="histFaaResult_${mac}"></div>`;
+      content += `<button onclick="event.stopPropagation();queryFaaAPI('${mac}','${basicId}')" id="histQueryFaaBtn_${mac}" style="width:100%;font-size:0.7em;padding:8px;margin-bottom:6px;">Query FAA Registry</button>`;
+    } else {
+      content += `<div style="color:#6b7280;font-size:0.65em;margin-bottom:6px;">No RemoteID - FAA lookup unavailable</div>`;
     }
+    
+    // FAA Results container (always present)
+    content += `<div id="histFaaResult_${mac}">`;
     
     // FAA Data section - show if already cached
     const faaData = (liveDetection && liveDetection.faa_data) || droneData.faa_data;
     if (faaData && faaData.data && faaData.data.items && faaData.data.items.length > 0) {
       const item = faaData.data.items[0];
-      content += `<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.65em;">`;
-      if (item.makeName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
-      if (item.modelName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
-      if (item.series) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">${item.series}</span></div>`;
-      if (item.trackingNumber) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">${item.trackingNumber}</span></div>`;
+      content += `<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:6px;border-radius:4px;font-size:0.7em;">`;
+      content += `<div style="color:#f0abfc;font-weight:bold;margin-bottom:4px;">FAA Registration</div>`;
+      if (item.makeName) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
+      if (item.modelName) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
+      if (item.series) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">${item.series}</span></div>`;
+      if (item.trackingNumber) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">${item.trackingNumber}</span></div>`;
       content += `</div>`;
     }
+    content += `</div>`; // close histFaaResult
+    content += `</div>`; // close FAA section
     
     // Coordinates info
     if (droneData.droneCoords && droneData.droneCoords.length > 0) {
@@ -5504,13 +5612,21 @@ function updateColor(mac, hue) {
       const timeMatch = folderName.match(/\((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)/);
       const timestamp = timeMatch ? timeMatch[1] : null;
       
+      // Extract RemoteID from folder description
+      const descMatch = folderContent.match(/<description>RemoteID:([^<]+)<\/description>/);
+      const basicId = descMatch ? descMatch[1].trim() : '';
+      
       // Initialize drone entry
       if (!droneFlightsRaw[id]) {
         droneFlightsRaw[id] = {
           mac: mac,
           color: color,
+          basic_id: basicId,
           flights: []
         };
+      } else if (basicId && !droneFlightsRaw[id].basic_id) {
+        // Update basic_id if we found one and didn't have one yet
+        droneFlightsRaw[id].basic_id = basicId;
       }
       
       // Create flight entry
@@ -5630,6 +5746,18 @@ function updateColor(mac, hue) {
         }
       });
       
+      // Aggregate all coordinates across all flights for the popup
+      let allDroneCoords = [];
+      let allPilotCoords = [];
+      droneRaw.flights.forEach(f => {
+        if (f.dronePath && f.dronePath.length > 0) {
+          allDroneCoords = allDroneCoords.concat(f.dronePath);
+        }
+        if (f.pilotPath && f.pilotPath.length > 0) {
+          allPilotCoords = allPilotCoords.concat(f.pilotPath);
+        }
+      });
+      
       // Create historicalDroneData entry
       if (!historicalDroneData[id]) {
         historicalDroneData[id] = {
@@ -5637,9 +5765,12 @@ function updateColor(mac, hue) {
           mac: mac,
           alias: aliases[mac] || null,
           color: droneRaw.color,
+          basic_id: droneRaw.basic_id || '',
           visible: true,
           timestamp: droneRaw.flights.length > 0 ? droneRaw.flights[droneRaw.flights.length - 1].timestamp : null,
           flights: [],
+          droneCoords: allDroneCoords,
+          pilotCoords: allPilotCoords,
           droneStartMarker: null,
           droneEndMarker: null,
           pilotStartMarker: null,
@@ -5648,6 +5779,11 @@ function updateColor(mac, hue) {
       }
       
       const droneData = historicalDroneData[id];
+      
+      // Update coords in case they were added
+      if (allDroneCoords.length > 0) droneData.droneCoords = allDroneCoords;
+      if (allPilotCoords.length > 0) droneData.pilotCoords = allPilotCoords;
+      if (droneRaw.basic_id) droneData.basic_id = droneRaw.basic_id;
       
       // Store start/end positions for circles
       droneData.startPos = firstDroneStart;
