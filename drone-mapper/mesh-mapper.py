@@ -2063,17 +2063,20 @@ HTML_PAGE = '''
         padding: 3px 5px;
       }
       .leaflet-popup {
-        max-width: 240px !important;
+        max-width: 260px !important;
       }
       .leaflet-popup-content-wrapper {
-        max-width: 230px !important;
+        max-width: 250px !important;
         padding: 6px !important;
+        max-height: 70vh !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch !important;
       }
       .leaflet-popup-content {
-        font-size: 0.65rem !important;
+        font-size: 0.7rem !important;
         width: auto !important;
         max-width: 100% !important;
-        margin: 3px !important;
+        margin: 4px !important;
         overflow: visible !important;
       }
       .popup-inner {
@@ -2088,38 +2091,41 @@ HTML_PAGE = '''
         box-sizing: border-box !important;
       }
       .leaflet-popup-content button {
-        min-height: 36px !important;
-        font-size: 0.65rem !important;
-        padding: 8px 6px !important;
+        min-height: 38px !important;
+        font-size: 0.7rem !important;
+        padding: 10px 8px !important;
         touch-action: manipulation;
       }
       .leaflet-popup-content input[type="range"] {
         width: 100% !important;
-        height: 28px !important;
-        margin: 6px 0 !important;
+        height: 32px !important;
+        margin: 8px 0 !important;
       }
       .leaflet-popup-content input[type="range"]::-webkit-slider-thumb {
-        height: 22px !important;
-        width: 22px !important;
+        height: 26px !important;
+        width: 26px !important;
       }
       .leaflet-popup-content input[type="range"]::-moz-range-thumb {
-        height: 22px !important;
-        width: 22px !important;
+        height: 26px !important;
+        width: 26px !important;
       }
       .leaflet-popup-content input[type="text"] {
-        min-height: 36px !important;
+        min-height: 40px !important;
         font-size: 16px !important; /* Prevents iOS zoom */
         width: 100% !important;
+        padding: 8px !important;
       }
       .leaflet-popup-content select {
-        min-height: 36px !important;
+        min-height: 40px !important;
         font-size: 16px !important; /* Prevents iOS zoom */
         width: 100% !important;
+        padding: 8px !important;
       }
       .leaflet-popup-content a {
         display: inline-block;
-        padding: 6px 0;
-        font-size: 0.7rem;
+        padding: 8px 4px;
+        font-size: 0.75rem;
+        color: #00ffd5 !important;
       }
     }
         #filterBox input[type="text"],
@@ -4783,16 +4789,77 @@ function updateColor(mac, hue) {
     return content;
   }
   
-  // Filter to show only specific flight paths (markers stay visible)
+  // Filter to show only specific flight paths and update circles to match
   window.filterFlight = function(id, flightVal) {
     const drone = historicalDroneData[id];
     if (!drone || !drone.flights) return;
     
+    // Determine which flight(s) to show and calculate start/end positions
+    let startPos = null;
+    let endPos = null;
+    let pilotStartPos = null;
+    let pilotEndPos = null;
+    
+    if (flightVal === 'all') {
+      // Show all flights - use overall start/end
+      startPos = drone.startPos;
+      endPos = drone.endPos;
+      pilotStartPos = drone.pilotStartPos;
+      pilotEndPos = drone.pilotEndPos;
+    } else {
+      // Show specific flight
+      const flightIdx = parseInt(flightVal);
+      const flight = drone.flights[flightIdx];
+      if (flight) {
+        // Get start/end from the specific flight's path
+        if (flight.droneCoords && flight.droneCoords.length > 0) {
+          startPos = { lat: flight.droneCoords[0][0], lng: flight.droneCoords[0][1] };
+          endPos = { lat: flight.droneCoords[flight.droneCoords.length - 1][0], lng: flight.droneCoords[flight.droneCoords.length - 1][1] };
+        }
+        if (flight.pilotCoords && flight.pilotCoords.length > 0) {
+          pilotStartPos = { lat: flight.pilotCoords[0][0], lng: flight.pilotCoords[0][1] };
+          pilotEndPos = { lat: flight.pilotCoords[flight.pilotCoords.length - 1][0], lng: flight.pilotCoords[flight.pilotCoords.length - 1][1] };
+        }
+      }
+    }
+    
+    // Update drone circles position
+    if (drone.startCircle && startPos) {
+      drone.startCircle.setLatLng([startPos.lat, startPos.lng]);
+    }
+    if (drone.endCircle && endPos) {
+      drone.endCircle.setLatLng([endPos.lat, endPos.lng]);
+    }
+    
+    // Update pilot circles position
+    if (drone.pilotStartCircle && pilotStartPos) {
+      drone.pilotStartCircle.setLatLng([pilotStartPos.lat, pilotStartPos.lng]);
+    }
+    if (drone.pilotEndCircle && pilotEndPos) {
+      drone.pilotEndCircle.setLatLng([pilotEndPos.lat, pilotEndPos.lng]);
+    }
+    
+    // Update drone markers position
+    if (drone.droneStartMarker && startPos) {
+      drone.droneStartMarker.setLatLng([startPos.lat, startPos.lng]);
+    }
+    if (drone.droneEndMarker && endPos) {
+      drone.droneEndMarker.setLatLng([endPos.lat, endPos.lng]);
+    }
+    
+    // Update pilot markers position
+    if (drone.pilotStartMarker && pilotStartPos) {
+      drone.pilotStartMarker.setLatLng([pilotStartPos.lat, pilotStartPos.lng]);
+    }
+    if (drone.pilotEndMarker && pilotEndPos) {
+      drone.pilotEndMarker.setLatLng([pilotEndPos.lat, pilotEndPos.lng]);
+    }
+    
+    // Toggle path visibility
     drone.flights.forEach((flight, idx) => {
       const show = (flightVal === 'all' || parseInt(flightVal) === idx);
       flight.visible = show;
       
-      // Only toggle paths - markers are always visible if drone is visible
       if (show && drone.visible) {
         if (flight.dronePath) flight.dronePath.addTo(map);
         if (flight.pilotPath) flight.pilotPath.addTo(map);
@@ -4801,6 +4868,8 @@ function updateColor(mac, hue) {
         if (flight.pilotPath) map.removeLayer(flight.pilotPath);
       }
     });
+    
+    console.log('Filtered to flight:', flightVal, '- circles at start:', startPos, 'end:', endPos);
   };
   
   // Save alias from historical popup
@@ -5540,10 +5609,25 @@ function updateColor(mac, hue) {
       let lastPilotEnd = null;
       
       droneRaw.flights.forEach(f => {
+        // Use explicit start/end placemarks if available
         if (f.droneStart && !firstDroneStart) firstDroneStart = f.droneStart;
         if (f.droneEnd) lastDroneEnd = f.droneEnd;
         if (f.pilotStart && !firstPilotStart) firstPilotStart = f.pilotStart;
         if (f.pilotEnd) lastPilotEnd = f.pilotEnd;
+        
+        // FALLBACK: Use first/last path coordinates if no explicit start/end
+        if (!firstDroneStart && f.dronePath && f.dronePath.length > 0) {
+          firstDroneStart = { lat: f.dronePath[0][0], lng: f.dronePath[0][1] };
+        }
+        if (f.dronePath && f.dronePath.length > 0) {
+          lastDroneEnd = { lat: f.dronePath[f.dronePath.length - 1][0], lng: f.dronePath[f.dronePath.length - 1][1] };
+        }
+        if (!firstPilotStart && f.pilotPath && f.pilotPath.length > 0) {
+          firstPilotStart = { lat: f.pilotPath[0][0], lng: f.pilotPath[0][1] };
+        }
+        if (f.pilotPath && f.pilotPath.length > 0) {
+          lastPilotEnd = { lat: f.pilotPath[f.pilotPath.length - 1][0], lng: f.pilotPath[f.pilotPath.length - 1][1] };
+        }
       });
       
       // Create historicalDroneData entry
@@ -5637,47 +5721,53 @@ function updateColor(mac, hue) {
       }
       
       // Create START circle (green) and END circle (red) for visual identification
+      console.log('Creating circles for', mac, 'start:', firstDroneStart, 'end:', lastDroneEnd);
       if (firstDroneStart) {
         droneData.startCircle = L.circle([firstDroneStart.lat, firstDroneStart.lng], {
-          radius: 15,
+          radius: 20,
           color: '#00ff88',
           fillColor: '#00ff88',
-          fillOpacity: 0.3,
-          weight: 2
+          fillOpacity: 0.4,
+          weight: 3
         }).addTo(map);
+        console.log('Added START circle at', firstDroneStart.lat, firstDroneStart.lng);
       }
       
       if (lastDroneEnd) {
         droneData.endCircle = L.circle([lastDroneEnd.lat, lastDroneEnd.lng], {
-          radius: 15,
+          radius: 20,
           color: '#ff4444',
           fillColor: '#ff4444',
-          fillOpacity: 0.3,
-          weight: 2
+          fillOpacity: 0.4,
+          weight: 3
         }).addTo(map);
+        console.log('Added END circle at', lastDroneEnd.lat, lastDroneEnd.lng);
       }
       
       // Pilot start/end circles (smaller, dashed)
+      console.log('Creating pilot circles for', mac, 'start:', firstPilotStart, 'end:', lastPilotEnd);
       if (firstPilotStart) {
         droneData.pilotStartCircle = L.circle([firstPilotStart.lat, firstPilotStart.lng], {
-          radius: 12,
+          radius: 15,
           color: '#00ff88',
           fillColor: '#00ff88',
-          fillOpacity: 0.2,
-          weight: 1,
+          fillOpacity: 0.3,
+          weight: 2,
           dashArray: '4,4'
         }).addTo(map);
+        console.log('Added PILOT START circle at', firstPilotStart.lat, firstPilotStart.lng);
       }
       
       if (lastPilotEnd) {
         droneData.pilotEndCircle = L.circle([lastPilotEnd.lat, lastPilotEnd.lng], {
-          radius: 12,
+          radius: 15,
           color: '#ff4444',
           fillColor: '#ff4444',
-          fillOpacity: 0.2,
-          weight: 1,
+          fillOpacity: 0.3,
+          weight: 2,
           dashArray: '4,4'
         }).addTo(map);
+        console.log('Added PILOT END circle at', lastPilotEnd.lat, lastPilotEnd.lng);
       }
     });
     
