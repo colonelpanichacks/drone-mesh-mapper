@@ -1554,21 +1554,28 @@ PORT_SELECTION_PAGE = '''
     /* Mobile styles */
     @media (max-width: 520px) {
       body {
-        padding: 12px;
+        padding: 10px;
+        overflow-x: hidden;
       }
       .container {
         max-width: 100%;
+        width: 100%;
         gap: 12px;
+        box-sizing: border-box;
       }
       .card {
         padding: 12px;
+        box-sizing: border-box;
+        overflow: hidden;
       }
       .card-header {
         font-size: 0.7rem;
-      margin-bottom: 10px;
-    }
+        margin-bottom: 10px;
+      }
       h1 {
         font-size: 0.95rem;
+        text-align: center;
+        width: 100%;
       }
       .port-item {
         flex-direction: column;
@@ -1579,34 +1586,64 @@ PORT_SELECTION_PAGE = '''
         font-size: 0.75rem;
         min-width: auto;
       }
-      select {
+      .port-group {
         width: 100%;
-        font-size: 16px; /* Prevents iOS zoom */
-        padding: 12px 10px;
+      }
+      select {
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+        font-size: 16px;
+        padding: 12px 8px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      select option {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
       }
       input[type="text"] {
-        font-size: 16px; /* Prevents iOS zoom */
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+        font-size: 16px;
         padding: 12px;
       }
       input[type="file"] {
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
         font-size: 0.65rem;
         padding: 8px;
+      }
+      .input-group {
+        width: 100%;
       }
       .btn {
         font-size: 0.7rem;
         padding: 12px 14px;
         min-height: 44px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .button-row {
         flex-direction: column;
         gap: 8px;
+        width: 100%;
       }
       .button-row .btn {
         width: 100%;
       }
-    pre.ascii-art {
-        font-size: clamp(5px, 1.5vw, 8px);
+      pre.ascii-art {
+        font-size: clamp(4px, 1.3vw, 7px);
         padding: 4px;
+        overflow: hidden;
+      }
+      .logo-section {
+        width: 100%;
+        overflow: hidden;
       }
       .input-group label {
         font-size: 0.7rem;
@@ -1617,16 +1654,20 @@ PORT_SELECTION_PAGE = '''
     }
     @media (max-width: 380px) {
       body {
-        padding: 8px;
+        padding: 6px;
       }
       .card {
-        padding: 10px;
+        padding: 8px;
       }
       pre.ascii-art {
-        font-size: clamp(4px, 1.2vw, 6px);
+        font-size: clamp(3px, 1vw, 5px);
       }
       h1 {
-        font-size: 0.85rem;
+        font-size: 0.8rem;
+      }
+      select {
+        font-size: 14px;
+        padding: 10px 6px;
       }
     }
   </style>
