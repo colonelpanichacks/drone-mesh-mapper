@@ -1984,15 +1984,38 @@ HTML_PAGE = '''
         max-height: 70vh;
       }
       .leaflet-popup {
-        max-width: 280px !important;
+        max-width: 90vw !important;
       }
       .leaflet-popup-content-wrapper {
-        max-width: 260px !important;
-        padding: 6px !important;
+        max-width: 85vw !important;
+        padding: 8px !important;
+        box-sizing: border-box !important;
       }
       .leaflet-popup-content {
-        margin: 4px !important;
-        font-size: 0.65rem !important;
+        margin: 6px !important;
+        font-size: 0.7rem !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+        overflow-x: hidden !important;
+      }
+      .leaflet-popup-content input[type="range"] {
+        width: calc(100% - 4px) !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+      }
+      .leaflet-popup-content input[type="text"] {
+        width: calc(100% - 8px) !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+      }
+      .leaflet-popup-content select {
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+      }
+      .leaflet-popup-content button {
+        min-height: 32px !important;
+        font-size: 0.7rem !important;
       }
       #replayControlBar {
         width: 95vw !important;
@@ -2018,9 +2041,25 @@ HTML_PAGE = '''
         font-size: 0.6rem;
         padding: 3px 5px;
       }
-      button {
+      .leaflet-popup {
+        max-width: 95vw !important;
+      }
+      .leaflet-popup-content-wrapper {
+        max-width: 92vw !important;
+        padding: 6px !important;
+      }
+      .leaflet-popup-content {
+        font-size: 0.65rem !important;
+        padding: 2px !important;
+      }
+      .leaflet-popup-content button {
+        min-height: 28px !important;
         font-size: 0.6rem !important;
         padding: 4px 6px !important;
+      }
+      .leaflet-popup-content input[type="range"]::-webkit-slider-thumb {
+        height: 18px !important;
+        width: 18px !important;
       }
     }
         #filterBox input[type="text"],
@@ -4412,7 +4451,7 @@ function updateColor(mac, hue) {
     const isPilot = markerType === 'pilot';
     const id = mac; // Use mac as id for replay
     
-    let content = `<div style="font-family:'JetBrains Mono',monospace;width:240px;max-width:240px;box-sizing:border-box;">`;
+    let content = `<div style="font-family:'JetBrains Mono',monospace;width:100%;max-width:260px;box-sizing:border-box;">`;
     
     // Header
     content += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
@@ -4423,13 +4462,13 @@ function updateColor(mac, hue) {
     content += `<span style="color:#00ffd5;font-size:0.65em;">${isPilot ? 'Pilot Location' : 'Drone Location'}</span>`;
     
     // Alias input section
-    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
-      <label style="color:#6b7280;font-size:0.6em;display:block;margin-bottom:2px;">Set Alias:</label>
+    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
+      <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Set Alias:</label>
       <input type="text" id="replayAliasInput_${mac}" value="${currentAlias}" onclick="event.stopPropagation();" 
-             style="width:100%;max-width:100%;box-sizing:border-box;font-size:0.65em;padding:3px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;">
-      <div style="display:flex;gap:3px;margin-top:3px;">
-        <button onclick="event.stopPropagation();saveReplayAlias('${mac}')" style="flex:1;font-size:0.55em;padding:2px;">Save</button>
-        <button onclick="event.stopPropagation();clearReplayAlias('${mac}')" style="flex:1;font-size:0.55em;padding:2px;">Clear</button>
+             style="width:100%;display:block;box-sizing:border-box;font-size:0.7em;padding:6px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;">
+      <div style="display:flex;gap:3px;margin-top:4px;width:100%;">
+        <button onclick="event.stopPropagation();saveReplayAlias('${mac}')" style="flex:1;font-size:0.65em;padding:6px;">Save</button>
+        <button onclick="event.stopPropagation();clearReplayAlias('${mac}')" style="flex:1;font-size:0.65em;padding:6px;">Clear</button>
       </div>
     </div>`;
     
@@ -4527,8 +4566,8 @@ function updateColor(mac, hue) {
     const currentAlias = aliases[mac] || droneData.alias || '';
     const aliasDisplay = currentAlias || mac || id;
     
-    // Start building content
-    let content = `<div style="font-family:'JetBrains Mono',monospace;width:240px;max-width:240px;box-sizing:border-box;">`;
+    // Start building content - use 100% width for mobile compatibility
+    let content = `<div style="font-family:'JetBrains Mono',monospace;width:100%;max-width:260px;box-sizing:border-box;">`;
     
     // Header with alias
     content += `<strong id="histAliasDisplay_${mac}" style="color:#f0abfc;font-size:0.95em;word-break:break-all;">${aliasDisplay}</strong><br>`;
@@ -4540,13 +4579,13 @@ function updateColor(mac, hue) {
     }
     
     // Alias input section
-    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
       <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Set Alias:</label>
       <input type="text" id="histAliasInput_${mac}" value="${currentAlias}" onclick="event.stopPropagation();" 
-             style="width:100%;max-width:100%;box-sizing:border-box;font-size:0.7em;padding:4px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;">
-      <div style="display:flex;gap:3px;margin-top:4px;">
-        <button onclick="event.stopPropagation();saveHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.6em;padding:3px;">Save</button>
-        <button onclick="event.stopPropagation();clearHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.6em;padding:3px;">Clear</button>
+             style="width:100%;display:block;box-sizing:border-box;font-size:0.7em;padding:6px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;">
+      <div style="display:flex;gap:3px;margin-top:4px;width:100%;">
+        <button onclick="event.stopPropagation();saveHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.65em;padding:6px;">Save</button>
+        <button onclick="event.stopPropagation();clearHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.65em;padding:6px;">Clear</button>
       </div>
     </div>`;
     
@@ -4593,42 +4632,42 @@ function updateColor(mac, hue) {
     }
     
     // Track Color slider
-    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
       <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Track Color</label>
       <input type="range" id="histColorSlider_${id}" min="0" max="360" value="${hue}" 
-             style="width:100%;max-width:100%;box-sizing:border-box;" onchange="updateHistoricalColor('${id}', this.value)">
+             style="width:100%;display:block;box-sizing:border-box;" onchange="updateHistoricalColor('${id}', this.value)">
     </div>`;
     
     // Flights section
     if (flightCount > 0) {
-      content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+      content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
         <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Flights (${flightCount})</label>
-        <select id="flightSelect_${id}" style="width:100%;max-width:100%;font-size:0.65em;padding:3px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;box-sizing:border-box;" onchange="filterFlight('${id}', this.value)">
+        <select id="flightSelect_${id}" style="width:100%;display:block;font-size:0.7em;padding:6px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;box-sizing:border-box;" onchange="filterFlight('${id}', this.value)">
           ${flightOptions}
         </select>
       </div>`;
       
       // Replay controls
-      content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+      content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
         <label style="color:#00ff88;font-size:0.65em;display:block;margin-bottom:3px;">Replay</label>
-        <div style="display:flex;gap:3px;margin-bottom:3px;">
-          <button onclick="event.stopPropagation();startReplay('${id}')" style="flex:1;font-size:0.6em;padding:3px;">▶ Play</button>
-          <button onclick="event.stopPropagation();pauseReplay()" style="flex:1;font-size:0.6em;padding:3px;">⏸</button>
-          <button onclick="event.stopPropagation();stopReplay()" style="flex:1;font-size:0.6em;padding:3px;">⏹</button>
+        <div style="display:flex;gap:3px;margin-bottom:4px;width:100%;">
+          <button onclick="event.stopPropagation();startReplay('${id}')" style="flex:1;font-size:0.65em;padding:6px;">▶ Play</button>
+          <button onclick="event.stopPropagation();pauseReplay()" style="flex:1;font-size:0.65em;padding:6px;">⏸</button>
+          <button onclick="event.stopPropagation();stopReplay()" style="flex:1;font-size:0.65em;padding:6px;">⏹</button>
         </div>
-        <div style="display:flex;gap:2px;">
-          <button onclick="event.stopPropagation();setReplaySpeed(0.5)" style="flex:1;font-size:0.55em;padding:2px;">0.5x</button>
-          <button onclick="event.stopPropagation();setReplaySpeed(1)" style="flex:1;font-size:0.55em;padding:2px;">1x</button>
-          <button onclick="event.stopPropagation();setReplaySpeed(2)" style="flex:1;font-size:0.55em;padding:2px;">2x</button>
-          <button onclick="event.stopPropagation();setReplaySpeed(5)" style="flex:1;font-size:0.55em;padding:2px;">5x</button>
+        <div style="display:flex;gap:2px;width:100%;">
+          <button onclick="event.stopPropagation();setReplaySpeed(0.5)" style="flex:1;font-size:0.6em;padding:4px;">0.5x</button>
+          <button onclick="event.stopPropagation();setReplaySpeed(1)" style="flex:1;font-size:0.6em;padding:4px;">1x</button>
+          <button onclick="event.stopPropagation();setReplaySpeed(2)" style="flex:1;font-size:0.6em;padding:4px;">2x</button>
+          <button onclick="event.stopPropagation();setReplaySpeed(5)" style="flex:1;font-size:0.6em;padding:4px;">5x</button>
         </div>
       </div>`;
     }
     
     // Show/Hide and Zoom buttons
-    content += `<div style="display:flex;gap:4px;margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
-      <button onclick="event.stopPropagation();toggleHistoricalVisibility('${id}')" style="flex:1;font-size:0.65em;padding:4px;">${droneData.visible ? 'Hide' : 'Show'}</button>
-      <button onclick="event.stopPropagation();zoomToHistoricalDrone('${id}')" style="flex:1;font-size:0.65em;padding:4px;">Zoom</button>
+    content += `<div style="display:flex;gap:4px;margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
+      <button onclick="event.stopPropagation();toggleHistoricalVisibility('${id}')" style="flex:1;font-size:0.7em;padding:8px;">${droneData.visible ? 'Hide' : 'Show'}</button>
+      <button onclick="event.stopPropagation();zoomToHistoricalDrone('${id}')" style="flex:1;font-size:0.7em;padding:8px;">Zoom</button>
     </div>`;
     
     content += `</div>`;
