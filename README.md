@@ -1,4 +1,4 @@
-# <div align="center">  **Drone Remote ID Mapper** </div>
+# <div align="center">**Drone Remote ID Mapper**</div>
 
 <div align="center">
 
@@ -9,11 +9,29 @@
 
 **Real-time drone detection, mapping, and Remote ID compliance monitoring**
 
-[Quick Start](#quick-start) • [Features](#features) • [API Reference](#api-reference) • [Hardware](#hardware-setup)
+[Quick Start](#quick-start) | [Features](#features) | [API Reference](#api-reference) | [Hardware](#hardware-setup)
 
 <img src="eye.png" alt="Drone Detection Eye" style="width:50%; height:25%;">
 
 </div>
+
+---
+
+## **What's New - Cyber UI**
+
+The mapper now features a completely redesigned **dark cyber aesthetic** with:
+
+- **Modern Dark Theme** - Deep backgrounds with cyber accent colors (cyan, magenta, green)
+- **Orbitron & JetBrains Mono Fonts** - Futuristic display with monospace data readouts
+- **Live View** - Real-time drone/pilot tracking with animated position rings
+- **Historical View** - Session and cumulative KML data visualization with flight replay
+- **Flight Replay System** - Watch historical flights animate in real-time with speed controls
+- **Per-Drone Filtering** - Filter by MAC, OUI, alias, or date/time
+- **Visibility Controls** - Show/hide individual drone tracks
+- **Color Customization** - Per-drone track color sliders
+- **FAA Integration** - Query FAA registration database with results cached and displayed
+- **Aliasing System** - Set friendly names across all views (live, historical, replay)
+- **Google Maps Links** - Quick access to view positions in Google Maps
 
 ---
 
@@ -59,7 +77,7 @@ Build your own detection system using readily available components:
 
 ## **Overview**
 
-Advanced drone detection system that captures and maps Remote ID broadcasts from drones using ESP32 hardware. Features real-time web interface, persistent tracking across sessions, and comprehensive data export capabilities.
+Advanced drone detection system that captures and maps Remote ID broadcasts from drones using ESP32 hardware. Features real-time web interface with cyber-themed UI, persistent tracking across sessions, historical flight replay, and comprehensive data export capabilities.
 
 ---
 
@@ -123,36 +141,50 @@ The cronstall script will:
 
 ## **Core Features**
 
-### **Real-time Mapping**
+### **Live View - Real-time Mapping**
 - **Live Detection Display**: Interactive map showing drone positions as they're detected
 - **Flight Path Tracking**: Visual trails showing drone and pilot movement over time
-- **Persistent Sessions**: Drones remain visible across application restarts
+- **Animated Position Rings**: Pulsing indicators for active drone positions
 - **Multi-device Support**: Handle multiple ESP32 receivers simultaneously
+- **Drone/Pilot Icons**: Distinct markers for drone and pilot locations
+- **Color-coded Tracks**: Each drone gets a unique color (customizable)
+
+### **Historical View - Flight History**
+- **Session KML**: Current session detection data
+- **Cumulative KML**: All historical data across sessions
+- **Flight Replay**: Animate historical flights with adjustable speed (0.5x to 5x)
+- **Per-Flight Filtering**: Select individual flights from dropdown
+- **Start/End Markers**: Green circles for start, red circles for end positions
+- **Auto-refresh**: Historical data updates automatically
 
 ### **Data Management**
-- **Detection History**: Complete log of all drone encounters with timestamps (GeoJSON format)
-- **Device Aliases**: Assign friendly names to frequently seen drones (up to 200 aliases per ESP32-S3 device)
-- **Alias Upload to ESP32**: Upload aliases directly to ESP32-S3 devices for persistent storage
-- **Alias File Upload**: Upload aliases from JSON files (replaces all existing aliases)
-- **Data Export**: Download aliases as JSON, detection history as GeoJSON
+- **Detection History**: Complete log of all drone encounters with timestamps
+- **Device Aliases**: Assign friendly names to frequently seen drones
+- **Alias Sync**: Aliases work across live, historical, and replay views
+- **Alias Upload to ESP32**: Upload aliases directly to ESP32-S3 devices
+- **Data Export**: Download as CSV, KML, or JSON
 
 ### **ESP32 Integration**
 - **Auto-detection**: Automatically finds and connects to ESP32 devices
 - **Port Management**: Save and restore USB port configurations
 - **Status Monitoring**: Real-time connection health and data flow indicators
 - **Command Interface**: Send diagnostic commands to connected hardware
-- **Alias Storage**: ESP32-S3 devices store up to 200 aliases in NVS (Non-Volatile Storage) for persistence
-- **Alias-First Output**: Serial output includes alias first, then MAC address when available
+- **Alias Storage**: ESP32-S3 devices store up to 200 aliases in NVS
 
 ### **Web Interface**
+- **Dark Cyber Theme**: Modern aesthetic with cyber accent colors
 - **Real-time Updates**: WebSocket-powered live data streaming
 - **Mobile Responsive**: Works on desktop, tablet, and mobile devices
-- **Multiple Views**: Map, detection list, and device status panels
+- **Multiple Views**: Live map, historical view, detection list, and device status
+
+### **FAA Integration**
+- **Remote ID Lookup**: Query FAA registration database
+- **Cached Results**: Results displayed in popups and stored locally
+- **Manufacturer Info**: Shows make, model, series, and tracking number
 
 ### **Configuration & Monitoring**
 - **Headless Operation**: Run without web interface for dedicated deployments
 - **Debug Logging**: Detailed logging for troubleshooting and development
-- **FAA Integration**: Automatic Remote ID registration lookups
 - **Webhook Support**: External system integration via HTTP callbacks
 
 ---
@@ -195,8 +227,6 @@ python3 mesh-mapper.py --no-auto-start
 
 ---
 
-
-
 ## **API Reference**
 
 ### **Core Endpoints**
@@ -210,6 +240,13 @@ python3 mesh-mapper.py --no-auto-start
 | `GET` | `/api/paths` | Flight path data for visualization |
 | `POST` | `/api/reactivate/<mac>` | Reactivate inactive drone detection |
 
+### **Historical Data**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/kml/session` | Current session KML data |
+| `GET` | `/api/kml/cumulative` | Cumulative historical KML data |
+
 ### **Device Management**
 
 | Method | Endpoint | Description |
@@ -217,7 +254,7 @@ python3 mesh-mapper.py --no-auto-start
 | `GET` | `/api/aliases` | Get device aliases |
 | `POST` | `/api/set_alias` | Set friendly name for device |
 | `POST` | `/api/clear_alias/<mac>` | Remove device alias |
-| `POST` | `/api/upload_aliases` | Upload aliases to ESP32-S3 devices (optionally accepts JSON file to replace all aliases) |
+| `POST` | `/api/upload_aliases` | Upload aliases to ESP32-S3 devices |
 | `GET` | `/api/ports` | Available serial ports |
 | `GET` | `/api/serial_status` | ESP32 connection status |
 | `GET` | `/api/selected_ports` | Currently configured ports |
@@ -230,8 +267,6 @@ python3 mesh-mapper.py --no-auto-start
 | `POST` | `/api/query_faa` | Manual FAA query |
 | `POST` | `/api/set_webhook_url` | Configure webhook endpoint |
 | `GET` | `/api/get_webhook_url` | Get current webhook URL |
-| `GET` | `/api/webhook_url` | Get current webhook URL (alternative endpoint) |
-| `POST` | `/api/webhook_popup` | Webhook notification handler |
 
 ### **Data Export**
 
@@ -242,17 +277,6 @@ python3 mesh-mapper.py --no-auto-start
 | `GET` | `/download/kml` | Download current session detections as KML |
 | `GET` | `/download/cumulative_detections.csv` | Download cumulative detections as CSV |
 | `GET` | `/download/cumulative.kml` | Download cumulative detections as KML |
-
-### **System Management**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/diagnostics` | System health and performance |
-| `POST` | `/api/debug_mode` | Toggle debug logging |
-| `POST` | `/api/send_command` | Send command to ESP32 devices |
-| `GET` | `/select_ports` | Port selection interface |
-| `POST` | `/select_ports` | Update port configuration |
-| `GET` | `/sw.js` | Service worker for PWA support |
 
 ### **WebSocket Events**
 
@@ -274,7 +298,7 @@ Real-time events pushed to connected clients:
 - **Xiao ESP32-C3** (Single core, WiFi only)
 - **Xiao ESP32-S3** (Dual core, WiFi + Bluetooth)  
 - **ESP32-DevKit** (Development and testing)
-- **Custom PCBs** (See Tindie store link below)
+- **Custom PCBs** (See Tindie store link)
 
 ### **Wiring for Mesh Integration**
 ```
@@ -305,41 +329,24 @@ GND       | GND
 ```
 drone-mesh-mapper/
 ├── drone-mapper/              # Main application folder
-│   ├── mesh-mapper.py        # Main Python application
+│   ├── mesh-mapper.py         # Main Python application
 │   ├── requirements.txt       # Python dependencies
-│   ├── install_requiremants.py  # Dependency installer
+│   ├── install_requiremants.py # Dependency installer
 │   └── cronstall/             # Auto-start setup scripts
-│       └── cron.py           # Cron job installer for Linux
-├── remoteid-mesh-s3/         # ESP32-S3 firmware (mesh mode)
+│       └── cron.py            # Cron job installer for Linux
+├── remoteid-mesh-s3/          # ESP32-S3 firmware (mesh mode)
 │   ├── src/
-│   │   └── main.cpp          # Firmware source code
-│   └── platformio.ini        # PlatformIO configuration
-├── remoteid-node-mode-s3/    # ESP32-S3 firmware (node mode)
+│   │   └── main.cpp           # Firmware source code
+│   └── platformio.ini         # PlatformIO configuration
+├── remoteid-node-mode-s3/     # ESP32-S3 firmware (node mode)
 │   ├── src/
-│   │   └── main.cpp          # Firmware source code
-│   └── platformio.ini        # PlatformIO configuration
-└── README.md                 # This file
+│   │   └── main.cpp           # Firmware source code
+│   └── platformio.ini         # PlatformIO configuration
+├── .gitignore                 # Git ignore patterns
+└── README.md                  # This file
 ```
 
-## **Latest Updates**
-
-### **ESP32-S3 Alias Support**
-- Aliases can now be uploaded directly to ESP32-S3 devices
-- Supports up to 200 aliases per device
-- Aliases are stored in NVS (Non-Volatile Storage) and persist across reboots
-- Serial output includes alias first, then MAC address when available
-- Upload aliases via web interface with optional JSON file upload (replaces all existing aliases)
-
-### **File Organization**
-- Reorganized project structure with `drone-mapper/` folder
-- Separated firmware, application, and installation scripts
-- Improved project maintainability and clarity
-
-### **Cronstall Script**
-- Moved `cronstall/` folder inside `drone-mapper/` for better organization
-- Simplified script - no GitHub downloads, just installs cron job for existing mesh-mapper.py
-- Automatically finds mesh-mapper.py in parent directory
-- Automatically sets up cron jobs for auto-start on Linux systems
+---
 
 ## **Troubleshooting**
 
@@ -365,6 +372,11 @@ netstat -tlnp | grep :5000
 - Check WiFi channel configuration (default: channel 6)
 - Ensure drones are transmitting Remote ID (required in many jurisdictions)
 
+**Historical View Empty**
+- Make sure drones have been detected and saved to KML
+- Check that cumulative.kml exists in the drone-mapper directory
+- Try switching between Session and All History views
+
 ---
 
 ## **License**
@@ -378,10 +390,12 @@ This project is licensed under the MIT License
 - **Cemaxacutor** 
 - **Luke Switzer** 
 - **OpenDroneID Community** - Standards and specifications
-- Thank you PCBway for the awesome boards! The combination of their top tier quality, competitive pricing, fast turnaround times, and stellar customer service makes PCBWay the go-to choice for professional PCB fabrication, whether you're prototyping innovative mesh detection systems or scaling up for full production runs.
+- Thank you PCBway for the awesome boards! The combination of their top tier quality, competitive pricing, fast turnaround times, and stellar customer service makes PCBWay the go-to choice for professional PCB fabrication.
 https://www.pcbway.com/
-  <div align="center"> <img src="boards.png" alt="boards" style="width:50%; height:25%;">
 
+<div align="center">
+<img src="boards.png" alt="boards" style="width:50%; height:25%;">
+</div>
 
 ---
 
@@ -401,4 +415,4 @@ Get professional PCBs and complete kits:
 
 Made with love by the Drone Detection Community
 
-</div> 
+</div>

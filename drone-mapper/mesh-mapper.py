@@ -1302,179 +1302,314 @@ PORT_SELECTION_PAGE = '''
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Select USB Serial Ports</title>
-  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mesh Mapper - Settings</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    /* Highlight non-GPS drones in inactive list */
-    #inactivePlaceholder .drone-item.no-gps {
-      border: 2px solid lightblue !important;
-      background-color: transparent !important;
-      color: inherit !important;
+    :root {
+      --bg-dark: #080810;
+      --bg-card: #0d0d18;
+      --bg-input: #12121f;
+      --border-primary: #00ff88;
+      --border-secondary: #6366f1;
+      --border-accent: #f0abfc;
+      --text-primary: #e0e0e0;
+      --text-cyan: #00ffd5;
+      --text-green: #00ff88;
+      --text-pink: #f0abfc;
+      --text-muted: #6b7280;
+      --glow-green: rgba(0, 255, 136, 0.15);
+      --glow-pink: rgba(240, 171, 252, 0.15);
     }
-    .leaflet-tile {
-      border: none !important;
-      box-shadow: none !important;
-      background-color: transparent !important;
-      image-rendering: crisp-edges !important;
-    }
-    .leaflet-container {
-      background-color: black !important;
-    }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
-      padding: 0;
-      font-family: 'Orbitron', monospace;
-      background-color: #0a001f;
-      color: #0ff;
-      text-shadow: 0 0 8px #0ff, 0 0 16px #f0f;
+      padding: 20px;
+      min-height: 100vh;
+      font-family: 'JetBrains Mono', monospace;
+      background: var(--bg-dark);
+      background-image: 
+        radial-gradient(ellipse at top, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
+        radial-gradient(ellipse at bottom, rgba(0, 255, 136, 0.05) 0%, transparent 50%);
+      color: var(--text-primary);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container {
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow: visible;
+    }
+    .logo-section {
       text-align: center;
-      zoom: 1.15;
-    }
-    pre { font-size: 16px; margin: 10px auto; }
-    form {
-      display: inline-block;
-      text-align: center;
-    }
-    li { list-style: none; margin: 10px 0; }
-    select {
-      background-color: #333;
-      color: lime;
-      border: none;
-      padding: 3px;
-      margin-bottom: 5px;
-      box-shadow: 0 0 4px #0ff;
-    }
-    label { font-size: 18px; }
-    button[type="submit"] {
-      display: block;
-      margin: 1em auto 5px auto;
-      padding: 5px;
-      border: 1px solid lime;
-      background-color: #333;
-      color: lime;
-      font-family: 'Orbitron', monospace;
-      cursor: pointer;
-      outline: none;
-      border-radius: 10px;
-      box-shadow: 0 0 8px #f0f, 0 0 16px #0ff;
-    }
-    pre.logo-art {
-      display: inline-block;
-      margin: 0 auto;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
+      overflow: visible;
+      display: flex;
+      justify-content: center;
     }
     pre.ascii-art {
       margin: 0;
-      padding: 5px;
-      background: linear-gradient(to right, blue, purple, pink, lime, green);
+      padding: 8px;
+      font-size: clamp(6px, 1.8vw, 10px);
+      line-height: 1.1;
+      background: linear-gradient(135deg, #6366f1, #00ff88, #f0abfc);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
-      font-family: monospace;
-      font-size: 90%;
+      background-clip: text;
+      font-family: 'JetBrains Mono', monospace;
+      white-space: pre;
+      overflow: visible;
+      text-align: center;
+    }
+    .bottom-art {
+      margin-top: 16px;
+      display: flex;
+      justify-content: center;
     }
     h1 {
-      font-size: 18px;
-      font-family: 'Orbitron', monospace;
-      margin: 1em 0 4px 0;
+      font-family: 'Orbitron', sans-serif;
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-cyan);
+      margin: 0;
+      letter-spacing: 1px;
+      text-transform: uppercase;
     }
-    /* Rounded toggle switch styling */
-    .switch {
-      position: relative; display: inline-block; width: 40px; height: 20px;
+    .card {
+      background: var(--bg-card);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      border-radius: 8px;
+      padding: 16px;
     }
-    .switch input {
-      opacity: 0; width: 0; height: 0;
+    .card-header {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--text-pink);
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(240, 171, 252, 0.2);
     }
-    .switch .slider {
-      position: absolute;
+    .port-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .port-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .port-item label {
+      font-size: 0.8rem;
+      color: var(--text-green);
+      min-width: 50px;
+      font-weight: 500;
+    }
+    select {
+      flex: 1;
+      background: var(--bg-input);
+      color: var(--text-cyan);
+      border: 1px solid rgba(0, 255, 136, 0.3);
+      border-radius: 4px;
+      padding: 8px 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
       cursor: pointer;
-      top: 0; left: 0; right: 0; bottom: 0;
-      background-color: #555;
-      transition: .4s;
-      border-radius: 20px;
+      transition: all 0.2s ease;
     }
-    .switch .slider:before {
-      position: absolute;
-      content: "";
-      height: 16px; width: 16px;
-      left: 2px; top: 2px;
-      background-color: lime;
-      border: 1px solid #9B30FF;
-      transition: .4s;
-      border-radius: 50%;
+    select:hover, select:focus {
+      border-color: var(--border-primary);
+      outline: none;
+      box-shadow: 0 0 0 2px var(--glow-green);
     }
-    .switch input:checked + .slider {
-      background-color: lime;
+    select option {
+      background: var(--bg-input);
+      color: var(--text-cyan);
     }
-    .switch input:checked + .slider:before {
-      transform: translateX(20px);
+    .input-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .input-group label {
+      font-size: 0.75rem;
+      color: var(--text-pink);
+      font-weight: 500;
+    }
+    input[type="text"], input[type="file"] {
+      background: var(--bg-input);
+      color: var(--text-cyan);
+      border: 1px solid rgba(240, 171, 252, 0.3);
+      border-radius: 4px;
+      padding: 10px 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      width: 100%;
+      transition: all 0.2s ease;
+    }
+    input[type="text"]:hover, input[type="text"]:focus {
+      border-color: var(--border-accent);
+      outline: none;
+      box-shadow: 0 0 0 2px var(--glow-pink);
+    }
+    input[type="text"]::placeholder {
+      color: var(--text-muted);
+    }
+    input[type="file"] {
+      font-size: 0.7rem;
+      cursor: pointer;
+    }
+    input[type="file"]::file-selector-button {
+      background: rgba(240, 171, 252, 0.15);
+      color: var(--text-pink);
+      border: 1px solid rgba(240, 171, 252, 0.4);
+      border-radius: 3px;
+      padding: 4px 10px;
+      margin-right: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    input[type="file"]::file-selector-button:hover {
+      background: rgba(240, 171, 252, 0.25);
+    }
+    .btn {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.75rem;
+      font-weight: 500;
+      padding: 10px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .btn-secondary {
+      background: transparent;
+      color: var(--text-pink);
+      border: 1px solid rgba(240, 171, 252, 0.4);
+    }
+    .btn-secondary:hover {
+      background: rgba(240, 171, 252, 0.1);
+      border-color: var(--border-accent);
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, rgba(0, 255, 136, 0.15), rgba(0, 255, 213, 0.15));
+      color: var(--text-green);
+      border: 1px solid var(--border-primary);
+      width: 100%;
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, rgba(0, 255, 136, 0.25), rgba(0, 255, 213, 0.25));
+      box-shadow: 0 0 20px var(--glow-green), 0 0 40px rgba(0, 255, 136, 0.1);
+    }
+    .btn-upload {
+      background: transparent;
+      color: var(--text-cyan);
+      border: 1px solid rgba(0, 255, 213, 0.4);
+      width: 100%;
+    }
+    .btn-upload:hover {
+      background: rgba(0, 255, 213, 0.1);
+      border-color: var(--text-cyan);
+    }
+    .status-text {
+      font-size: 0.75rem;
+      color: var(--text-cyan);
+      margin-top: 6px;
+      min-height: 18px;
+    }
+    .button-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .button-row .btn {
+      flex: 1;
+    }
+    form {
+      display: contents;
     }
   </style>
 </head>
 <body>
-  <pre class="ascii-art logo-art">{{ logo_ascii }}</pre>
-  <h1>Select Up to 3 USB Serial Ports</h1>
+  <div class="container">
+    <div class="logo-section">
+      <pre class="ascii-art">{{ logo_ascii }}</pre>
+    </div>
+    
+    <h1>Device Configuration</h1>
+    
   <form method="POST" action="/select_ports">
-    <label>Port 1:</label><br>
+      <div class="card">
+        <div class="card-header">Serial Ports</div>
+        <div class="port-group">
+          <div class="port-item">
+            <label>Port 1</label>
     <select id="port1" name="port1">
-      <option value="">--None--</option>
+              <option value="">-- None --</option>
       {% for port in ports %}
         <option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>
       {% endfor %}
-    </select><br>
-    <label>Port 2:</label><br>
+            </select>
+          </div>
+          <div class="port-item">
+            <label>Port 2</label>
     <select id="port2" name="port2">
-      <option value="">--None--</option>
+              <option value="">-- None --</option>
       {% for port in ports %}
         <option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>
       {% endfor %}
-    </select><br>
-    <label>Port 3:</label><br>
+            </select>
+          </div>
+          <div class="port-item">
+            <label>Port 3</label>
     <select id="port3" name="port3">
-      <option value="">--None--</option>
+              <option value="">-- None --</option>
       {% for port in ports %}
         <option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>
       {% endfor %}
-    </select><br>
-    <div style="margin-bottom:8px;"></div>
-    <div style="margin-top:4px; margin-bottom:12px; text-align:center;">
-      <label for="webhookUrl" style="font-size:18px; font-family:'Orbitron', monospace; color:#87CEEB;">Webhook URL</label><br>
-      <input type="text" id="webhookUrl" placeholder="https://example.com/webhook"
-             style="font-family:'Orbitron', monospace; color:#87CEEB; background-color:#222; border:1px solid #FF00FF; width:100%; font-size:16px; padding:4px;">
-      <br>
-      <button id="updateWebhookButton" style="margin-top:6px; border:1px solid lime; background-color:#333; color:#FF00FF; font-family:'Orbitron',monospace; padding:4px 8px; cursor:pointer; border-radius:4px;">
-        Update Webhook
-      </button>
+            </select>
     </div>
-    <div style="margin-top:12px; margin-bottom:12px; text-align:center;">
-      <div style="margin-bottom:8px;">
-        <label for="aliasesFileInput" style="font-size:16px; font-family:'Orbitron', monospace; color:#87CEEB; display:block; margin-bottom:4px;">Upload Aliases File (Optional)</label>
-        <input type="file" id="aliasesFileInput" accept=".json" 
-               style="font-family:'Orbitron', monospace; color:#87CEEB; background-color:#222; border:1px solid #FF00FF; font-size:14px; padding:4px; width:100%;">
       </div>
-      <button id="uploadAliasesButton" style="border:1px solid lime; background-color:#333; color:#0ff; font-family:'Orbitron',monospace; padding:6px 12px; cursor:pointer; border-radius:4px; font-size:16px;">
-        Upload Aliases to ESP32-S3
-      </button>
-      <div id="uploadAliasesStatus" style="margin-top:4px; font-size:14px; color:#0ff;"></div>
     </div>
-    <div style="margin-top:12px; margin-bottom:4px; text-align:center;">
-      <button id="beginMapping" type="submit" style="
-        display: block;
-        margin: 15px auto 0;
-        padding: 8px 15px;
-        min-width: 150px;
-        border: 1px solid lime;
-        background-color: #333;
-        color: lime;
-        font-family: 'Orbitron', monospace;
-        font-size: 1.2em;
-        text-shadow: 0 0 8px #0ff;
-        cursor: pointer;
-    ">
-      Begin Mapping
-    </button>
-    <div style="margin-bottom:8px;"></div>
+
+      <div class="card">
+        <div class="card-header">Webhook</div>
+        <div class="input-group">
+          <label for="webhookUrl">Endpoint URL</label>
+          <input type="text" id="webhookUrl" placeholder="https://example.com/webhook">
+        </div>
+        <div class="button-row">
+          <button type="button" id="updateWebhookButton" class="btn btn-secondary">Update Webhook</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">Aliases</div>
+        <div class="input-group">
+          <label for="aliasesFileInput">Upload Aliases JSON (Optional)</label>
+          <input type="file" id="aliasesFileInput" accept=".json">
+        </div>
+        <button type="button" id="uploadAliasesButton" class="btn btn-upload">Upload to ESP32-S3</button>
+        <div id="uploadAliasesStatus" class="status-text"></div>
+      </div>
+
+      <button id="beginMapping" type="submit" class="btn btn-primary">Begin Mapping</button>
   </form>
+    
+    <div class="bottom-art">
   <pre class="ascii-art">{{ bottom_ascii }}</pre>
+    </div>
+  </div>
   <script>
     function refreshPortOptions() {
       fetch('/api/ports')
@@ -1751,12 +1886,28 @@ HTML_PAGE = '''
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mesh Mapper</title>
-  <!-- Add Socket.IO client script for real-time updates -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://cdn.socket.io">
+  <link rel="preconnect" href="https://unpkg.com">
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
-  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <style>
+    :root {
+      --bg-dark: #080810;
+      --bg-panel: rgba(8, 8, 16, 0.92);
+      --bg-input: #12121f;
+      --border-primary: #00ff88;
+      --border-secondary: #6366f1;
+      --border-accent: #f0abfc;
+      --text-primary: #e0e0e0;
+      --text-cyan: #00ffd5;
+      --text-green: #00ff88;
+      --text-pink: #f0abfc;
+      --text-muted: #6b7280;
+    }
     /* Hide tile seams on all map layers */
     .leaflet-tile {
       border: none !important;
@@ -1766,330 +1917,342 @@ HTML_PAGE = '''
       transition: none !important;
     }
     .leaflet-container {
-      background-color: black !important;
+      background-color: #080810 !important;
     }
     /* Toggle switch styling */
-    .switch { position: relative; display: inline-block; vertical-align: middle; width: 40px; height: 20px; }
+    .switch { position: relative; display: inline-block; vertical-align: middle; width: 36px; height: 18px; }
     .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .4s; border-radius: 20px; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #2d2d3d; transition: .2s; border-radius: 18px; }
     .slider:before {
       position: absolute;
       content: "";
-      height: 16px;
-      width: 16px;
+      height: 14px;
+      width: 14px;
       left: 2px;
       top: 50%;
-      background-color: lime;
-      border: 1px solid #9B30FF;
-      transition: .4s;
+      background-color: var(--text-green);
+      border: 1px solid var(--border-secondary);
+      transition: .2s;
       border-radius: 50%;
       transform: translateY(-50%);
     }
-    .switch input:checked + .slider { background-color: lime; }
+    .switch input:checked + .slider { background-color: rgba(0, 255, 136, 0.3); }
     .switch input:checked + .slider:before {
-      transform: translateX(20px) translateY(-50%);
-      border: 1px solid #9B30FF;
+      transform: translateX(18px) translateY(-50%);
     }
+    * { box-sizing: border-box; }
     body, html {
       margin: 0;
       padding: 0;
-      background-color: #0a001f;
-      font-family: 'Orbitron', monospace;
+      background-color: var(--bg-dark);
+      font-family: 'JetBrains Mono', monospace;
     }
     #map { height: 100vh; }
-    /* Layer control styling (bottom left) reduced by 30% */
-    #layerControl {
-      position: absolute;
-      bottom: 10px;
-      left: 10px;
-      background: rgba(0,0,0,0.8);
-      padding: 3.5px; /* reduced from 5px */
-      border: 0.7px solid lime; /* reduced border thickness */
-      border-radius: 7px; /* reduced from 10px */
-      color: #FF00FF;
-      font-family: monospace;
-      font-size: 0.7em; /* scale font by 70% */
-      z-index: 1000;
-    }
-    /* Basemap label always neon pink */
-    #layerControl > label {
-      color: #FF00FF;
-    }
-    #layerControl select,
-    #layerControl select option {
-      background-color: #333;
-      color: lime;
-      border: none;
-      padding: 2.1px;
-      font-size: 0.7em;
-    }
     
+    /* Control Panel */
         #filterBox {
           position: absolute;
-          top: 10px;
-          right: 10px;
-          background: rgba(0,0,0,0.8);
-          padding: 8px;
-          width: 280px;
-          max-width: 25vw;
-          border: 1px solid lime;
-          border-radius: 10px;
-          color: lime;
-          font-family: monospace;
+      top: 12px;
+      right: 12px;
+      background: var(--bg-panel);
+      backdrop-filter: blur(12px);
+      padding: 12px;
+      width: 260px;
+      max-width: 28vw;
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      border-radius: 8px;
+      color: var(--text-primary);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
           max-height: 95vh;
           overflow-y: auto;
           overflow-x: hidden;
           z-index: 1000;
         }
+    #filterBox::-webkit-scrollbar { width: 4px; }
+    #filterBox::-webkit-scrollbar-track { background: transparent; }
+    #filterBox::-webkit-scrollbar-thumb { background: var(--border-secondary); border-radius: 2px; }
         @media (max-width: 600px) {
           #filterBox {
-            width: 37.5vw;
+        width: 44vw;
             max-width: 90vw;
+        font-size: 0.7rem;
           }
         }
-        /* Auto-size inputs inside filterBox */
         #filterBox input[type="text"],
         #filterBox input[type="password"],
         #filterBox input[type="range"],
         #filterBox select {
-          width: auto !important;
+      width: 100% !important;
           min-width: 0;
         }
-    #filterBox.collapsed #filterContent {
-      display: none;
-    }
-    /* Tighten header when collapsed */
+    #filterBox.collapsed #filterContent { display: none; }
     #filterBox.collapsed {
-      padding: 4px;
+      padding: 8px 12px;
       width: auto;
     }
-    #filterBox.collapsed #filterHeader {
-      padding: 0;
-    }
+    #filterBox.collapsed #filterHeader { padding: 0; }
     #filterBox.collapsed #filterHeader h3 {
       display: inline-block;
       flex: none;
       width: auto;
       margin: 0;
-      color: #FF00FF;
+      color: var(--text-pink);
     }
-# Add margin to filterToggle when collapsed
-    #filterBox.collapsed #filterHeader #filterToggle {
-      margin-left: 5px;
-    }
-    #filterBox:not(.collapsed) #filterHeader h3 {
-      display: none;
-    }
+    #filterBox.collapsed #filterHeader #filterToggle { margin-left: 8px; }
+    #filterBox:not(.collapsed) #filterHeader h3 { display: none; }
     #filterHeader {
       display: flex;
       align-items: center;
     }
-    #filterBox:not(.collapsed) #filterHeader {
-      justify-content: flex-end;
-    }
+    #filterBox:not(.collapsed) #filterHeader { justify-content: flex-end; }
     #filterHeader h3 {
       flex: none;
       text-align: center;
       margin: 0;
-      font-size: 1em;
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.8rem;
+      font-weight: 500;
       display: block;
       width: 100%;
-      color: #FF00FF;
+      color: var(--text-pink);
     }
+    #filterToggle {
+      color: var(--text-cyan);
+      font-size: 1rem;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: background 0.2s;
+    }
+    #filterToggle:hover { background: rgba(0, 255, 213, 0.1); }
     
-    /* USB status styling - now integrated in filter window */
-    #serialStatus div { margin-bottom: 2px; }
+    /* Section Headers */
+    .section-header {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.65rem;
+      font-weight: 500;
+      color: var(--text-pink);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 12px 0 8px 0;
+      padding-bottom: 4px;
+      border-bottom: 1px solid rgba(240, 171, 252, 0.2);
+    }
+    #filterContent > h3 {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.65rem;
+      font-weight: 500;
+      color: var(--text-pink);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 12px 0 8px 0;
+      text-align: left;
+    }
+    #filterContent > h3::before, #filterContent > h3::after { display: none; }
+    
+    /* USB Status */
+    #serialStatus { font-size: 0.7rem; }
+    #serialStatus div { margin-bottom: 3px; padding: 4px 0; }
     #serialStatus div:last-child { margin-bottom: 0; }
+    .usb-name { color: var(--text-pink); font-weight: 500; }
     
-    .usb-name { color: #FF00FF; } /* Neon pink for device names */
+    /* Drone Items */
     .drone-item {
       display: inline-block;
       border: 1px solid;
       margin: 2px;
-      padding: 3px;
+      padding: 4px 6px;
       cursor: pointer;
+      border-radius: 3px;
+      font-size: 0.7rem;
+      transition: all 0.15s ease;
     }
+    .drone-item:hover { background: rgba(255,255,255,0.05); }
     .drone-item.no-gps {
       position: relative;
-      border: 1px solid deepskyblue !important;
+      border: 1px solid #38bdf8 !important;
     }
-    /* #activePlaceholder .drone-item.no-gps:hover::after {
-      content: "no gps lock";
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      transform: translateX(-50%);
-      background-color: black;
-      color: #FF00FF;
-      padding: 4px 6px;
-      border: 1px solid #FF00FF;
-      border-radius: 2px;
-      white-space: nowrap;
-      font-family: monospace;
-      font-size: 0.75em;
-      z-index: 2000;
-    } */
-    /* Highlight recently seen drones (but not no-GPS drones) */
     .drone-item.recent:not(.no-gps) {
-      box-shadow: 0 0 0 1px lime;
+      box-shadow: 0 0 0 1px var(--text-green), 0 0 8px rgba(0, 255, 136, 0.3);
     }
     .placeholder {
-      border: 2px solid transparent;
-      border-image: linear-gradient(to right, lime 85%, yellow 15%) 1;
-      border-radius: 5px;
-      min-height: 100px;
-      margin-top: 5px;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      border-radius: 6px;
+      min-height: 80px;
+      margin-top: 6px;
+      padding: 6px;
       overflow-y: auto;
-      max-height: 200px;
+      max-height: 180px;
     }
-    .selected { background-color: rgba(255,255,255,0.2); }
-    .leaflet-popup > .leaflet-popup-content-wrapper { background-color: black; color: lime; font-family: monospace; border: 2px solid lime; border-radius: 10px;
-      width: 220px !important;
-      max-width: 220px;
-      zoom: 1.15;
+    .placeholder::-webkit-scrollbar { width: 3px; }
+    .placeholder::-webkit-scrollbar-track { background: transparent; }
+    .placeholder::-webkit-scrollbar-thumb { background: var(--border-secondary); border-radius: 2px; }
+    .selected { background-color: rgba(99, 102, 241, 0.2); }
+    
+    /* Leaflet Popup Styling */
+    .leaflet-popup {
+      max-width: 300px !important;
+    }
+    .leaflet-popup > .leaflet-popup-content-wrapper { 
+      background: var(--bg-panel);
+      backdrop-filter: blur(12px);
+      color: var(--text-green); 
+      font-family: 'JetBrains Mono', monospace; 
+      border: 1px solid rgba(0, 255, 136, 0.4); 
+      border-radius: 8px;
+      padding: 8px;
+      max-width: 280px;
+      overflow: hidden;
+      box-sizing: border-box;
     }
     .leaflet-popup-content {
-      font-size: 0.75em;
-      line-height: 1.2em;
+      font-size: 0.7rem;
+      line-height: 1.4;
       white-space: normal;
+      margin: 6px !important;
+      max-width: 260px;
+      overflow-x: hidden;
+      box-sizing: border-box;
+      max-width: 240px;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
     }
-    .leaflet-popup-tip { background: lime; }
-    /* Collapse inner Leaflet popup layers into the outer wrapper */
-    .leaflet-popup-content {
-      background: transparent !important;
-      padding: 0 !important;
-      box-shadow: none !important;
-      color: inherit !important;
-    }
-    .leaflet-popup-tip-container,
     .leaflet-popup-tip {
-      background: transparent !important;
-      box-shadow: none !important;
+      background: rgba(0, 255, 136, 0.4) !important; 
     }
-    /* Collapse inner popup layers for no-GPS popups */
+    .leaflet-popup-close-button {
+      color: var(--text-pink) !important;
+      font-size: 18px !important;
+      padding: 4px 8px !important;
+    }
+    .leaflet-popup-close-button:hover {
+      color: var(--text-green) !important;
+    }
     .leaflet-popup.no-gps-popup > .leaflet-popup-content-wrapper {
-      /* ensure outer wrapper styling persists */
-      background-color: black !important;
-      color: lime !important;
+      background: var(--bg-panel) !important;
+      color: var(--text-green) !important;
     }
     .leaflet-popup.no-gps-popup .leaflet-popup-content {
-      background: transparent !important;
-      padding: 0 !important;
-      box-shadow: none !important;
-      color: inherit !important;
+      margin: 8px !important;
     }
     .leaflet-popup.no-gps-popup .leaflet-popup-tip-container,
     .leaflet-popup.no-gps-popup .leaflet-popup-tip {
       background: transparent !important;
       box-shadow: none !important;
     }
+    
+    /* Buttons */
     button {
       margin-top: 4px;
-      padding: 3px;
-      font-size: 0.8em;
-      border: 1px solid lime;
-      background-color: #333;
-      color: lime;
+      padding: 6px 10px;
+      font-size: 0.7rem;
+      font-family: 'JetBrains Mono', monospace;
+      border: 1px solid rgba(0, 255, 136, 0.4);
+      background: rgba(0, 255, 136, 0.08);
+      color: var(--text-green);
       cursor: pointer;
-      width: auto;
+      border-radius: 4px;
+      transition: all 0.15s ease;
+    }
+    button:hover {
+      background: rgba(0, 255, 136, 0.15);
+      border-color: var(--text-green);
     }
     select {
-      background-color: #333;
-      color: lime;
-      border: none;
-      padding: 3px;
+      background: var(--bg-input);
+      color: var(--text-cyan);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      padding: 6px 8px;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
     }
-    .leaflet-control-zoom-in, .leaflet-control-zoom-out {
-      background: rgba(0,0,0,0.8);
-      color: lime;
-      border: 1px solid lime;
-      border-radius: 5px;
-    }
-    /* Style zoom control container to match drone box */
+    
+    /* Zoom Controls */
     .leaflet-control-zoom.leaflet-bar {
-      background: rgba(0,0,0,0.8);
-      border: 1px solid lime;
-      border-radius: 10px;
+      background: var(--bg-panel);
+      border: 1px solid rgba(0, 255, 136, 0.3);
+      border-radius: 6px;
+      overflow: hidden;
     }
     .leaflet-control-zoom.leaflet-bar a {
       background: transparent;
-      color: lime;
+      color: var(--text-green);
       border: none;
-      width: 30px;
-      height: 30px;
-      line-height: 30px;
+      border-bottom: 1px solid rgba(0, 255, 136, 0.2);
+      width: 28px;
+      height: 28px;
+      line-height: 28px;
       text-align: center;
-      padding: 0;
+      font-size: 1rem;
       user-select: none;
-      caret-color: transparent;
       cursor: pointer;
-      outline: none;
+      transition: background 0.15s;
     }
-    .leaflet-control-zoom.leaflet-bar a:focus {
-      outline: none;
-      caret-color: transparent;
-    }
-    .leaflet-control-zoom.leaflet-bar a:hover {
-      background: rgba(255,255,255,0.1);
-    }
-    .leaflet-control-zoom-in:hover, .leaflet-control-zoom-out:hover { background-color: #222; }
+    .leaflet-control-zoom.leaflet-bar a:last-child { border-bottom: none; }
+    .leaflet-control-zoom.leaflet-bar a:hover { background: rgba(0, 255, 136, 0.1); }
+    .leaflet-control-zoom.leaflet-bar a:focus { outline: none; }
+    
+    /* Alias Input */
     input#aliasInput {
-      background-color: #222;
-      color: #87CEEB;         /* pastel blue (updated) */
-      border: 1px solid #FF00FF;
-      padding: 4px;
-      font-size: 1.06em;
-      caret-color: #87CEEB;
+      background: var(--bg-input);
+      color: var(--text-cyan);
+      border: 1px solid rgba(240, 171, 252, 0.4);
+      padding: 6px 8px;
+      font-size: 0.8rem;
+      font-family: 'JetBrains Mono', monospace;
+      border-radius: 4px;
       outline: none;
+      transition: all 0.15s;
     }
-    .leaflet-popup-content-wrapper input:not(#aliasInput) {
-      caret-color: transparent;
+    input#aliasInput:focus {
+      border-color: var(--text-pink);
+      box-shadow: 0 0 0 2px rgba(240, 171, 252, 0.15);
     }
-    /* Popup button styling */
+    .leaflet-popup-content-wrapper input:not(#aliasInput) { caret-color: transparent; }
+    
+    /* Popup Buttons */
     .leaflet-popup-content-wrapper button {
       display: inline-block;
-      margin: 2px 4px 2px 0;
-      padding: 4px 6px;
-      font-size: 0.9em;
-      width: auto;
-      background-color: #333;
-      border: 1px solid lime;
-      color: lime;
-      box-shadow: none;
-      text-shadow: none;
+      margin: 2px 3px 2px 0;
+      padding: 5px 8px;
+      font-size: 0.7rem;
+      background: rgba(0, 255, 136, 0.08);
+      border: 1px solid rgba(0, 255, 136, 0.4);
+      color: var(--text-green);
+      border-radius: 4px;
+      transition: all 0.15s;
     }
-
-    /* Locked button styling */
-    .leaflet-popup-content-wrapper button[style*="background-color: green"] {
-      background-color: green;
-      color: black;
-      border-color: green;
-    }
-
-    /* Hover effect */
     .leaflet-popup-content-wrapper button:hover {
-      background-color: rgba(255,255,255,0.1);
+      background: rgba(0, 255, 136, 0.15);
+    }
+    .leaflet-popup-content-wrapper button[style*="background-color: green"] {
+      background: rgba(0, 255, 136, 0.3) !important;
+      color: #fff;
+      border-color: var(--text-green);
     }
     .leaflet-popup-content-wrapper input[type="text"],
     .leaflet-popup-content-wrapper input[type="range"] {
-      font-size: 0.75em;
-      padding: 2px;
+      font-size: 0.75rem;
+      padding: 4px;
     }
-    /* Disable tile transitions to prevent blur and hide tile seams */
+    
+    /* Tile Layer */
     .leaflet-tile {
       display: block;
       margin: 0;
       padding: 0;
       transition: none !important;
       image-rendering: crisp-edges;
-      background-color: black;
+      background-color: var(--bg-dark);
       border: none !important;
       box-shadow: none !important;
     }
-    .leaflet-container {
-      background-color: black;
-    }
-    /* Disable text cursor in drone list and filter toggle */
+    .leaflet-container { background-color: var(--bg-dark); }
+    
+    /* Disable cursor */
     .drone-item, #filterToggle {
       user-select: none;
       caret-color: transparent;
@@ -2099,257 +2262,266 @@ HTML_PAGE = '''
       outline: none;
       caret-color: transparent;
     }
-    /* Cyberpunk styling for filter headings */
-    #filterContent > h3:nth-of-type(1) {
-      color: #FF00FF;         /* Active Drones in magenta */
-      text-align: center;     /* center text */
-      font-size: 1.1em;       /* slightly larger font */
-    }
-    #filterContent > h3:nth-of-type(2) {
-      color: #FF00FF;        /* more magenta */
-      text-align: center;    /* center text */
-      font-size: 1.1em;      /* slightly larger font */
-    }
-    /* Lime-green hacky dashes around filter headers */
-    #filterContent > h3 {
-      display: block;
-      width: 100%;
-      text-align: center;
-      margin: 0.5em 0;
-    }
-    #filterContent > h3::before,
-    #filterContent > h3::after {
-      content: '---';
-      color: lime;
-      margin: 0 6px;
-    }
-    /* Download buttons styling */
+    
+    /* Download Section */
     #downloadButtons {
       display: flex;
       width: 100%;
       gap: 4px;
-      margin-top: 8px;
+      margin-top: 6px;
     }
     #downloadButtons button {
       flex: 1;
       margin: 0;
-      padding: 4px;
-      font-size: 0.8em;
-      border: 1px solid lime;
-      border-radius: 5px;
-      background-color: #333;
-      color: lime;
-      font-family: monospace;
-      cursor: pointer;
+      padding: 6px 4px;
+      font-size: 0.65rem;
     }
-    #downloadButtons button:focus {
-      outline: none;
-      caret-color: transparent;
-    }
-    /* Gradient blue border flush with heading */
     #downloadSection {
-      padding: 0 8px 8px 8px;  /* no top padding so border is flush with heading */
-      margin-top: 12px;
+      padding: 0;
+      margin-top: 8px;
     }
-    /* Gradient for Download Logs header */
     #downloadSection .downloadHeader {
-      margin: 10px 0 5px 0;
-      text-align: center;
-      background: linear-gradient(to right, lime, yellow);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.65rem;
+      font-weight: 500;
+      color: var(--text-pink);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 8px 0 6px 0;
+      padding-bottom: 4px;
+      border-bottom: 1px solid rgba(240, 171, 252, 0.2);
+      background: none;
+      -webkit-background-clip: unset;
+      -webkit-text-fill-color: unset;
     }
-    /* Staleout slider styling – match popup sliders */
+    
+    /* Slider Styling */
     #staleoutSlider {
       -webkit-appearance: none;
       width: 100%;
-      height: 3px;
-      background: transparent;
+      height: 4px;
+      background: rgba(99, 102, 241, 0.3);
       border: none;
+      border-radius: 2px;
       outline: none;
-    }
-    #staleoutSlider::-webkit-slider-runnable-track {
-      width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: none;
-      border-radius: 0;
     }
     #staleoutSlider::-webkit-slider-thumb {
       -webkit-appearance: none;
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
+      height: 14px;
+      width: 14px;
+      background: var(--text-green);
+      border: 2px solid var(--border-secondary);
+      margin-top: -5px;
       border-radius: 50%;
       cursor: pointer;
+      transition: all 0.15s;
     }
-    /* Firefox */
-    #staleoutSlider::-moz-range-track {
+    #staleoutSlider::-webkit-slider-thumb:hover {
+      box-shadow: 0 0 8px rgba(0, 255, 136, 0.5);
+    }
+    #staleoutSlider::-webkit-slider-runnable-track {
       width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: none;
-      border-radius: 0;
-    }
-    #staleoutSlider::-moz-range-thumb {
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
-      border-radius: 50%;
-      cursor: pointer;
-    }
-    /* IE */
-    #staleoutSlider::-ms-fill-lower,
-    #staleoutSlider::-ms-fill-upper {
-      background: #9B30FF;
+      height: 4px;
+      background: rgba(99, 102, 241, 0.3);
       border: none;
       border-radius: 2px;
     }
-    #staleoutSlider::-ms-thumb {
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
+    #staleoutSlider::-moz-range-track {
+      width: 100%;
+      height: 4px;
+      background: rgba(99, 102, 241, 0.3);
+      border: none;
+      border-radius: 2px;
+    }
+    #staleoutSlider::-moz-range-thumb {
+      height: 14px;
+      width: 14px;
+      background: var(--text-green);
+      border: 2px solid var(--border-secondary);
       border-radius: 50%;
       cursor: pointer;
-      margin-top: -6.5px;
     }
 
-    /* Popup range sliders styling */
+    /* Popup Sliders */
     .leaflet-popup-content-wrapper input[type="range"] {
       -webkit-appearance: none;
       width: 100%;
-      height: 3px;
-      background: transparent;
+      height: 4px;
+      background: rgba(99, 102, 241, 0.3);
       border: none;
+      border-radius: 2px;
     }
     .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
+      height: 14px;
+      width: 14px;
+      background: var(--text-green);
+      border: 2px solid var(--border-secondary);
+      margin-top: -5px;
       border-radius: 50%;
       cursor: pointer;
     }
-    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-thumb {
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
-      border-radius: 50%;
-      cursor: pointer;
-    }
-    /* Ensure popup sliders have the same track styling */
     .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-runnable-track {
       width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: 1px solid lime;
-      border-radius: 0;
+      height: 4px;
+      background: rgba(99, 102, 241, 0.3);
+      border: none;
+      border-radius: 2px;
     }
     .leaflet-popup-content-wrapper input[type="range"]::-moz-range-track {
       width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: 1px solid lime;
-      border-radius: 0;
+      height: 4px;
+      background: rgba(99, 102, 241, 0.3);
+      border: none;
+      border-radius: 2px;
+    }
+    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-thumb {
+      height: 14px;
+      width: 14px;
+      background: var(--text-green);
+      border: 2px solid var(--border-secondary);
+      border-radius: 50%;
+      cursor: pointer;
     }
 
-    /* 1) Remove rounded corners from all sliders */
-    /* WebKit */
-    input[type="range"]::-webkit-slider-runnable-track,
-    input[type="range"]::-webkit-slider-thumb {
-      border-radius: 0;
-    }
-    /* Firefox */
-    input[type="range"]::-moz-range-track,
-    input[type="range"]::-moz-range-thumb {
-      border-radius: 0;
-    }
-    /* IE */
-    input[type="range"]::-ms-fill-lower,
-    input[type="range"]::-ms-fill-upper,
-    input[type="range"]::-ms-thumb {
-      border-radius: 0;
-    }
-
-    /* 2) Smaller, side-by-side Observer buttons */
+    /* Observer buttons */
     .leaflet-popup-content-wrapper #lock-observer,
     .leaflet-popup-content-wrapper #unlock-observer {
       display: inline-block;
-      font-size: 0.9em;
-      padding: 4px 6px;
-      margin: 2px 4px 2px 0;
+      font-size: 0.7rem;
+      padding: 5px 8px;
+      margin: 2px 3px 2px 0;
     }
-    /* Cumulative download buttons styling to match regular download buttons */
+    
+    /* Cumulative download buttons */
+    #downloadCumulativeButtons {
+      display: flex;
+      gap: 4px;
+      margin-top: 4px;
+    }
     #downloadCumulativeButtons button {
       flex: 1;
       margin: 0;
-      padding: 4px;
-      font-size: 0.8em;
-      border: 1px solid lime;
-      border-radius: 5px;
-      background-color: #333;
-      color: lime;
-      font-family: monospace;
-      cursor: pointer;
-    }
-    #downloadCumulativeButtons button:focus {
-      outline: none;
-      caret-color: transparent;
-    }
-</style>
-    <style>
-      /* Remove glow and shadows on text boxes, selects, and buttons */
-      input, select, button {
-        text-shadow: none !important;
-        box-shadow: none !important;
+      padding: 6px 4px;
+      font-size: 0.6rem;
       }
     </style>
 </head>
 <body>
+<!-- Loading Overlay -->
+<div id="loadingOverlay" style="position:fixed;top:0;left:0;width:100%;height:100%;background:#080810;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+  <div style="color:#00ff88;font-family:'Orbitron',monospace;font-size:1.5em;margin-bottom:20px;">MESH MAPPER</div>
+  <div style="width:50px;height:50px;border:3px solid rgba(99,102,241,0.3);border-top:3px solid #00ff88;border-radius:50%;animation:spin 1s linear infinite;"></div>
+  <div style="color:#6b7280;font-size:0.8em;margin-top:15px;">Loading...</div>
+</div>
+<style>@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>
+<script>window.addEventListener('load',function(){setTimeout(function(){document.getElementById('loadingOverlay').style.display='none';},100);});</script>
+
 <div id="map"></div>
 <div id="filterBox">
   <div id="filterHeader">
     <h3>Drones</h3>
-    <span id="filterToggle" style="cursor: pointer; font-size: 20px;">[-]</span>
+    <span id="filterToggle">[-]</span>
   </div>
   <div id="filterContent">
-    <h3>Active Drones</h3>
-    <div id="activePlaceholder" class="placeholder"></div>
-    <h3>Inactive Drones</h3>
-    <div id="inactivePlaceholder" class="placeholder"></div>
-    <!-- Staleout Slider -->
-    <div style="margin-top:8px; display:flex; flex-direction:column; align-items:stretch; width:100%; box-sizing:border-box;">
-      <label style="color:lime; font-family:monospace; margin-bottom:4px; display:block; width:100%; text-align:center;">Staleout Time</label>
-      <input type="range" id="staleoutSlider" min="1" max="5" step="1" value="1" 
-             style="width:100%; border:1px solid lime; margin-bottom:4px;">
-      <div id="staleoutValue" style="color:lime; font-family:monospace; width:100%; text-align:center;">1 min</div>
+    <!-- View Mode Selector -->
+    <div style="margin-bottom:12px;">
+      <label style="color:var(--text-muted); font-size:0.65rem; margin-bottom:6px; display:block; text-transform:uppercase; letter-spacing:0.5px;">View Mode</label>
+      <select id="viewModeSelect" style="width:100%;">
+        <option value="live">Live Tracking</option>
+        <option value="session">Session History (KML)</option>
+        <option value="cumulative">All History (KML)</option>
+      </select>
     </div>
-    <!-- Downloads Section -->
+    
+    <!-- Live View Content -->
+    <div id="liveViewContent">
+      <h3>Active</h3>
+    <div id="activePlaceholder" class="placeholder"></div>
+      <h3>Inactive</h3>
+    <div id="inactivePlaceholder" class="placeholder"></div>
+      
+      <div style="margin-top:12px;">
+        <label style="color:var(--text-muted); font-size:0.65rem; margin-bottom:6px; display:block; text-transform:uppercase; letter-spacing:0.5px;">Staleout Time</label>
+        <input type="range" id="staleoutSlider" min="1" max="5" step="1" value="1">
+        <div id="staleoutValue" style="color:var(--text-cyan); font-size:0.7rem; text-align:center; margin-top:4px;">1 min</div>
+    </div>
+    </div>
+    
+    <!-- Historical View Content -->
+    <div id="historicalViewContent" style="display:none;">
+      <!-- Stats Panel -->
+      <div style="padding:10px; background:rgba(99,102,241,0.1); border:1px solid rgba(99,102,241,0.3); border-radius:6px; margin-bottom:10px;">
+        <div style="display:flex; justify-content:space-between; font-size:0.7rem;">
+          <div><span style="color:var(--text-pink);">Mode:</span> <span id="histModeLabel" style="color:var(--text-cyan);">-</span></div>
+          <div><span style="color:var(--text-pink);">Drones:</span> <span id="histDroneCount" style="color:var(--text-green);">0</span></div>
+          <div><span style="color:var(--text-pink);">Tracks:</span> <span id="histPathCount" style="color:var(--text-green);">0</span></div>
+        </div>
+        <div style="font-size:0.65rem; color:var(--text-muted); margin-top:6px;">
+          <span>Visible: <span id="histVisibleCount" style="color:var(--text-cyan);">0</span></span>
+          <span style="margin-left:10px;">Hidden: <span id="histHiddenCount" style="color:var(--text-pink);">0</span></span>
+        </div>
+      </div>
+      
+      <!-- Refresh/Clear Buttons -->
+      <div style="display:flex; gap:6px; margin-bottom:10px;">
+        <button id="refreshHistoricalBtn" style="flex:1;">Refresh Now</button>
+        <button id="clearHistoricalBtn" style="flex:1; background:rgba(240,171,252,0.1); border-color:rgba(240,171,252,0.4); color:var(--text-pink);">Clear Map</button>
+      </div>
+      
+      <!-- Date/Time Filter -->
+      <div style="margin-bottom:10px; padding:8px; background:rgba(0,0,0,0.2); border-radius:4px;">
+        <label style="color:var(--text-muted); font-size:0.6rem; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:6px;">Date/Time Filter</label>
+        <div style="display:flex; gap:4px; margin-bottom:6px;">
+          <input type="datetime-local" id="histDateFrom" style="flex:1; padding:4px; font-size:0.65rem; background:var(--bg-input); border:1px solid rgba(99,102,241,0.3); border-radius:3px; color:var(--text-cyan);">
+          <span style="color:var(--text-muted); font-size:0.7rem; align-self:center;">to</span>
+          <input type="datetime-local" id="histDateTo" style="flex:1; padding:4px; font-size:0.65rem; background:var(--bg-input); border:1px solid rgba(99,102,241,0.3); border-radius:3px; color:var(--text-cyan);">
+        </div>
+        <div style="display:flex; gap:4px;">
+          <button id="applyDateFilterBtn" style="flex:1; padding:4px; font-size:0.65rem;">Apply Filter</button>
+          <button id="clearDateFilterBtn" style="flex:1; padding:4px; font-size:0.65rem; background:transparent; border-color:rgba(240,171,252,0.4); color:var(--text-pink);">Clear</button>
+        </div>
+      </div>
+      
+      <!-- Search/Filter -->
+      <div style="margin-bottom:8px;">
+        <input type="text" id="histSearchInput" placeholder="Search MAC, OUI, alias..." style="width:100%; padding:8px; font-size:0.7rem; background:var(--bg-input); border:1px solid rgba(99,102,241,0.3); border-radius:4px; color:var(--text-cyan);">
+      </div>
+      
+      <!-- Show/Hide All + Hide Active Toggle -->
+      <div style="display:flex; gap:4px; margin-bottom:8px;">
+        <button id="showAllHistBtn" style="flex:1; padding:4px; font-size:0.65rem;">Show All</button>
+        <button id="hideAllHistBtn" style="flex:1; padding:4px; font-size:0.65rem; background:transparent; border-color:rgba(240,171,252,0.4); color:var(--text-pink);">Hide All</button>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; padding:6px; background:rgba(0,0,0,0.2); border-radius:4px;">
+        <label class="switch" style="flex-shrink:0;">
+          <input type="checkbox" id="hideActiveToggle">
+          <span class="slider"></span>
+        </label>
+        <span style="font-size:0.65rem; color:var(--text-muted);">Hide currently active drones</span>
+      </div>
+      
+      <!-- Drone List -->
+      <h3>Historical Drones</h3>
+      <div id="histDronePlaceholder" class="placeholder" style="min-height:100px; max-height:220px;"></div>
+    </div>
+    
     <div id="downloadSection">
-      <h4 class="downloadHeader">Download Logs</h4>
+      <h4 class="downloadHeader">Downloads</h4>
       <div id="downloadButtons">
         <button id="downloadCsv">CSV</button>
         <button id="downloadKml">KML</button>
         <button id="downloadAliases">Aliases</button>
       </div>
-      <div id="downloadCumulativeButtons" style="display:flex; gap:4px; justify-content:center; margin-top:4px;">
-        <button id="downloadCumulativeCsv">Cumulative CSV</button>
-        <button id="downloadCumulativeKml">Cumulative KML</button>
+      <div id="downloadCumulativeButtons">
+        <button id="downloadCumulativeCsv">All CSV</button>
+        <button id="downloadCumulativeKml">All KML</button>
       </div>
     </div>
-    <!-- Basemap Section -->
-    <div style="margin-top:4px;">
-      <h4 style="margin: 10px 0 5px 0; text-align: center; background: linear-gradient(to right, lime, yellow); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Basemap</h4>
-      <select id="layerSelect" style="background-color:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; padding:3px; font-family:monospace; font-size:0.8em; width:fit-content; max-width:calc(100% - 16px); margin:0 auto; display:block; text-align:center; text-align-last:center;">
+    
+    <div style="margin-top:12px;">
+      <h4 class="downloadHeader" style="margin-bottom:8px;">Basemap</h4>
+      <select id="layerSelect">
         <option value="osmStandard">OSM Standard</option>
         <option value="osmHumanitarian">OSM Humanitarian</option>
         <option value="cartoPositron">CartoDB Positron</option>
@@ -2360,24 +2532,14 @@ HTML_PAGE = '''
         <option value="openTopoMap">OpenTopoMap</option>
       </select>
     </div>
-    <button id="settingsButton"
-            style="display:block;
-                   width:calc(100% - 16px);
-                   margin:16px 8px 12px 8px;
-                   padding:6px;
-                   border:1px solid lime;
-                   background-color:#333;
-                   color:lime;
-                   font-family:monospace;
-                   font-size:0.9em;
-                   border-radius:5px;
-                   cursor:pointer;"
-            onclick="window.location.href='/select_ports'">
+    
+    <button id="settingsButton" onclick="window.location.href='/select_ports'" style="width:100%; margin-top:12px;">
       Settings
     </button>
-    <!-- USB Status display with modern styling -->
-    <div style="margin-top:8px; width:fit-content; max-width:calc(100% - 16px); margin:8px auto 0 auto; border: 1px solid purple; background: black; padding:4px 8px; display:flex; justify-content:center; align-items:center;">
-      <div id="serialStatus" style="font-family:monospace; font-size:0.7em; text-align:center; line-height:1.2em;">
+    
+    <div style="margin-top:12px; padding:8px; background:rgba(0,0,0,0.3); border:1px solid rgba(99,102,241,0.3); border-radius:6px;">
+      <div style="font-size:0.6rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">Device Status</div>
+      <div id="serialStatus" style="font-size:0.7rem; line-height:1.5;">
         <!-- USB port statuses will be injected here via WebSocket -->
       </div>
     </div>
@@ -2680,22 +2842,23 @@ function showTerminalPopup(det, isNew) {
   const isMobile = window.innerWidth <= 600;
   Object.assign(popup.style, {
     position: 'fixed',
-    top: isMobile ? '50px' : '10px',
+    top: isMobile ? '50px' : '12px',
     left: '50%',
     transform: 'translateX(-50%)',
-    background: 'rgba(0,0,0,0.8)',
-    color: 'lime',
-    fontFamily: 'monospace',
+    background: 'rgba(8, 8, 16, 0.95)',
+    backdropFilter: 'blur(12px)',
+    color: '#00ff88',
+    fontFamily: "'JetBrains Mono', monospace",
     whiteSpace: 'normal',
-    padding: isMobile ? '2px 4px' : '4px 8px',
-    border: '1px solid lime',
-    borderRadius: '4px',
+    padding: isMobile ? '8px 12px' : '10px 16px',
+    border: '1px solid rgba(0, 255, 136, 0.4)',
+    borderRadius: '6px',
     zIndex: 2000,
-    opacity: 0.9,
-    fontSize: isMobile ? '0.6em' : '',
-    maxWidth: isMobile ? '80vw' : 'none',
+    fontSize: isMobile ? '0.7rem' : '0.75rem',
+    maxWidth: isMobile ? '85vw' : '500px',
     display: 'inline-block',
     textAlign: 'center',
+    boxShadow: '0 4px 20px rgba(0, 0, 0, 0.5)',
   });
 
   // Build concise popup text
@@ -2705,7 +2868,7 @@ function showTerminalPopup(det, isNew) {
   if (!det.drone_lat || !det.drone_long || det.drone_lat === 0 || det.drone_long === 0) {
     header = 'Drone with no GPS lock detected';
   } else if (alias) {
-    header = `Known drone detected – ${alias}`;
+    header = `Known drone detected - ${alias}`;
   } else {
     header = isNew ? 'New drone detected' : 'Previously seen non-aliased drone detected';
   }
@@ -2715,20 +2878,22 @@ function showTerminalPopup(det, isNew) {
   // Build popup HTML and button using new logic
   // Build popup text
   const isMobileBtn = window.innerWidth <= 600;
-  const headerDiv = `<div>${content}</div>`;
+  const headerDiv = `<div style="line-height:1.4;">${content}</div>`;
   let buttonDiv = '';
   if (det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0) {
     const btnStyle = [
       'display:block',
       'width:100%',
-      'margin-top:4px',
-      'padding:' + (isMobileBtn ? '2px 0' : '4px 6px'),
-      'border:1px solid #FF00FF',
+      'margin-top:8px',
+      'padding:' + (isMobileBtn ? '6px 0' : '8px 12px'),
+      'border:1px solid rgba(240, 171, 252, 0.5)',
       'border-radius:4px',
-      'background:transparent',
-      'color:lime',
-      'font-size:' + (isMobileBtn ? '0.8em' : '0.9em'),
-      'cursor:pointer'
+      'background:rgba(240, 171, 252, 0.1)',
+      'color:#f0abfc',
+      "font-family:'JetBrains Mono', monospace",
+      'font-size:' + (isMobileBtn ? '0.7rem' : '0.75rem'),
+      'cursor:pointer',
+      'transition:all 0.15s ease'
     ].join('; ');
     buttonDiv = `<div><button id="zoomBtn" style="${btnStyle}">Zoom to Drone</button></div>`;
   }
@@ -2737,8 +2902,8 @@ function showTerminalPopup(det, isNew) {
   if (buttonDiv) {
     const zoomBtn = popup.querySelector('#zoomBtn');
     zoomBtn.addEventListener('click', () => {
-      zoomBtn.style.backgroundColor = 'purple';
-      setTimeout(() => { zoomBtn.style.backgroundColor = 'transparent'; }, 200);
+      zoomBtn.style.background = 'rgba(240, 171, 252, 0.3)';
+      setTimeout(() => { zoomBtn.style.background = 'rgba(240, 171, 252, 0.1)'; }, 200);
       safeSetView([det.drone_lat, det.drone_long]);
     });
   }
@@ -2766,9 +2931,10 @@ function generateObserverPopup() {
   var storedObserverEmoji = localStorage.getItem('observerEmoji') || "😎";
   return `
   <div>
-    <strong>Observer Location</strong><br>
-    <label for="observerEmoji">Select Observer Icon:</label>
-    <select id="observerEmoji" onchange="updateObserverEmoji()">
+    <strong style="color:#f0abfc;">Observer Location</strong><br>
+    <div style="margin:8px 0;">
+      <label for="observerEmoji" style="color:#6b7280;font-size:0.85em;display:block;margin-bottom:4px;">Icon</label>
+      <select id="observerEmoji" onchange="updateObserverEmoji()" style="width:100%;">
        <option value="😎" ${storedObserverEmoji === "😎" ? "selected" : ""}>😎</option>
        <option value="👽" ${storedObserverEmoji === "👽" ? "selected" : ""}>👽</option>
        <option value="🤖" ${storedObserverEmoji === "🤖" ? "selected" : ""}>🤖</option>
@@ -2776,13 +2942,14 @@ function generateObserverPopup() {
        <option value="🕵️‍♂️" ${storedObserverEmoji === "🕵️‍♂️" ? "selected" : ""}>🕵️‍♂️</option>
        <option value="🥷" ${storedObserverEmoji === "🥷" ? "selected" : ""}>🥷</option>
        <option value="👁️" ${storedObserverEmoji === "👁️" ? "selected" : ""}>👁️</option>
-    </select><br>
-    <div style="display:flex; gap:4px; justify-content:center; margin-top:4px;">
-        <button id="lock-observer" onclick="lockObserver()" style="background-color: ${observerLocked ? 'green' : ''};">
-          ${observerLocked ? 'Locked on Observer' : 'Lock on Observer'}
+      </select>
+    </div>
+    <div style="display:flex; gap:4px; margin-top:8px;">
+        <button id="lock-observer" onclick="lockObserver()" style="flex:1;${observerLocked ? 'background:rgba(0,255,136,0.25);border-color:var(--text-green);' : ''}">
+          ${observerLocked ? 'Locked' : 'Lock'}
         </button>
-        <button id="unlock-observer" onclick="unlockObserver()" style="background-color: ${observerLocked ? '' : 'green'};">
-          ${observerLocked ? 'Unlock Observer' : 'Unlocked Observer'}
+        <button id="unlock-observer" onclick="unlockObserver()" style="flex:1;${!observerLocked ? 'background:rgba(99,102,241,0.2);border-color:var(--border-secondary);' : ''}">
+          ${observerLocked ? 'Unlock' : 'Unlocked'}
         </button>
     </div>
   </div>
@@ -2816,16 +2983,16 @@ function updateObserverPopupButtons() {
 function generatePopupContent(detection, markerType) {
   let content = '';
   let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
-  content += '<strong>ID:</strong> <span id="aliasDisplay_' + detection.mac + '" style="color:#FF00FF;">' + aliasText + '</span> (MAC: ' + detection.mac + ')<br>';
+  content += '<strong style="color:#6b7280;">ID:</strong> <span id="aliasDisplay_' + detection.mac + '" style="color:#f0abfc;font-weight:500;">' + aliasText + '</span><br><span style="color:#6b7280;font-size:0.85em;">MAC: ' + detection.mac + '</span><br>';
   
   if (detection.basic_id || detection.faa_data) {
     if (detection.basic_id) {
-      content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div>';
+      content += '<div style="border:1px solid rgba(240,171,252,0.4); background:rgba(240,171,252,0.08); padding:6px; margin:6px 0; border-radius:4px;"><span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">' + detection.basic_id + '</span></div>';
     }
     if (detection.basic_id) {
-      content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA API</button>';
+      content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA</button>';
     }
-    content += '<div id="faaResult_' + detection.mac + '" style="margin-top:5px;">';
+    content += '<div id="faaResult_' + detection.mac + '" style="margin-top:6px;">';
     if (detection.faa_data) {
       let faaData = detection.faa_data;
       let item = null;
@@ -2834,74 +3001,71 @@ function generatePopupContent(detection, markerType) {
       }
       if (item) {
         const fields = ["makeName", "modelName", "series", "trackingNumber", "complianceCategories", "updatedAt"];
-        content += '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">';
+        content += '<div style="border:1px solid rgba(99,102,241,0.4); background:rgba(99,102,241,0.08); padding:6px; margin:6px 0; border-radius:4px; font-size:0.9em;">';
         fields.forEach(function(field) {
           let value = item[field] !== undefined ? item[field] : "";
-          content += `<div><span style="color:#FF00FF;">${field}:</span> <span style="color:#00FF00;">${value}</span></div>`;
+          content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">${field}:</span> <span style="color:#00ff88;">${value}</span></div>`;
         });
         content += '</div>';
       } else {
-        content += '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">No FAA data available</div>';
+        content += '<div style="border:1px solid rgba(99,102,241,0.3); padding:6px; margin:6px 0; border-radius:4px; color:#6b7280;">No FAA data available</div>';
       }
     }
-    content += '</div><br>';
+    content += '</div>';
   }
   
+  content += '<div style="margin:8px 0; padding:6px 0; border-top:1px solid rgba(99,102,241,0.2); font-size:0.85em;">';
   for (const key in detection) {
     if (['mac', 'basic_id', 'last_update', 'userLocked', 'lockTime', 'faa_data'].indexOf(key) === -1) {
-      content += key + ': ' + detection[key] + '<br>';
+      content += '<span style="color:#6b7280;">' + key + ':</span> <span style="color:#e0e0e0;">' + detection[key] + '</span><br>';
     }
   }
+  content += '</div>';
   
   if (detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
     content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' 
-             + detection.drone_lat + ',' + detection.drone_long + '">View Drone on Google Maps</a><br>';
+             + detection.drone_lat + ',' + detection.drone_long + '" style="color:#00ffd5;font-size:0.85em;">View Drone on Google Maps</a><br>';
   }
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
     content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' 
-             + detection.pilot_lat + ',' + detection.pilot_long + '">View Pilot on Google Maps</a><br>';
+             + detection.pilot_lat + ',' + detection.pilot_long + '" style="color:#00ffd5;font-size:0.85em;">View Pilot on Google Maps</a><br>';
   }
   
-  content += `<hr style="border: 1px solid lime;">
-              <label for="aliasInput">Alias:</label>
+  content += `<div style="border-top:1px solid rgba(99,102,241,0.3); margin-top:8px; padding-top:8px;">
+              <label for="aliasInput" style="color:#6b7280;font-size:0.85em;">Set Alias:</label>
               <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" 
-                     style="background-color: #222; color: #87CEEB; border: 1px solid #FF00FF;" 
-                     value="${aliases[detection.mac] ? aliases[detection.mac] : ''}"><br>
-              <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:4px;">
-                <button
-                  onclick="saveAlias('${detection.mac}'); this.style.backgroundColor='purple'; setTimeout(()=>this.style.backgroundColor='#333',300);"
-                  style="flex:1; margin:0 2px; padding:4px 0;"
-                >Save Alias</button>
-                <button
-                  onclick="clearAlias('${detection.mac}'); this.style.backgroundColor='purple'; setTimeout(()=>this.style.backgroundColor='#333',300);"
-                  style="flex:1; margin:0 2px; padding:4px 0;"
-                >Clear Alias</button>
+                     value="${aliases[detection.mac] ? aliases[detection.mac] : ''}" style="margin-top:4px;"><br>
+              <div style="display:flex; gap:4px; margin-top:6px;">
+                <button onclick="saveAlias('${detection.mac}'); this.style.background='rgba(0,255,136,0.2)'; setTimeout(()=>this.style.background='',200);" style="flex:1;">Save</button>
+                <button onclick="clearAlias('${detection.mac}'); this.style.background='rgba(240,171,252,0.2)'; setTimeout(()=>this.style.background='',200);" style="flex:1;">Clear</button>
+              </div>
               </div>`;
   
-  content += `<div style="border-top:2px solid lime; margin:10px 0;"></div>`;
+  content += `<div style="border-top:1px solid rgba(99,102,241,0.3); margin:8px 0; padding-top:8px;">`;
   
     var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
-    var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" style="flex:${isDroneLocked ? 1.2 : 0.8}; margin:0 2px; padding:4px 0; background-color: ${isDroneLocked ? 'green' : ''};">
-      ${isDroneLocked ? 'Locked on Drone' : 'Lock on Drone'}
+    var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" style="flex:1; ${isDroneLocked ? 'background:rgba(0,255,136,0.25);border-color:var(--text-green);' : ''}">
+      ${isDroneLocked ? 'Locked' : 'Lock Drone'}
     </button>`;
-    var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" style="flex:${isDroneLocked ? 0.8 : 1.2}; margin:0 2px; padding:4px 0; background-color: ${isDroneLocked ? '' : 'green'};">
-      ${isDroneLocked ? 'Unlock Drone' : 'Unlocked Drone'}
+    var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" style="flex:1; ${!isDroneLocked ? 'background:rgba(99,102,241,0.2);border-color:var(--border-secondary);' : ''}">
+      ${isDroneLocked ? 'Unlock' : 'Unlocked'}
     </button>`;
     var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
-    var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" style="flex:${isPilotLocked ? 1.2 : 0.8}; margin:0 2px; padding:4px 0; background-color: ${isPilotLocked ? 'green' : ''};">
-      ${isPilotLocked ? 'Locked on Pilot' : 'Lock on Pilot'}
+    var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" style="flex:1; ${isPilotLocked ? 'background:rgba(0,255,136,0.25);border-color:var(--text-green);' : ''}">
+      ${isPilotLocked ? 'Locked' : 'Lock Pilot'}
     </button>`;
-    var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" style="flex:${isPilotLocked ? 0.8 : 1.2}; margin:0 2px; padding:4px 0; background-color: ${isPilotLocked ? '' : 'green'};">
-      ${isPilotLocked ? 'Unlock Pilot' : 'Unlocked Pilot'}
+    var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" style="flex:1; ${!isPilotLocked ? 'background:rgba(99,102,241,0.2);border-color:var(--border-secondary);' : ''}">
+      ${isPilotLocked ? 'Unlock' : 'Unlocked'}
     </button>`;
     content += `
-      <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:4px;">
+      <div style="display:flex; gap:4px; margin-bottom:4px;">
         ${droneLockButton}
         ${droneUnlockButton}
       </div>
-      <div style="display:flex; align-items:center; justify-content:space-between; width:100%; margin-top:4px;">
+      <div style="display:flex; gap:4px;">
         ${pilotLockButton}
         ${pilotUnlockButton}
+      </div>
       </div>`;
   
   let defaultHue = colorOverrides[detection.mac] !== undefined ? colorOverrides[detection.mac] : (function(){
@@ -2911,8 +3075,8 @@ function generatePopupContent(detection, markerType) {
       }
       return Math.abs(hash) % 360;
   })();
-  content += `<div style="margin-top:10px;">
-    <label for="colorSlider_${detection.mac}" style="display:block; color:lime;">Color:</label>
+  content += `<div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(99,102,241,0.2);">
+    <label for="colorSlider_${detection.mac}" style="display:block; color:#6b7280; font-size:0.85em; margin-bottom:4px;">Marker Color</label>
     <input type="range" id="colorSlider_${detection.mac}" min="0" max="360" value="${defaultHue}" style="width:100%;" onchange="updateColor('${detection.mac}', this.value)">
   </div>`;
 
@@ -3809,6 +3973,1528 @@ function updateColor(mac, hue) {
   document.getElementById('downloadCumulativeKml').addEventListener('click', function() {
     window.location = '/download/cumulative.kml';
   });
+
+  // =====================
+  // Historical View Mode
+  // =====================
+  let currentViewMode = 'live';
+  let historicalDroneData = {}; // { macOrId: { name, alias, mac, color, visible, timestamp, droneMarker, pilotMarker, dronePath, pilotPath } }
+  
+  const viewModeSelect = document.getElementById('viewModeSelect');
+  const liveViewContent = document.getElementById('liveViewContent');
+  const historicalViewContent = document.getElementById('historicalViewContent');
+  const refreshHistoricalBtn = document.getElementById('refreshHistoricalBtn');
+  const clearHistoricalBtn = document.getElementById('clearHistoricalBtn');
+  const histSearchInput = document.getElementById('histSearchInput');
+  const histDronePlaceholder = document.getElementById('histDronePlaceholder');
+  const showAllHistBtn = document.getElementById('showAllHistBtn');
+  const hideAllHistBtn = document.getElementById('hideAllHistBtn');
+  const applyDateFilterBtn = document.getElementById('applyDateFilterBtn');
+  const clearDateFilterBtn = document.getElementById('clearDateFilterBtn');
+  const hideActiveToggle = document.getElementById('hideActiveToggle');
+  
+  let historicalRefreshInterval = null;
+  let isLoadingHistorical = false;
+  let hideActiveDrones = false;
+  
+  // Auto-load historical data
+  async function loadHistoricalData(fitBounds = true) {
+    if (isLoadingHistorical || currentViewMode === 'live') return;
+    isLoadingHistorical = true;
+    
+    const endpoint = currentViewMode === 'session' ? '/api/kml/session' : '/api/kml/cumulative';
+    
+    try {
+      const response = await fetch(endpoint);
+      const data = await response.json();
+      
+      if (data.status === 'ok') {
+        // Store current visibility states before clearing
+        const visibilityStates = {};
+        Object.keys(historicalDroneData).forEach(id => {
+          visibilityStates[id] = historicalDroneData[id].visible;
+        });
+        
+        clearHistoricalData();
+        parseAndPlotKML(data.kml, fitBounds);
+        
+        // Restore visibility states
+        Object.keys(visibilityStates).forEach(id => {
+          if (historicalDroneData[id] && !visibilityStates[id]) {
+            setDroneVisibility(id, false);
+          }
+        });
+        
+        updateHistoricalStats();
+        renderHistoricalDroneList();
+      }
+    } catch (error) {
+      console.error('Error loading historical KML:', error);
+    } finally {
+      isLoadingHistorical = false;
+    }
+  }
+  
+  // Start auto-refresh for historical view
+  function startHistoricalRefresh() {
+    if (historicalRefreshInterval) clearInterval(historicalRefreshInterval);
+    // Refresh every 30 seconds (was 5 - too aggressive)
+    historicalRefreshInterval = setInterval(() => {
+      loadHistoricalData(false); // Don't fit bounds on auto-refresh
+    }, 30000);
+  }
+  
+  // Stop auto-refresh
+  function stopHistoricalRefresh() {
+    if (historicalRefreshInterval) {
+      clearInterval(historicalRefreshInterval);
+      historicalRefreshInterval = null;
+    }
+  }
+  
+  viewModeSelect.addEventListener('change', function() {
+    currentViewMode = this.value;
+    
+    if (currentViewMode === 'live') {
+      liveViewContent.style.display = 'block';
+      historicalViewContent.style.display = 'none';
+      stopHistoricalRefresh();
+      clearHistoricalData();
+      // Show live markers
+      Object.values(droneMarkers).forEach(m => m.addTo(map));
+      Object.values(pilotMarkers).forEach(m => m.addTo(map));
+      Object.values(dronePolylines).forEach(p => p.addTo(map));
+      Object.values(pilotPolylines).forEach(p => p.addTo(map));
+      Object.values(droneCircles).forEach(c => c.addTo(map));
+      Object.values(pilotCircles).forEach(c => c.addTo(map));
+      if (observerMarker) observerMarker.addTo(map);
+    } else {
+      liveViewContent.style.display = 'none';
+      historicalViewContent.style.display = 'block';
+      document.getElementById('histModeLabel').textContent = currentViewMode === 'session' ? 'Session' : 'Cumulative';
+      // Hide live markers
+      Object.values(droneMarkers).forEach(m => map.removeLayer(m));
+      Object.values(pilotMarkers).forEach(m => map.removeLayer(m));
+      Object.values(dronePolylines).forEach(p => map.removeLayer(p));
+      Object.values(pilotPolylines).forEach(p => map.removeLayer(p));
+      Object.values(droneCircles).forEach(c => map.removeLayer(c));
+      Object.values(pilotCircles).forEach(c => map.removeLayer(c));
+      if (observerMarker) map.removeLayer(observerMarker);
+      // Auto-load historical data
+      loadHistoricalData(true);
+      startHistoricalRefresh();
+    }
+  });
+  
+  refreshHistoricalBtn.addEventListener('click', function() {
+    loadHistoricalData(true);
+  });
+  
+  // Hide active drones toggle
+  hideActiveToggle.addEventListener('change', function() {
+    hideActiveDrones = this.checked;
+    applyActiveFilter();
+    updateHistoricalStats();
+    renderHistoricalDroneList();
+  });
+  
+  // Apply active drone filter
+  function applyActiveFilter() {
+    if (!hideActiveDrones) return;
+    
+    // Hide drones that are currently active
+    Object.keys(historicalDroneData).forEach(id => {
+      const mac = historicalDroneData[id].mac;
+      if (isDroneActive(mac)) {
+        setDroneVisibility(id, false);
+      }
+    });
+  }
+  
+  // Check if a drone is currently active (same logic as live view)
+  function isDroneActive(mac) {
+    if (!window.tracked_pairs || !window.tracked_pairs[mac]) return false;
+    const currentTime = Date.now() / 1000;
+    const det = window.tracked_pairs[mac];
+    return det && det.last_update && ((currentTime - det.last_update) <= STALE_THRESHOLD);
+  }
+  
+  clearHistoricalBtn.addEventListener('click', function() {
+    clearHistoricalData();
+    updateHistoricalStats();
+    renderHistoricalDroneList();
+  });
+  
+  // Search filter
+  histSearchInput.addEventListener('input', function() {
+    renderHistoricalDroneList();
+  });
+  
+  // Show/Hide all
+  showAllHistBtn.addEventListener('click', function() {
+    Object.keys(historicalDroneData).forEach(id => {
+      setDroneVisibility(id, true);
+    });
+    updateHistoricalStats();
+    renderHistoricalDroneList();
+  });
+  
+  hideAllHistBtn.addEventListener('click', function() {
+    Object.keys(historicalDroneData).forEach(id => {
+      setDroneVisibility(id, false);
+    });
+    updateHistoricalStats();
+    renderHistoricalDroneList();
+  });
+  
+  // Date filter
+  applyDateFilterBtn.addEventListener('click', function() {
+    const fromDate = document.getElementById('histDateFrom').value;
+    const toDate = document.getElementById('histDateTo').value;
+    const fromTime = fromDate ? new Date(fromDate).getTime() : 0;
+    const toTime = toDate ? new Date(toDate).getTime() : Infinity;
+    
+    Object.keys(historicalDroneData).forEach(id => {
+      const drone = historicalDroneData[id];
+      const droneTime = drone.timestamp ? new Date(drone.timestamp).getTime() : Date.now();
+      const inRange = droneTime >= fromTime && droneTime <= toTime;
+      setDroneVisibility(id, inRange);
+    });
+    updateHistoricalStats();
+    renderHistoricalDroneList();
+  });
+  
+  clearDateFilterBtn.addEventListener('click', function() {
+    document.getElementById('histDateFrom').value = '';
+    document.getElementById('histDateTo').value = '';
+    Object.keys(historicalDroneData).forEach(id => {
+      setDroneVisibility(id, true);
+    });
+    updateHistoricalStats();
+    renderHistoricalDroneList();
+  });
+  
+  function setDroneVisibility(id, visible) {
+    const drone = historicalDroneData[id];
+    if (!drone) return;
+    drone.visible = visible;
+    
+    // Main markers
+    if (visible) {
+      if (drone.droneStartMarker) drone.droneStartMarker.addTo(map);
+      if (drone.droneEndMarker) drone.droneEndMarker.addTo(map);
+      if (drone.pilotStartMarker) drone.pilotStartMarker.addTo(map);
+      if (drone.pilotEndMarker) drone.pilotEndMarker.addTo(map);
+      // Start/End circles
+      if (drone.startCircle) drone.startCircle.addTo(map);
+      if (drone.endCircle) drone.endCircle.addTo(map);
+      if (drone.pilotStartCircle) drone.pilotStartCircle.addTo(map);
+      if (drone.pilotEndCircle) drone.pilotEndCircle.addTo(map);
+    } else {
+      if (drone.droneStartMarker) map.removeLayer(drone.droneStartMarker);
+      if (drone.droneEndMarker) map.removeLayer(drone.droneEndMarker);
+      if (drone.pilotStartMarker) map.removeLayer(drone.pilotStartMarker);
+      if (drone.pilotEndMarker) map.removeLayer(drone.pilotEndMarker);
+      // Start/End circles
+      if (drone.startCircle) map.removeLayer(drone.startCircle);
+      if (drone.endCircle) map.removeLayer(drone.endCircle);
+      if (drone.pilotStartCircle) map.removeLayer(drone.pilotStartCircle);
+      if (drone.pilotEndCircle) map.removeLayer(drone.pilotEndCircle);
+    }
+    
+    // Flight paths
+    if (drone.flights) {
+      drone.flights.forEach(flight => {
+        if (visible && flight.visible) {
+          if (flight.dronePath) flight.dronePath.addTo(map);
+          if (flight.pilotPath) flight.pilotPath.addTo(map);
+        } else {
+          if (flight.dronePath) map.removeLayer(flight.dronePath);
+          if (flight.pilotPath) map.removeLayer(flight.pilotPath);
+        }
+      });
+    }
+  }
+  
+  function updateHistoricalStats() {
+    const total = Object.keys(historicalDroneData).length;
+    const visible = Object.values(historicalDroneData).filter(d => d.visible).length;
+    const hidden = total - visible;
+    // Count total flights across all drones
+    let flightCount = 0;
+    Object.values(historicalDroneData).forEach(d => {
+      if (d.flights) flightCount += d.flights.length;
+    });
+    
+    document.getElementById('histDroneCount').textContent = total;
+    document.getElementById('histPathCount').textContent = flightCount;
+    document.getElementById('histVisibleCount').textContent = visible;
+    document.getElementById('histHiddenCount').textContent = hidden;
+  }
+  
+  function renderHistoricalDroneList() {
+    const searchTerm = histSearchInput.value.toLowerCase();
+    histDronePlaceholder.innerHTML = '';
+    const currentTime = Date.now() / 1000;
+    
+    const sortedIds = Object.keys(historicalDroneData).sort((a, b) => {
+      const aName = historicalDroneData[a].alias || historicalDroneData[a].mac || a;
+      const bName = historicalDroneData[b].alias || historicalDroneData[b].mac || b;
+      return aName.localeCompare(bName);
+    });
+    
+    console.log('Rendering historical drone list, IDs:', sortedIds);
+    
+    sortedIds.forEach(id => {
+      const drone = historicalDroneData[id];
+      const displayName = drone.alias || drone.mac || id;
+      const mac = drone.mac || '';
+      const oui = mac.substring(0, 8);
+      
+      // Check if this drone is currently active in live tracking (same logic as updateComboList)
+      let isActive = false;
+      let isRecent = false;
+      if (window.tracked_pairs && window.tracked_pairs[mac]) {
+        const det = window.tracked_pairs[mac];
+        isActive = det && det.last_update && ((currentTime - det.last_update) <= STALE_THRESHOLD);
+        isRecent = det && det.last_update && ((currentTime - det.last_update) <= 5);
+      }
+      
+      // Filter by search term
+      if (searchTerm && !displayName.toLowerCase().includes(searchTerm) && 
+          !mac.toLowerCase().includes(searchTerm) && !oui.toLowerCase().includes(searchTerm)) {
+        return;
+      }
+      
+      // Filter out active drones if toggle is on
+      if (hideActiveDrones && isActive) {
+        return;
+      }
+      
+      // Use EXACT same class logic as live view updateComboList
+      const item = document.createElement('div');
+      item.className = 'drone-item';
+      if (isRecent) item.classList.add('recent');
+      if (!drone.visible) {
+        item.style.opacity = '0.5';
+        item.style.textDecoration = 'line-through';
+      }
+      
+      item.textContent = displayName;
+      item.style.borderColor = drone.color;
+      item.style.color = drone.visible ? drone.color : '#555';
+      
+      // Click to toggle visibility
+      item.addEventListener('click', function(e) {
+        setDroneVisibility(id, !drone.visible);
+        updateHistoricalStats();
+        renderHistoricalDroneList();
+      });
+      
+      // Double-click to zoom
+      item.addEventListener('dblclick', function(e) {
+        e.stopPropagation();
+        if (drone.droneMarkers && drone.droneMarkers.length > 0) {
+          const latlng = drone.droneMarkers[0].getLatLng();
+          map.setView(latlng, 16);
+          drone.droneMarkers[0].openPopup();
+        }
+      });
+      
+      histDronePlaceholder.appendChild(item);
+    });
+  }
+  
+  function clearHistoricalData() {
+    // Stop any replay
+    stopReplay();
+    
+    Object.values(historicalDroneData).forEach(drone => {
+      // Main markers
+      if (drone.droneStartMarker) map.removeLayer(drone.droneStartMarker);
+      if (drone.droneEndMarker) map.removeLayer(drone.droneEndMarker);
+      if (drone.pilotStartMarker) map.removeLayer(drone.pilotStartMarker);
+      if (drone.pilotEndMarker) map.removeLayer(drone.pilotEndMarker);
+      
+      // Start/End circles
+      if (drone.startCircle) map.removeLayer(drone.startCircle);
+      if (drone.endCircle) map.removeLayer(drone.endCircle);
+      if (drone.pilotStartCircle) map.removeLayer(drone.pilotStartCircle);
+      if (drone.pilotEndCircle) map.removeLayer(drone.pilotEndCircle);
+      
+      // Flight paths
+      if (drone.flights) {
+        drone.flights.forEach(flight => {
+          if (flight.dronePath) map.removeLayer(flight.dronePath);
+          if (flight.pilotPath) map.removeLayer(flight.pilotPath);
+        });
+      }
+    });
+    historicalDroneData = {};
+    histDronePlaceholder.innerHTML = '';
+  }
+  
+  // Replay state
+  let replayState = {
+    active: false,
+    droneId: null,
+    flightIdx: null,
+    marker: null,
+    pilotMarker: null,
+    dronePath: null,
+    pilotPath: null,
+    pathIdx: 0,
+    maxLength: 0,
+    coords: [],
+    pilotCoords: [],
+    speed: 1,
+    paused: false,
+    intervalId: null,
+    droneName: '',
+    droneColor: '',
+    totalPoints: 0,
+    droneData: null
+  };
+  
+  // Generate popup for replay markers with all the details
+  function generateReplayPopup(droneData, markerType) {
+    const mac = droneData.mac || '';
+    const currentAlias = aliases[mac] || droneData.alias || '';
+    const displayName = currentAlias || mac || 'Unknown';
+    const isPilot = markerType === 'pilot';
+    const id = mac; // Use mac as id for replay
+    
+    let content = `<div style="font-family:'JetBrains Mono',monospace;width:240px;max-width:240px;box-sizing:border-box;">`;
+    
+    // Header
+    content += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+      <strong id="replayAliasDisplay_${mac}" style="color:#f0abfc;font-size:0.9em;word-break:break-all;flex:1;">${displayName}</strong>
+      <span style="color:#00ff88;font-size:0.65em;background:rgba(0,255,136,0.15);padding:2px 6px;border-radius:3px;">REPLAY</span>
+    </div>`;
+    content += `<span style="color:#6b7280;font-size:0.65em;word-break:break-all;">MAC: ${mac}</span><br>`;
+    content += `<span style="color:#00ffd5;font-size:0.65em;">${isPilot ? 'Pilot Location' : 'Drone Location'}</span>`;
+    
+    // Alias input section
+    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+      <label style="color:#6b7280;font-size:0.6em;display:block;margin-bottom:2px;">Set Alias:</label>
+      <input type="text" id="replayAliasInput_${mac}" value="${currentAlias}" onclick="event.stopPropagation();" 
+             style="width:100%;max-width:100%;box-sizing:border-box;font-size:0.65em;padding:3px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;">
+      <div style="display:flex;gap:3px;margin-top:3px;">
+        <button onclick="event.stopPropagation();saveReplayAlias('${mac}')" style="flex:1;font-size:0.55em;padding:2px;">Save</button>
+        <button onclick="event.stopPropagation();clearReplayAlias('${mac}')" style="flex:1;font-size:0.55em;padding:2px;">Clear</button>
+      </div>
+    </div>`;
+    
+    // Timestamp
+    if (droneData.timestamp) {
+      content += `<br><span style="color:#6b7280;font-size:0.6em;">${droneData.timestamp}</span>`;
+    }
+    
+    // RemoteID
+    const liveDetection = window.tracked_pairs && window.tracked_pairs[mac];
+    if (liveDetection && liveDetection.basic_id) {
+      content += `<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.65em;word-break:break-all;">
+        <span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">${liveDetection.basic_id}</span>
+      </div>`;
+    }
+    
+    // FAA data
+    if (liveDetection && liveDetection.faa_data && liveDetection.faa_data.data && liveDetection.faa_data.data.items && liveDetection.faa_data.data.items.length > 0) {
+      const item = liveDetection.faa_data.data.items[0];
+      content += `<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.6em;">`;
+      if (item.makeName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
+      if (item.modelName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
+      if (item.series) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">${item.series}</span></div>`;
+      if (item.trackingNumber) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">${item.trackingNumber}</span></div>`;
+      content += `</div>`;
+    }
+    
+    // Coordinates
+    if (droneData.droneCoords && droneData.droneCoords.length > 0) {
+      const first = droneData.droneCoords[0];
+      const last = droneData.droneCoords[droneData.droneCoords.length - 1];
+      content += `<div style="margin:6px 0;padding:4px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:0.6em;">
+        <div><span style="color:#6b7280;">Points:</span> <span style="color:#00ff88;">${droneData.droneCoords.length}</span></div>
+        <div><span style="color:#6b7280;">Start:</span> <span style="color:#e0e0e0;">${first[0].toFixed(5)}, ${first[1].toFixed(5)}</span></div>
+        <div><span style="color:#6b7280;">End:</span> <span style="color:#e0e0e0;">${last[0].toFixed(5)}, ${last[1].toFixed(5)}</span></div>
+      </div>`;
+      
+      // Google Maps links
+      content += `<div style="font-size:0.6em;margin:4px 0;">
+        <a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${first[0]},${first[1]}" style="color:#00ffd5;">Start</a> | 
+        <a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${last[0]},${last[1]}" style="color:#00ffd5;">End</a> (Maps)
+      </div>`;
+    }
+    
+    content += `</div>`;
+    return content;
+  }
+  
+  
+  // Generate popup content for historical drone with color control and replay
+  function generateHistoricalPopup(id, droneData, markerType) {
+    const displayName = droneData.alias || droneData.mac || id;
+    const mac = droneData.mac || '';
+    const isPilot = markerType.toLowerCase().includes('pilot');
+    
+    // Convert hex color to hue for slider
+    let hue = 120; // default green
+    if (droneData.color) {
+      if (droneData.color.startsWith('#')) {
+        const hex = droneData.color.slice(1);
+        const r = parseInt(hex.slice(0,2), 16) / 255;
+        const g = parseInt(hex.slice(2,4), 16) / 255;
+        const b = parseInt(hex.slice(4,6), 16) / 255;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        if (max !== min) {
+          const d = max - min;
+          let h;
+          if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+          else if (max === g) h = ((b - r) / d + 2) / 6;
+          else h = ((r - g) / d + 4) / 6;
+          hue = Math.round(h * 360);
+        }
+      } else if (droneData.color.startsWith('hsl')) {
+        const hslMatch = droneData.color.match(/hsl[(]([0-9]+)/);
+        if (hslMatch) hue = parseInt(hslMatch[1]);
+      }
+    }
+    
+    // Build flight options
+    const flightCount = droneData.flights ? droneData.flights.length : 0;
+    let flightOptions = '<option value="all">All Flights</option>';
+    if (droneData.flights) {
+      droneData.flights.forEach((f, i) => {
+        const time = f.timestamp ? ' (' + f.timestamp.split(' ')[1] + ')' : '';
+        flightOptions += '<option value="' + i + '">Flight ' + f.num + time + '</option>';
+      });
+    }
+    
+    // Get current alias from global aliases object
+    const currentAlias = aliases[mac] || droneData.alias || '';
+    const aliasDisplay = currentAlias || mac || id;
+    
+    // Start building content
+    let content = `<div style="font-family:'JetBrains Mono',monospace;width:240px;max-width:240px;box-sizing:border-box;">`;
+    
+    // Header with alias
+    content += `<strong id="histAliasDisplay_${mac}" style="color:#f0abfc;font-size:0.95em;word-break:break-all;">${aliasDisplay}</strong><br>`;
+    content += `<span style="color:#6b7280;font-size:0.7em;word-break:break-all;">MAC: ${mac}</span><br>`;
+    content += `<span style="color:#00ffd5;font-size:0.7em;">${isPilot ? 'Pilot Location' : 'Drone Location'}</span>`;
+    
+    if (droneData.timestamp) {
+      content += `<br><span style="color:#6b7280;font-size:0.65em;">${droneData.timestamp}</span>`;
+    }
+    
+    // Alias input section
+    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+      <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Set Alias:</label>
+      <input type="text" id="histAliasInput_${mac}" value="${currentAlias}" onclick="event.stopPropagation();" 
+             style="width:100%;max-width:100%;box-sizing:border-box;font-size:0.7em;padding:4px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;">
+      <div style="display:flex;gap:3px;margin-top:4px;">
+        <button onclick="event.stopPropagation();saveHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.6em;padding:3px;">Save</button>
+        <button onclick="event.stopPropagation();clearHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.6em;padding:3px;">Clear</button>
+      </div>
+    </div>`;
+    
+    // Check for RemoteID from live detection data
+    const liveDetection = window.tracked_pairs && window.tracked_pairs[mac];
+    if (liveDetection && liveDetection.basic_id) {
+      content += `<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.7em;word-break:break-all;">
+        <span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">${liveDetection.basic_id}</span>
+      </div>`;
+    }
+    
+    // FAA Data section
+    if (liveDetection && liveDetection.faa_data && liveDetection.faa_data.data && liveDetection.faa_data.data.items && liveDetection.faa_data.data.items.length > 0) {
+      const item = liveDetection.faa_data.data.items[0];
+      content += `<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.65em;">`;
+      if (item.makeName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
+      if (item.modelName) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
+      if (item.series) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">${item.series}</span></div>`;
+      if (item.trackingNumber) content += `<div style="margin:1px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">${item.trackingNumber}</span></div>`;
+      content += `</div>`;
+    }
+    
+    // Coordinates info
+    if (droneData.droneCoords && droneData.droneCoords.length > 0) {
+      const first = droneData.droneCoords[0];
+      const last = droneData.droneCoords[droneData.droneCoords.length - 1];
+      content += `<div style="margin:6px 0;padding:4px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:0.65em;">
+        <div><span style="color:#6b7280;">Points:</span> <span style="color:#00ff88;">${droneData.droneCoords.length}</span></div>
+        <div><span style="color:#6b7280;">Start:</span> <span style="color:#e0e0e0;">${first[0].toFixed(5)}, ${first[1].toFixed(5)}</span></div>
+        <div><span style="color:#6b7280;">End:</span> <span style="color:#e0e0e0;">${last[0].toFixed(5)}, ${last[1].toFixed(5)}</span></div>
+      </div>`;
+      
+      // Google Maps links
+      content += `<div style="font-size:0.65em;margin:4px 0;">
+        <a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${first[0]},${first[1]}" style="color:#00ffd5;">Start</a> | 
+        <a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${last[0]},${last[1]}" style="color:#00ffd5;">End</a> (Maps)
+      </div>`;
+    }
+    
+    // Track Color slider
+    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+      <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Track Color</label>
+      <input type="range" id="histColorSlider_${id}" min="0" max="360" value="${hue}" 
+             style="width:100%;max-width:100%;box-sizing:border-box;" onchange="updateHistoricalColor('${id}', this.value)">
+    </div>`;
+    
+    // Flights section
+    if (flightCount > 0) {
+      content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+        <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Flights (${flightCount})</label>
+        <select id="flightSelect_${id}" style="width:100%;max-width:100%;font-size:0.65em;padding:3px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;box-sizing:border-box;" onchange="filterFlight('${id}', this.value)">
+          ${flightOptions}
+        </select>
+      </div>`;
+      
+      // Replay controls
+      content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+        <label style="color:#00ff88;font-size:0.65em;display:block;margin-bottom:3px;">Replay</label>
+        <div style="display:flex;gap:3px;margin-bottom:3px;">
+          <button onclick="event.stopPropagation();startReplay('${id}')" style="flex:1;font-size:0.6em;padding:3px;">▶ Play</button>
+          <button onclick="event.stopPropagation();pauseReplay()" style="flex:1;font-size:0.6em;padding:3px;">⏸</button>
+          <button onclick="event.stopPropagation();stopReplay()" style="flex:1;font-size:0.6em;padding:3px;">⏹</button>
+        </div>
+        <div style="display:flex;gap:2px;">
+          <button onclick="event.stopPropagation();setReplaySpeed(0.5)" style="flex:1;font-size:0.55em;padding:2px;">0.5x</button>
+          <button onclick="event.stopPropagation();setReplaySpeed(1)" style="flex:1;font-size:0.55em;padding:2px;">1x</button>
+          <button onclick="event.stopPropagation();setReplaySpeed(2)" style="flex:1;font-size:0.55em;padding:2px;">2x</button>
+          <button onclick="event.stopPropagation();setReplaySpeed(5)" style="flex:1;font-size:0.55em;padding:2px;">5x</button>
+        </div>
+      </div>`;
+    }
+    
+    // Show/Hide and Zoom buttons
+    content += `<div style="display:flex;gap:4px;margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);">
+      <button onclick="event.stopPropagation();toggleHistoricalVisibility('${id}')" style="flex:1;font-size:0.65em;padding:4px;">${droneData.visible ? 'Hide' : 'Show'}</button>
+      <button onclick="event.stopPropagation();zoomToHistoricalDrone('${id}')" style="flex:1;font-size:0.65em;padding:4px;">Zoom</button>
+    </div>`;
+    
+    content += `</div>`;
+    return content;
+  }
+  
+  // Filter to show only specific flight paths (markers stay visible)
+  window.filterFlight = function(id, flightVal) {
+    const drone = historicalDroneData[id];
+    if (!drone || !drone.flights) return;
+    
+    drone.flights.forEach((flight, idx) => {
+      const show = (flightVal === 'all' || parseInt(flightVal) === idx);
+      flight.visible = show;
+      
+      // Only toggle paths - markers are always visible if drone is visible
+      if (show && drone.visible) {
+        if (flight.dronePath) flight.dronePath.addTo(map);
+        if (flight.pilotPath) flight.pilotPath.addTo(map);
+      } else {
+        if (flight.dronePath) map.removeLayer(flight.dronePath);
+        if (flight.pilotPath) map.removeLayer(flight.pilotPath);
+      }
+    });
+  };
+  
+  // Save alias from historical popup
+  window.saveHistoricalAlias = async function(mac, id) {
+    const input = document.getElementById('histAliasInput_' + mac);
+    if (!input) return;
+    
+    const alias = input.value.trim();
+    try {
+      const response = await fetch(window.location.origin + '/api/set_alias', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mac: mac, alias: alias})
+      });
+      const data = await response.json();
+      if (data.status === "ok") {
+        // Update global alias map
+        aliases[mac] = alias;
+        
+        // Update historical drone data
+        if (historicalDroneData[id]) {
+          historicalDroneData[id].alias = alias;
+        }
+        
+        // Update display in popup
+        const displayEl = document.getElementById('histAliasDisplay_' + mac);
+        if (displayEl) {
+          displayEl.textContent = alias || mac;
+          displayEl.style.backgroundColor = 'rgba(0,255,136,0.2)';
+          setTimeout(() => displayEl.style.backgroundColor = '', 300);
+        }
+        
+        // Update historical drone list
+        renderHistoricalDroneList();
+        
+        // Also update live view if applicable
+        updateAliases();
+        updateComboList(window.tracked_pairs);
+        
+        console.log('Alias saved:', mac, alias);
+      }
+    } catch(e) {
+      console.error('Error saving alias:', e);
+    }
+  };
+  
+  // Clear alias from historical popup
+  window.clearHistoricalAlias = async function(mac, id) {
+    try {
+      const response = await fetch(window.location.origin + '/api/set_alias', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mac: mac, alias: ''})
+      });
+      const data = await response.json();
+      if (data.status === "ok") {
+        // Clear from global alias map
+        delete aliases[mac];
+        
+        // Update historical drone data
+        if (historicalDroneData[id]) {
+          historicalDroneData[id].alias = '';
+        }
+        
+        // Clear input and update display
+        const input = document.getElementById('histAliasInput_' + mac);
+        if (input) input.value = '';
+        
+        const displayEl = document.getElementById('histAliasDisplay_' + mac);
+        if (displayEl) {
+          displayEl.textContent = mac;
+          displayEl.style.backgroundColor = 'rgba(240,171,252,0.2)';
+          setTimeout(() => displayEl.style.backgroundColor = '', 300);
+        }
+        
+        // Update historical drone list
+        renderHistoricalDroneList();
+        
+        // Also update live view if applicable
+        updateAliases();
+        updateComboList(window.tracked_pairs);
+        
+        console.log('Alias cleared:', mac);
+      }
+    } catch(e) {
+      console.error('Error clearing alias:', e);
+    }
+  };
+  
+  // Save alias from replay popup
+  window.saveReplayAlias = async function(mac) {
+    const input = document.getElementById('replayAliasInput_' + mac);
+    if (!input) return;
+    
+    const alias = input.value.trim();
+    try {
+      const response = await fetch(window.location.origin + '/api/set_alias', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mac: mac, alias: alias})
+      });
+      const data = await response.json();
+      if (data.status === "ok") {
+        // Update global alias map
+        aliases[mac] = alias;
+        
+        // Update historical drone data if exists
+        if (historicalDroneData[mac]) {
+          historicalDroneData[mac].alias = alias;
+        }
+        
+        // Update replay state
+        if (replayState.droneData) {
+          replayState.droneData.alias = alias;
+          replayState.droneName = alias || mac;
+        }
+        
+        // Update display in popup
+        const displayEl = document.getElementById('replayAliasDisplay_' + mac);
+        if (displayEl) {
+          displayEl.textContent = alias || mac;
+          displayEl.style.backgroundColor = 'rgba(0,255,136,0.2)';
+          setTimeout(() => displayEl.style.backgroundColor = '', 300);
+        }
+        
+        // Update control bar
+        showReplayControls();
+        
+        // Update lists
+        renderHistoricalDroneList();
+        updateAliases();
+        updateComboList(window.tracked_pairs);
+        
+        console.log('Replay alias saved:', mac, alias);
+      }
+    } catch(e) {
+      console.error('Error saving replay alias:', e);
+    }
+  };
+  
+  // Clear alias from replay popup
+  window.clearReplayAlias = async function(mac) {
+    try {
+      const response = await fetch(window.location.origin + '/api/set_alias', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mac: mac, alias: ''})
+      });
+      const data = await response.json();
+      if (data.status === "ok") {
+        // Clear from global alias map
+        delete aliases[mac];
+        
+        // Update historical drone data if exists
+        if (historicalDroneData[mac]) {
+          historicalDroneData[mac].alias = '';
+        }
+        
+        // Update replay state
+        if (replayState.droneData) {
+          replayState.droneData.alias = '';
+          replayState.droneName = mac;
+        }
+        
+        // Clear input and update display
+        const input = document.getElementById('replayAliasInput_' + mac);
+        if (input) input.value = '';
+        
+        const displayEl = document.getElementById('replayAliasDisplay_' + mac);
+        if (displayEl) {
+          displayEl.textContent = mac;
+          displayEl.style.backgroundColor = 'rgba(240,171,252,0.2)';
+          setTimeout(() => displayEl.style.backgroundColor = '', 300);
+        }
+        
+        // Update control bar
+        showReplayControls();
+        
+        // Update lists
+        renderHistoricalDroneList();
+        updateAliases();
+        updateComboList(window.tracked_pairs);
+        
+        console.log('Replay alias cleared:', mac);
+      }
+    } catch(e) {
+      console.error('Error clearing replay alias:', e);
+    }
+  };
+  
+  // Start replay - simulates both drone and pilot paths simultaneously
+  window.startReplay = function(id) {
+    const drone = historicalDroneData[id];
+    if (!drone || !drone.flights) return;
+    
+    // Stop any existing replay
+    stopReplay();
+    
+    // Get selected flight or all flights
+    const selectEl = document.getElementById('flightSelect_' + id);
+    const flightVal = selectEl ? selectEl.value : 'all';
+    replayState.flightIdx = flightVal;
+    
+    // Collect path coordinates
+    let droneCoords = [];
+    let pilotCoords = [];
+    
+    if (flightVal === 'all') {
+      drone.flights.forEach(f => {
+        if (f.droneCoords && f.droneCoords.length > 0) {
+          droneCoords = droneCoords.concat(f.droneCoords);
+        } else if (f.dronePath) {
+          droneCoords = droneCoords.concat(f.dronePath.getLatLngs());
+        }
+        if (f.pilotCoords && f.pilotCoords.length > 0) {
+          pilotCoords = pilotCoords.concat(f.pilotCoords);
+        } else if (f.pilotPath) {
+          pilotCoords = pilotCoords.concat(f.pilotPath.getLatLngs());
+        }
+      });
+    } else {
+      const flight = drone.flights[parseInt(flightVal)];
+      if (flight) {
+        if (flight.droneCoords && flight.droneCoords.length > 0) {
+          droneCoords = flight.droneCoords;
+        } else if (flight.dronePath) {
+          droneCoords = flight.dronePath.getLatLngs();
+        }
+        if (flight.pilotCoords && flight.pilotCoords.length > 0) {
+          pilotCoords = flight.pilotCoords;
+        } else if (flight.pilotPath) {
+          pilotCoords = flight.pilotPath.getLatLngs();
+        }
+      }
+    }
+    
+    if (droneCoords.length === 0 && pilotCoords.length === 0) {
+      console.log('No path data to replay');
+      return;
+    }
+    
+    // Hide static start/end markers and circles during replay
+    if (drone.droneStartMarker) map.removeLayer(drone.droneStartMarker);
+    if (drone.droneEndMarker) map.removeLayer(drone.droneEndMarker);
+    if (drone.pilotStartMarker) map.removeLayer(drone.pilotStartMarker);
+    if (drone.pilotEndMarker) map.removeLayer(drone.pilotEndMarker);
+    if (drone.startCircle) map.removeLayer(drone.startCircle);
+    if (drone.endCircle) map.removeLayer(drone.endCircle);
+    if (drone.pilotStartCircle) map.removeLayer(drone.pilotStartCircle);
+    if (drone.pilotEndCircle) map.removeLayer(drone.pilotEndCircle);
+    
+    // Hide existing flight paths - we'll show replay paths instead
+    if (drone.flights) {
+      drone.flights.forEach(f => {
+        if (f.dronePath) map.removeLayer(f.dronePath);
+        if (f.pilotPath) map.removeLayer(f.pilotPath);
+      });
+    }
+    
+    // Use the longer path as the reference for timing
+    const maxLength = Math.max(droneCoords.length, pilotCoords.length);
+    
+    // Store drone info for popup
+    replayState.droneName = drone.alias || drone.mac;
+    replayState.droneColor = drone.color;
+    replayState.totalPoints = droneCoords.length;
+    
+    // Add coords to drone for popup
+    drone.droneCoords = droneCoords;
+    drone.pilotCoords = pilotCoords;
+    replayState.droneData = drone;
+    
+    // Create replay path polylines (show the track during replay!)
+    if (droneCoords.length > 1) {
+      replayState.dronePath = L.polyline(droneCoords, {
+        color: drone.color || '#00ff88',
+        weight: 3,
+        opacity: 0.8
+      }).addTo(map);
+    }
+    if (pilotCoords.length > 1) {
+      replayState.pilotPath = L.polyline(pilotCoords, {
+        color: drone.color || '#00ffd5',
+        weight: 2,
+        opacity: 0.6,
+        dashArray: '5, 5'
+      }).addTo(map);
+    }
+    
+    // Create drone replay marker with full popup
+    if (droneCoords.length > 0) {
+      replayState.marker = L.marker(droneCoords[0], {
+        icon: createIcon('🛸', drone.color),
+        zIndexOffset: 1000
+      }).bindPopup(generateReplayPopup(drone, 'drone'), {autoPan: false, maxWidth: 280}).addTo(map);
+    }
+    
+    // Create pilot replay marker with full popup
+    if (pilotCoords.length > 0) {
+      replayState.pilotMarker = L.marker(pilotCoords[0], {
+        icon: createIcon('👤', drone.color),
+        zIndexOffset: 1000
+      }).bindPopup(generateReplayPopup(drone, 'pilot'), {autoPan: false, maxWidth: 280}).addTo(map);
+    }
+    
+    // Store state
+    replayState.active = true;
+    replayState.droneId = id;
+    replayState.pathIdx = 0;
+    replayState.paused = false;
+    replayState.coords = droneCoords;
+    replayState.pilotCoords = pilotCoords;
+    replayState.maxLength = maxLength;
+    
+    // Zoom to include both start points
+    const startBounds = [];
+    if (droneCoords.length > 0) startBounds.push(droneCoords[0]);
+    if (pilotCoords.length > 0) startBounds.push(pilotCoords[0]);
+    if (startBounds.length > 0) {
+      map.fitBounds(startBounds, { padding: [50, 50], maxZoom: 18 });
+    }
+    
+    // Close any open popups
+    map.closePopup();
+    
+    // Show floating control bar
+    showReplayControls();
+    
+    // Start animation - both markers move together through their respective paths
+    const baseInterval = 100; // ms per point at 1x speed
+    replayState.intervalId = setInterval(() => {
+      if (replayState.paused) return;
+      
+      replayState.pathIdx++;
+      
+      if (replayState.pathIdx >= replayState.maxLength) {
+        stopReplay();
+        return;
+      }
+      
+      // Move drone marker
+      if (replayState.marker && replayState.coords.length > 0) {
+        const droneIdx = Math.min(replayState.pathIdx, replayState.coords.length - 1);
+        replayState.marker.setLatLng(replayState.coords[droneIdx]);
+        
+        // Update control bar progress
+        updateReplayProgress(droneIdx + 1, replayState.totalPoints);
+      }
+      
+      // Move pilot marker
+      if (replayState.pilotMarker && replayState.pilotCoords.length > 0) {
+        const pilotIdx = Math.min(replayState.pathIdx, replayState.pilotCoords.length - 1);
+        replayState.pilotMarker.setLatLng(replayState.pilotCoords[pilotIdx]);
+      }
+      
+    }, baseInterval / replayState.speed);
+    
+    console.log('Replay started:', droneCoords.length, 'drone points,', pilotCoords.length, 'pilot points');
+  };
+  
+  // Create floating replay control bar
+  function showReplayControls() {
+    // Remove existing if any
+    let existing = document.getElementById('replayControlBar');
+    if (existing) existing.remove();
+    
+    const bar = document.createElement('div');
+    bar.id = 'replayControlBar';
+    bar.style.cssText = `
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(13, 13, 24, 0.92);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(0, 255, 136, 0.4);
+      border-radius: 12px;
+      padding: 12px 20px;
+      z-index: 10000;
+      font-family: 'JetBrains Mono', monospace;
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    `;
+    
+    // Get flight info
+    const flightInfo = replayState.flightIdx !== null && replayState.flightIdx !== 'all' 
+      ? `Flight ${parseInt(replayState.flightIdx) + 1}` 
+      : 'All Flights';
+    
+    bar.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:2px;">
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="color:#00ff88;font-size:0.7em;text-transform:uppercase;letter-spacing:1px;">REPLAY</span>
+          <span style="color:#f0abfc;font-size:0.85em;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${replayState.droneName}</span>
+        </div>
+        <span style="color:#6b7280;font-size:0.65em;">${flightInfo} | ${replayState.totalPoints} pts</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button id="replayPlayPauseBtn" onclick="pauseReplay()" style="background:rgba(0,255,136,0.15);border:1px solid rgba(0,255,136,0.4);color:#00ff88;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:1em;">⏸</button>
+        <button onclick="stopReplay()" style="background:rgba(255,68,68,0.15);border:1px solid rgba(255,68,68,0.4);color:#ff4444;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:1em;">⏹</button>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;min-width:100px;">
+        <span id="replayProgressText" style="color:#00ffd5;font-size:0.75em;">1 / ${replayState.totalPoints}</span>
+        <div style="width:100px;height:4px;background:rgba(99,102,241,0.3);border-radius:2px;margin-top:4px;">
+          <div id="replayProgressBar" style="width:0%;height:100%;background:#00ff88;border-radius:2px;transition:width 0.1s;"></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:4px;">
+        <button onclick="setReplaySpeed(0.5)" style="background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.4);color:#e0e0e0;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:0.7em;">½x</button>
+        <button onclick="setReplaySpeed(1)" style="background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.4);color:#e0e0e0;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:0.7em;">1x</button>
+        <button onclick="setReplaySpeed(2)" style="background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.4);color:#e0e0e0;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:0.7em;">2x</button>
+        <button onclick="setReplaySpeed(5)" style="background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.4);color:#e0e0e0;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:0.7em;">5x</button>
+      </div>
+    `;
+    
+    document.body.appendChild(bar);
+  }
+  
+  // Update replay progress display
+  function updateReplayProgress(current, total) {
+    const textEl = document.getElementById('replayProgressText');
+    const barEl = document.getElementById('replayProgressBar');
+    if (textEl) textEl.textContent = current + ' / ' + total;
+    if (barEl) barEl.style.width = ((current / total) * 100) + '%';
+  }
+  
+  // Hide replay controls
+  function hideReplayControls() {
+    const bar = document.getElementById('replayControlBar');
+    if (bar) bar.remove();
+  }
+  
+  // Pause replay
+  window.pauseReplay = function() {
+    replayState.paused = !replayState.paused;
+    console.log('Replay', replayState.paused ? 'paused' : 'resumed');
+    
+    // Update control bar button
+    const btn = document.getElementById('replayPlayPauseBtn');
+    if (btn) {
+      btn.textContent = replayState.paused ? '▶' : '⏸';
+    }
+  };
+  
+  // Stop replay
+  window.stopReplay = function() {
+    if (replayState.intervalId) {
+      clearInterval(replayState.intervalId);
+      replayState.intervalId = null;
+    }
+    
+    // Hide control bar
+    hideReplayControls();
+    
+    // Remove markers
+    if (replayState.marker) {
+      map.removeLayer(replayState.marker);
+      replayState.marker = null;
+    }
+    if (replayState.pilotMarker) {
+      map.removeLayer(replayState.pilotMarker);
+      replayState.pilotMarker = null;
+    }
+    
+    // Remove replay paths
+    if (replayState.dronePath) {
+      map.removeLayer(replayState.dronePath);
+      replayState.dronePath = null;
+    }
+    if (replayState.pilotPath) {
+      map.removeLayer(replayState.pilotPath);
+      replayState.pilotPath = null;
+    }
+    
+    // Restore static markers and circles for the drone that was being replayed
+    if (replayState.droneId) {
+      const drone = historicalDroneData[replayState.droneId];
+      if (drone && drone.visible) {
+        if (drone.droneStartMarker) drone.droneStartMarker.addTo(map);
+        if (drone.droneEndMarker) drone.droneEndMarker.addTo(map);
+        if (drone.pilotStartMarker) drone.pilotStartMarker.addTo(map);
+        if (drone.pilotEndMarker) drone.pilotEndMarker.addTo(map);
+        if (drone.startCircle) drone.startCircle.addTo(map);
+        if (drone.endCircle) drone.endCircle.addTo(map);
+        if (drone.pilotStartCircle) drone.pilotStartCircle.addTo(map);
+        if (drone.pilotEndCircle) drone.pilotEndCircle.addTo(map);
+        // Also restore flight paths
+        if (drone.flights) {
+          drone.flights.forEach(f => {
+            if (f.visible !== false) {
+              if (f.dronePath) f.dronePath.addTo(map);
+              if (f.pilotPath) f.pilotPath.addTo(map);
+            }
+          });
+        }
+      }
+    }
+    
+    replayState.active = false;
+    replayState.paused = false;
+    replayState.pathIdx = 0;
+    replayState.droneId = null;
+    replayState.droneData = null;
+    console.log('Replay stopped');
+  };
+  
+  // Set replay speed
+  window.setReplaySpeed = function(speed) {
+    replayState.speed = speed;
+    console.log('Replay speed set to', speed + 'x');
+    
+    // Restart interval with new speed if playing
+    if (replayState.active && replayState.intervalId) {
+      clearInterval(replayState.intervalId);
+      const baseInterval = 100;
+      replayState.intervalId = setInterval(() => {
+        if (replayState.paused) return;
+        
+        replayState.pathIdx++;
+        
+        if (replayState.pathIdx >= replayState.maxLength) {
+          stopReplay();
+          return;
+        }
+        
+        // Move drone marker
+        if (replayState.marker && replayState.coords.length > 0) {
+          const droneIdx = Math.min(replayState.pathIdx, replayState.coords.length - 1);
+          replayState.marker.setLatLng(replayState.coords[droneIdx]);
+          updateReplayProgress(droneIdx + 1, replayState.totalPoints);
+        }
+        
+        // Move pilot marker
+        if (replayState.pilotMarker && replayState.pilotCoords.length > 0) {
+          const pilotIdx = Math.min(replayState.pathIdx, replayState.pilotCoords.length - 1);
+          replayState.pilotMarker.setLatLng(replayState.pilotCoords[pilotIdx]);
+        }
+      }, baseInterval / replayState.speed);
+    }
+  };
+  
+  // Update color for historical drone
+  window.updateHistoricalColor = function(id, hue) {
+    const drone = historicalDroneData[id];
+    if (!drone) return;
+    
+    hue = parseInt(hue);
+    const newColor = 'hsl(' + hue + ', 70%, 50%)';
+    drone.color = newColor;
+    
+    // Update main markers
+    if (drone.droneStartMarker) drone.droneStartMarker.setIcon(createIcon('🛸', newColor));
+    if (drone.droneEndMarker) drone.droneEndMarker.setIcon(createIcon('🛸', newColor));
+    if (drone.pilotStartMarker) drone.pilotStartMarker.setIcon(createIcon('👤', newColor));
+    if (drone.pilotEndMarker) drone.pilotEndMarker.setIcon(createIcon('👤', newColor));
+    
+    // Update flight paths
+    if (drone.flights) {
+      drone.flights.forEach(flight => {
+        if (flight.dronePath) flight.dronePath.setStyle({ color: newColor });
+        if (flight.pilotPath) flight.pilotPath.setStyle({ color: newColor });
+      });
+    }
+    
+    // Update list item
+    renderHistoricalDroneList();
+  };
+  
+  // Toggle visibility from popup
+  window.toggleHistoricalVisibility = function(id) {
+    const drone = historicalDroneData[id];
+    if (!drone) return;
+    setDroneVisibility(id, !drone.visible);
+    updateHistoricalStats();
+    renderHistoricalDroneList();
+  };
+  
+  // Zoom to drone from popup
+  window.zoomToHistoricalDrone = function(id) {
+    const drone = historicalDroneData[id];
+    if (!drone) return;
+    
+    if (drone.droneStartMarker) {
+      map.setView(drone.droneStartMarker.getLatLng(), 16);
+      drone.droneStartMarker.openPopup();
+    } else if (drone.droneEndMarker) {
+      map.setView(drone.droneEndMarker.getLatLng(), 16);
+    }
+  };
+  
+  function parseAndPlotKML(kmlString, fitBounds = true) {
+    const bounds = [];
+    
+    // First pass: collect all flights per drone
+    const droneFlightsRaw = {}; // { id: { mac, color, flights: [ {num, timestamp, droneStart, droneEnd, pilotStart, pilotEnd, dronePath, pilotPath} ] } }
+    
+    // Use regex to extract all Folder blocks with their content
+    const folderRegex = /<Folder>([\s\S]*?)<\/Folder>/g;
+    let folderMatch;
+    let folderCount = 0;
+    
+    while ((folderMatch = folderRegex.exec(kmlString)) !== null) {
+      folderCount++;
+      const folderContent = folderMatch[1];
+      
+      // Extract folder name
+      const nameMatch = folderContent.match(/<name>([^<]+)<\/name>/);
+      const folderName = nameMatch ? nameMatch[1] : 'Unknown';
+      
+      // Extract MAC from folder name
+      const macMatch = folderName.match(/([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})/i);
+      if (!macMatch) continue;
+      
+      const mac = macMatch[1].toLowerCase();
+      const id = mac.replace(/:/g, '');
+      
+      // Extract flight number
+      const flightNumMatch = folderName.match(/Flight\s+(\d+)/i);
+      const flightNum = flightNumMatch ? parseInt(flightNumMatch[1]) : 1;
+      
+      // Extract color from LineStyle or IconStyle
+      let color = '#00ff88';
+      const colorMatch = folderContent.match(/<color>([a-fA-F0-9]{8})<\/color>/);
+      if (colorMatch) {
+        const kmlColor = colorMatch[1];
+        color = '#' + kmlColor.slice(6, 8) + kmlColor.slice(4, 6) + kmlColor.slice(2, 4);
+      }
+      
+      // Extract timestamp
+      const timeMatch = folderName.match(/\((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)/);
+      const timestamp = timeMatch ? timeMatch[1] : null;
+      
+      // Initialize drone entry
+      if (!droneFlightsRaw[id]) {
+        droneFlightsRaw[id] = {
+          mac: mac,
+          color: color,
+          flights: []
+        };
+      }
+      
+      // Create flight entry
+      const flightEntry = {
+        num: flightNum,
+        timestamp: timestamp,
+        droneStart: null,
+        droneEnd: null,
+        pilotStart: null,
+        pilotEnd: null,
+        dronePath: null,
+        pilotPath: null,
+        visible: true
+      };
+      
+      // Extract all Placemarks
+      const placemarkRegex = /<Placemark>([\s\S]*?)<\/Placemark>/g;
+      let pmMatch;
+      
+      while ((pmMatch = placemarkRegex.exec(folderContent)) !== null) {
+        const pmContent = pmMatch[1];
+        const pmNameMatch = pmContent.match(/<name>([^<]*)<\/name>/);
+        const pmName = pmNameMatch ? pmNameMatch[1] : '';
+        const nameLower = pmName.toLowerCase();
+        const isDrone = nameLower.includes('drone');
+        const isPilot = nameLower.includes('pilot');
+        const isStart = nameLower.includes('start');
+        const isEnd = nameLower.includes('end');
+        
+        // Check for Point (marker)
+        const pointMatch = pmContent.match(/<Point>[\s\S]*?<coordinates>([^<]+)<\/coordinates>[\s\S]*?<\/Point>/);
+        if (pointMatch) {
+          const coords = pointMatch[1].trim().split(',');
+          if (coords.length >= 2) {
+            const lng = parseFloat(coords[0]);
+            const lat = parseFloat(coords[1]);
+            
+            if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
+              bounds.push([lat, lng]);
+              
+              if (isPilot) {
+                if (isStart) flightEntry.pilotStart = { lat, lng };
+                if (isEnd) flightEntry.pilotEnd = { lat, lng };
+              } else {
+                if (isStart) flightEntry.droneStart = { lat, lng };
+                if (isEnd) flightEntry.droneEnd = { lat, lng };
+              }
+            }
+          }
+        }
+        
+        // Check for LineString (path)
+        const lineMatch = pmContent.match(/<LineString>[\s\S]*?<coordinates>([^<]+)<\/coordinates>[\s\S]*?<\/LineString>/);
+        if (lineMatch) {
+          const coordsText = lineMatch[1].trim();
+          const coordPairs = coordsText.split(/\s+/).filter(c => c.length > 0);
+          const pathCoords = [];
+          
+          coordPairs.forEach(pair => {
+            const parts = pair.split(',');
+            if (parts.length >= 2) {
+              const lng = parseFloat(parts[0]);
+              const lat = parseFloat(parts[1]);
+              if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
+                pathCoords.push([lat, lng]);
+                bounds.push([lat, lng]);
+              }
+            }
+          });
+          
+          if (pathCoords.length > 1) {
+            if (isPilot) {
+              flightEntry.pilotPath = pathCoords;
+            } else {
+              flightEntry.dronePath = pathCoords;
+            }
+          }
+        }
+      }
+      
+      droneFlightsRaw[id].flights.push(flightEntry);
+    }
+    
+    // Second pass: create markers and polylines for each drone
+    Object.keys(droneFlightsRaw).forEach(id => {
+      const droneRaw = droneFlightsRaw[id];
+      const mac = droneRaw.mac;
+      
+      // Sort flights by number
+      droneRaw.flights.sort((a, b) => a.num - b.num);
+      
+      // Get first start and last end positions
+      let firstDroneStart = null;
+      let lastDroneEnd = null;
+      let firstPilotStart = null;
+      let lastPilotEnd = null;
+      
+      droneRaw.flights.forEach(f => {
+        if (f.droneStart && !firstDroneStart) firstDroneStart = f.droneStart;
+        if (f.droneEnd) lastDroneEnd = f.droneEnd;
+        if (f.pilotStart && !firstPilotStart) firstPilotStart = f.pilotStart;
+        if (f.pilotEnd) lastPilotEnd = f.pilotEnd;
+      });
+      
+      // Create historicalDroneData entry
+      if (!historicalDroneData[id]) {
+        historicalDroneData[id] = {
+          name: mac,
+          mac: mac,
+          alias: aliases[mac] || null,
+          color: droneRaw.color,
+          visible: true,
+          timestamp: droneRaw.flights.length > 0 ? droneRaw.flights[droneRaw.flights.length - 1].timestamp : null,
+          flights: [],
+          droneStartMarker: null,
+          droneEndMarker: null,
+          pilotStartMarker: null,
+          pilotEndMarker: null
+        };
+      }
+      
+      const droneData = historicalDroneData[id];
+      
+      // Store start/end positions for circles
+      droneData.startPos = firstDroneStart;
+      droneData.endPos = lastDroneEnd;
+      droneData.pilotStartPos = firstPilotStart;
+      droneData.pilotEndPos = lastPilotEnd;
+      
+      // FIRST: Create paths for each flight (so flights array is populated before popup)
+      droneRaw.flights.forEach((flight, idx) => {
+        const flightObj = {
+          num: flight.num,
+          timestamp: flight.timestamp,
+          visible: true,
+          dronePath: null,
+          pilotPath: null,
+          droneCoords: flight.dronePath || [],
+          pilotCoords: flight.pilotPath || []
+        };
+        
+        // Drone path
+        if (flight.dronePath) {
+          const polyline = L.polyline(flight.dronePath, {
+            color: droneData.color,
+            weight: 2,
+            opacity: 0.8
+          }).addTo(map);
+          flightObj.dronePath = polyline;
+        }
+        
+        // Pilot path
+        if (flight.pilotPath) {
+          const polyline = L.polyline(flight.pilotPath, {
+            color: droneData.color,
+            weight: 2,
+            opacity: 0.8,
+            dashArray: '5,5'
+          }).addTo(map);
+          flightObj.pilotPath = polyline;
+        }
+        
+        droneData.flights.push(flightObj);
+      });
+      
+      // THEN: Create markers with popup (now flights array is populated)
+      if (firstDroneStart) {
+        droneData.droneStartMarker = L.marker([firstDroneStart.lat, firstDroneStart.lng], {
+          icon: createIcon('🛸', droneData.color)
+        }).bindPopup(generateHistoricalPopup(id, droneData, 'Drone'), {autoPan: true, maxWidth: 280});
+        droneData.droneStartMarker.addTo(map);
+      }
+      
+      if (lastDroneEnd && (lastDroneEnd.lat !== firstDroneStart?.lat || lastDroneEnd.lng !== firstDroneStart?.lng)) {
+        droneData.droneEndMarker = L.marker([lastDroneEnd.lat, lastDroneEnd.lng], {
+          icon: createIcon('🛸', droneData.color)
+        }).bindPopup(generateHistoricalPopup(id, droneData, 'Drone'), {autoPan: true, maxWidth: 280});
+        droneData.droneEndMarker.addTo(map);
+      }
+      
+      if (firstPilotStart) {
+        droneData.pilotStartMarker = L.marker([firstPilotStart.lat, firstPilotStart.lng], {
+          icon: createIcon('👤', droneData.color)
+        }).bindPopup(generateHistoricalPopup(id, droneData, 'Pilot'), {autoPan: true, maxWidth: 280});
+        droneData.pilotStartMarker.addTo(map);
+      }
+      
+      if (lastPilotEnd && (lastPilotEnd.lat !== firstPilotStart?.lat || lastPilotEnd.lng !== firstPilotStart?.lng)) {
+        droneData.pilotEndMarker = L.marker([lastPilotEnd.lat, lastPilotEnd.lng], {
+          icon: createIcon('👤', droneData.color)
+        }).bindPopup(generateHistoricalPopup(id, droneData, 'Pilot'), {autoPan: true, maxWidth: 280});
+        droneData.pilotEndMarker.addTo(map);
+      }
+      
+      // Create START circle (green) and END circle (red) for visual identification
+      if (firstDroneStart) {
+        droneData.startCircle = L.circle([firstDroneStart.lat, firstDroneStart.lng], {
+          radius: 15,
+          color: '#00ff88',
+          fillColor: '#00ff88',
+          fillOpacity: 0.3,
+          weight: 2
+        }).addTo(map);
+      }
+      
+      if (lastDroneEnd) {
+        droneData.endCircle = L.circle([lastDroneEnd.lat, lastDroneEnd.lng], {
+          radius: 15,
+          color: '#ff4444',
+          fillColor: '#ff4444',
+          fillOpacity: 0.3,
+          weight: 2
+        }).addTo(map);
+      }
+      
+      // Pilot start/end circles (smaller, dashed)
+      if (firstPilotStart) {
+        droneData.pilotStartCircle = L.circle([firstPilotStart.lat, firstPilotStart.lng], {
+          radius: 12,
+          color: '#00ff88',
+          fillColor: '#00ff88',
+          fillOpacity: 0.2,
+          weight: 1,
+          dashArray: '4,4'
+        }).addTo(map);
+      }
+      
+      if (lastPilotEnd) {
+        droneData.pilotEndCircle = L.circle([lastPilotEnd.lat, lastPilotEnd.lng], {
+          radius: 12,
+          color: '#ff4444',
+          fillColor: '#ff4444',
+          fillOpacity: 0.2,
+          weight: 1,
+          dashArray: '4,4'
+        }).addTo(map);
+      }
+    });
+    
+    // Summary
+    const droneIds = Object.keys(historicalDroneData);
+    console.log('=== KML PARSE DONE ===');
+    console.log('Folders processed:', folderCount);
+    console.log('Unique drones:', droneIds.length);
+    droneIds.forEach(id => {
+      const d = historicalDroneData[id];
+      console.log(' -', d.mac, ':', d.flights.length, 'flights');
+    });
+    
+    // Fit bounds
+    if (fitBounds && bounds.length > 0) {
+      map.fitBounds(bounds, { padding: [50, 50] });
+    }
+    
+    // Apply active filter
+    if (hideActiveDrones) {
+      applyActiveFilter();
+    }
+  }
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js')
       .then(reg => console.log('Service Worker registered', reg))
@@ -3817,13 +5503,6 @@ function updateColor(mac, hue) {
 </script>
 </body>
 </html>
-<script>
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js')
-      .then(reg => console.log('Service Worker registered', reg))
-      .catch(err => console.error('Service Worker registration failed', err));
-  }
-</script>
 '''
 # ----------------------
 # New route: USB port selection for multiple ports.
@@ -4315,6 +5994,29 @@ def download_cumulative_kml():
         as_attachment=True,
         download_name='cumulative.kml'
     )
+
+# ----------------------
+# Historical KML API Endpoints
+# ----------------------
+@app.route('/api/kml/session')
+def api_kml_session():
+    """Return session KML content for map plotting"""
+    generate_kml()
+    try:
+        with open(KML_FILENAME, 'r') as f:
+            return jsonify({'status': 'ok', 'kml': f.read(), 'filename': os.path.basename(KML_FILENAME)})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/kml/cumulative')
+def api_kml_cumulative():
+    """Return cumulative KML content for map plotting"""
+    generate_cumulative_kml()
+    try:
+        with open(CUMULATIVE_KML_FILENAME, 'r') as f:
+            return jsonify({'status': 'ok', 'kml': f.read(), 'filename': os.path.basename(CUMULATIVE_KML_FILENAME)})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ----------------------
 # Startup Auto-Connection
