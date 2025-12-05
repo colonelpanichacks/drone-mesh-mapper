@@ -1984,27 +1984,28 @@ HTML_PAGE = '''
         max-height: 70vh;
       }
       .leaflet-popup {
-        max-width: 90vw !important;
+        max-width: 280px !important;
       }
       .leaflet-popup-content-wrapper {
-        max-width: 85vw !important;
-        padding: 8px !important;
+        max-width: 270px !important;
+        padding: 6px !important;
         box-sizing: border-box !important;
       }
       .leaflet-popup-content {
-        margin: 6px !important;
+        margin: 4px !important;
         font-size: 0.7rem !important;
-        max-width: 100% !important;
+        width: 250px !important;
+        max-width: 250px !important;
         box-sizing: border-box !important;
-        overflow-x: hidden !important;
+        overflow: visible !important;
       }
       .leaflet-popup-content input[type="range"] {
-        width: calc(100% - 4px) !important;
+        width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
       }
       .leaflet-popup-content input[type="text"] {
-        width: calc(100% - 8px) !important;
+        width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
       }
@@ -2014,8 +2015,8 @@ HTML_PAGE = '''
         box-sizing: border-box !important;
       }
       .leaflet-popup-content button {
-        min-height: 32px !important;
-        font-size: 0.7rem !important;
+        min-height: 28px !important;
+        font-size: 0.65rem !important;
       }
       #replayControlBar {
         width: 95vw !important;
@@ -2042,20 +2043,23 @@ HTML_PAGE = '''
         padding: 3px 5px;
       }
       .leaflet-popup {
-        max-width: 95vw !important;
+        max-width: 260px !important;
       }
       .leaflet-popup-content-wrapper {
-        max-width: 92vw !important;
-        padding: 6px !important;
+        max-width: 250px !important;
+        padding: 5px !important;
       }
       .leaflet-popup-content {
-        font-size: 0.65rem !important;
-        padding: 2px !important;
+        font-size: 0.6rem !important;
+        width: 230px !important;
+        max-width: 230px !important;
+        margin: 3px !important;
+        overflow: visible !important;
       }
       .leaflet-popup-content button {
-        min-height: 28px !important;
-        font-size: 0.6rem !important;
-        padding: 4px 6px !important;
+        min-height: 26px !important;
+        font-size: 0.55rem !important;
+        padding: 3px 5px !important;
       }
       .leaflet-popup-content input[type="range"]::-webkit-slider-thumb {
         height: 18px !important;
@@ -2174,9 +2178,9 @@ HTML_PAGE = '''
     .placeholder::-webkit-scrollbar-thumb { background: var(--border-secondary); border-radius: 2px; }
     .selected { background-color: rgba(99, 102, 241, 0.2); }
     
-    /* Leaflet Popup Styling */
+    /* Leaflet Popup Styling - Clean, no scroll */
     .leaflet-popup {
-      max-width: 300px !important;
+      max-width: 290px !important;
     }
     .leaflet-popup > .leaflet-popup-content-wrapper { 
       background: var(--bg-panel);
@@ -2187,18 +2191,18 @@ HTML_PAGE = '''
       border-radius: 8px;
       padding: 8px;
       max-width: 280px;
-      overflow: hidden;
+      overflow: visible !important;
       box-sizing: border-box;
     }
     .leaflet-popup-content {
-      font-size: 0.7rem;
-      line-height: 1.4;
+      font-size: 0.75rem;
+      line-height: 1.35;
       white-space: normal;
       margin: 6px !important;
-      max-width: 260px;
-      overflow-x: hidden;
+      width: 260px !important;
+      max-width: 260px !important;
+      overflow: visible !important;
       box-sizing: border-box;
-      max-width: 240px;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
@@ -2209,6 +2213,7 @@ HTML_PAGE = '''
       color: var(--text-pink) !important;
       font-size: 18px !important;
       padding: 4px 8px !important;
+      z-index: 1000;
     }
     .leaflet-popup-close-button:hover {
       color: var(--text-green) !important;
@@ -2218,7 +2223,7 @@ HTML_PAGE = '''
       color: var(--text-green) !important;
     }
     .leaflet-popup.no-gps-popup .leaflet-popup-content {
-      margin: 8px !important;
+      margin: 6px !important;
     }
     .leaflet-popup.no-gps-popup .leaflet-popup-tip-container,
     .leaflet-popup.no-gps-popup .leaflet-popup-tip {
@@ -3064,118 +3069,112 @@ function updateObserverPopupButtons() {
 }
 
 function generatePopupContent(detection, markerType) {
-  let content = '';
-  let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
-  content += '<strong style="color:#6b7280;">ID:</strong> <span id="aliasDisplay_' + detection.mac + '" style="color:#f0abfc;font-weight:500;">' + aliasText + '</span><br><span style="color:#6b7280;font-size:0.85em;">MAC: ' + detection.mac + '</span><br>';
+  var mac = detection.mac;
+  var aliasText = aliases[mac] ? aliases[mac] : "No Alias";
+  var isPilot = markerType && markerType.toLowerCase().includes('pilot');
+  var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === mac);
+  var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === mac);
+  var defaultHue = colorOverrides[mac] !== undefined ? colorOverrides[mac] : (function(){
+      var hash = 0;
+      for (var i = 0; i < mac.length; i++){ hash = mac.charCodeAt(i) + ((hash << 5) - hash); }
+      return Math.abs(hash) % 360;
+  })();
   
-  if (detection.basic_id || detection.faa_data) {
-    if (detection.basic_id) {
-      content += '<div style="border:1px solid rgba(240,171,252,0.4); background:rgba(240,171,252,0.08); padding:6px; margin:6px 0; border-radius:4px;"><span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">' + detection.basic_id + '</span></div>';
-    }
-    if (detection.basic_id) {
-      content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA</button>';
-    }
-    content += '<div id="faaResult_' + detection.mac + '" style="margin-top:6px;">';
-    if (detection.faa_data) {
-      let faaData = detection.faa_data;
-      let item = null;
-      if (faaData.data && faaData.data.items && faaData.data.items.length > 0) {
-        item = faaData.data.items[0];
-      }
-      if (item) {
-        const fields = ["makeName", "modelName", "series", "trackingNumber", "complianceCategories", "updatedAt"];
-        content += '<div style="border:1px solid rgba(99,102,241,0.4); background:rgba(99,102,241,0.08); padding:6px; margin:6px 0; border-radius:4px; font-size:0.9em;">';
-        fields.forEach(function(field) {
-          let value = item[field] !== undefined ? item[field] : "";
-          content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">${field}:</span> <span style="color:#00ff88;">${value}</span></div>`;
-        });
-        content += '</div>';
-      } else {
-        content += '<div style="border:1px solid rgba(99,102,241,0.3); padding:6px; margin:6px 0; border-radius:4px; color:#6b7280;">No FAA data available</div>';
-      }
-    }
-    content += '</div>';
+  var content = '<div style="font-family:JetBrains Mono,monospace;width:100%;max-width:260px;box-sizing:border-box;">';
+  
+  // Header
+  content += '<strong id="aliasDisplay_' + mac + '" style="color:#f0abfc;font-size:0.9em;word-break:break-all;">' + aliasText + '</strong><br>';
+  content += '<span style="color:#6b7280;font-size:0.7em;word-break:break-all;">MAC: ' + mac + '</span><br>';
+  content += '<span style="color:#00ffd5;font-size:0.7em;">' + (isPilot ? 'Pilot Location' : 'Drone Location') + '</span>';
+  
+  // RemoteID section
+  if (detection.basic_id) {
+    content += '<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.75em;word-break:break-all;"><span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">' + detection.basic_id + '</span></div>';
+    content += '<button onclick="event.stopPropagation();queryFaaAPI(\\'' + mac + '\\', \\'' + detection.basic_id + '\\')" id="queryFaaButton_' + mac + '" style="width:100%;font-size:0.65em;padding:4px;margin-bottom:4px;">Query FAA</button>';
+  } else {
+    content += '<div style="color:#6b7280;font-size:0.7em;margin:4px 0;">No RemoteID detected</div>';
   }
   
-  content += '<div style="margin:8px 0; padding:6px 0; border-top:1px solid rgba(99,102,241,0.2); font-size:0.85em;">';
-  for (const key in detection) {
-    if (['mac', 'basic_id', 'last_update', 'userLocked', 'lockTime', 'faa_data'].indexOf(key) === -1) {
-      content += '<span style="color:#6b7280;">' + key + ':</span> <span style="color:#e0e0e0;">' + detection[key] + '</span><br>';
-    }
+  // FAA Data section
+  content += '<div id="faaResult_' + mac + '">';
+  if (detection.faa_data && detection.faa_data.data && detection.faa_data.data.items && detection.faa_data.data.items.length > 0) {
+    var item = detection.faa_data.data.items[0];
+    content += '<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.7em;">';
+    if (item.makeName) content += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">' + item.makeName + '</span></div>';
+    if (item.modelName) content += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">' + item.modelName + '</span></div>';
+    if (item.series) content += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">' + item.series + '</span></div>';
+    if (item.trackingNumber) content += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">' + item.trackingNumber + '</span></div>';
+    content += '</div>';
   }
   content += '</div>';
   
+  // Coordinates section
+  content += '<div style="margin:6px 0;padding:4px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:0.7em;">';
   if (detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
-    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' 
-             + detection.drone_lat + ',' + detection.drone_long + '" style="color:#00ffd5;font-size:0.85em;">View Drone on Google Maps</a><br>';
+    content += '<div><span style="color:#6b7280;">Drone:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.drone_lat).toFixed(6) + ', ' + parseFloat(detection.drone_long).toFixed(6) + '</span></div>';
   }
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
-    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' 
-             + detection.pilot_lat + ',' + detection.pilot_long + '" style="color:#00ffd5;font-size:0.85em;">View Pilot on Google Maps</a><br>';
+    content += '<div><span style="color:#6b7280;">Pilot:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.pilot_lat).toFixed(6) + ', ' + parseFloat(detection.pilot_long).toFixed(6) + '</span></div>';
   }
+  if (detection.drone_alt !== undefined) content += '<div><span style="color:#6b7280;">Altitude:</span> <span style="color:#e0e0e0;">' + detection.drone_alt + 'm</span></div>';
+  if (detection.drone_speed !== undefined) content += '<div><span style="color:#6b7280;">Speed:</span> <span style="color:#e0e0e0;">' + detection.drone_speed + '</span></div>';
+  content += '</div>';
   
-  content += `<div style="border-top:1px solid rgba(99,102,241,0.3); margin-top:8px; padding-top:8px;">
-              <label for="aliasInput" style="color:#6b7280;font-size:0.85em;">Set Alias:</label>
-              <input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" 
-                     value="${aliases[detection.mac] ? aliases[detection.mac] : ''}" style="margin-top:4px;"><br>
-              <div style="display:flex; gap:4px; margin-top:6px;">
-                <button onclick="saveAlias('${detection.mac}'); this.style.background='rgba(0,255,136,0.2)'; setTimeout(()=>this.style.background='',200);" style="flex:1;">Save</button>
-                <button onclick="clearAlias('${detection.mac}'); this.style.background='rgba(240,171,252,0.2)'; setTimeout(()=>this.style.background='',200);" style="flex:1;">Clear</button>
-              </div>
-              </div>`;
+  // Google Maps links
+  content += '<div style="font-size:0.7em;margin:4px 0;">';
+  if (detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
+    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.drone_lat + ',' + detection.drone_long + '" style="color:#00ffd5;" onclick="event.stopPropagation();">Drone Maps</a>';
+  }
+  if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
+    if (detection.drone_lat && detection.drone_long) content += ' | ';
+    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.pilot_lat + ',' + detection.pilot_long + '" style="color:#00ffd5;" onclick="event.stopPropagation();">Pilot Maps</a>';
+  }
+  content += '</div>';
   
-  content += `<div style="border-top:1px solid rgba(99,102,241,0.3); margin:8px 0; padding-top:8px;">`;
+  // Alias input section
+  content += '<div style="border-top:1px solid rgba(99,102,241,0.3);margin-top:6px;padding-top:6px;">';
+  content += '<label style="color:#6b7280;font-size:0.7em;display:block;margin-bottom:3px;">Set Alias:</label>';
+  content += '<input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" value="' + (aliases[mac] || '') + '" style="width:100%;display:block;box-sizing:border-box;font-size:0.7em;padding:5px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;">';
+  content += '<div style="display:flex;gap:4px;margin-top:4px;">';
+  content += '<button onclick="event.stopPropagation();saveAlias(\\'' + mac + '\\')" style="flex:1;font-size:0.65em;padding:5px;">Save</button>';
+  content += '<button onclick="event.stopPropagation();clearAlias(\\'' + mac + '\\')" style="flex:1;font-size:0.65em;padding:5px;">Clear</button>';
+  content += '</div></div>';
   
-    var isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === detection.mac);
-    var droneLockButton = `<button id="lock-drone-${detection.mac}" onclick="lockMarker('drone', '${detection.mac}')" style="flex:1; ${isDroneLocked ? 'background:rgba(0,255,136,0.25);border-color:var(--text-green);' : ''}">
-      ${isDroneLocked ? 'Locked' : 'Lock Drone'}
-    </button>`;
-    var droneUnlockButton = `<button id="unlock-drone-${detection.mac}" onclick="unlockMarker('drone', '${detection.mac}')" style="flex:1; ${!isDroneLocked ? 'background:rgba(99,102,241,0.2);border-color:var(--border-secondary);' : ''}">
-      ${isDroneLocked ? 'Unlock' : 'Unlocked'}
-    </button>`;
-    var isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === detection.mac);
-    var pilotLockButton = `<button id="lock-pilot-${detection.mac}" onclick="lockMarker('pilot', '${detection.mac}')" style="flex:1; ${isPilotLocked ? 'background:rgba(0,255,136,0.25);border-color:var(--text-green);' : ''}">
-      ${isPilotLocked ? 'Locked' : 'Lock Pilot'}
-    </button>`;
-    var pilotUnlockButton = `<button id="unlock-pilot-${detection.mac}" onclick="unlockMarker('pilot', '${detection.mac}')" style="flex:1; ${!isPilotLocked ? 'background:rgba(99,102,241,0.2);border-color:var(--border-secondary);' : ''}">
-      ${isPilotLocked ? 'Unlock' : 'Unlocked'}
-    </button>`;
-    content += `
-      <div style="display:flex; gap:4px; margin-bottom:4px;">
-        ${droneLockButton}
-        ${droneUnlockButton}
-      </div>
-      <div style="display:flex; gap:4px;">
-        ${pilotLockButton}
-        ${pilotUnlockButton}
-      </div>
-      </div>`;
+  // Lock buttons section
+  content += '<div style="border-top:1px solid rgba(99,102,241,0.3);margin-top:6px;padding-top:6px;">';
+  content += '<div style="display:flex;gap:3px;margin-bottom:3px;">';
+  content += '<button id="lock-drone-' + mac + '" onclick="event.stopPropagation();lockMarker(\\'drone\\', \\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:4px;' + (isDroneLocked ? 'background:rgba(0,255,136,0.25);' : '') + '">' + (isDroneLocked ? 'Drone Locked' : 'Lock Drone') + '</button>';
+  content += '<button id="unlock-drone-' + mac + '" onclick="event.stopPropagation();unlockMarker(\\'drone\\', \\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:4px;' + (!isDroneLocked ? 'background:rgba(99,102,241,0.2);' : '') + '">' + (isDroneLocked ? 'Unlock' : 'Unlocked') + '</button>';
+  content += '</div>';
+  content += '<div style="display:flex;gap:3px;">';
+  content += '<button id="lock-pilot-' + mac + '" onclick="event.stopPropagation();lockMarker(\\'pilot\\', \\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:4px;' + (isPilotLocked ? 'background:rgba(0,255,136,0.25);' : '') + '">' + (isPilotLocked ? 'Pilot Locked' : 'Lock Pilot') + '</button>';
+  content += '<button id="unlock-pilot-' + mac + '" onclick="event.stopPropagation();unlockMarker(\\'pilot\\', \\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:4px;' + (!isPilotLocked ? 'background:rgba(99,102,241,0.2);' : '') + '">' + (isPilotLocked ? 'Unlock' : 'Unlocked') + '</button>';
+  content += '</div></div>';
   
-  let defaultHue = colorOverrides[detection.mac] !== undefined ? colorOverrides[detection.mac] : (function(){
-      let hash = 0;
-      for (let i = 0; i < detection.mac.length; i++){
-          hash = detection.mac.charCodeAt(i) + ((hash << 5) - hash);
-      }
-      return Math.abs(hash) % 360;
-  })();
-  content += `<div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(99,102,241,0.2);">
-    <label for="colorSlider_${detection.mac}" style="display:block; color:#6b7280; font-size:0.85em; margin-bottom:4px;">Marker Color</label>
-    <input type="range" id="colorSlider_${detection.mac}" min="0" max="360" value="${defaultHue}" style="width:100%;" onchange="updateColor('${detection.mac}', this.value)">
-  </div>`;
-
-      // Node Mode toggle in popup
-
+  // Color slider section
+  content += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.2);">';
+  content += '<label style="display:block;color:#6b7280;font-size:0.7em;margin-bottom:3px;">Marker Color</label>';
+  content += '<input type="range" id="colorSlider_' + mac + '" min="0" max="360" value="' + defaultHue + '" style="width:100%;display:block;box-sizing:border-box;" onchange="updateColor(\\'' + mac + '\\', this.value)" onclick="event.stopPropagation();">';
+  content += '</div>';
+  
+  content += '</div>';
   return content;
 }
 
 // New function to query the FAA API.
 async function queryFaaAPI(mac, remote_id) {
+    // Disable both live and historical FAA buttons
     const button = document.getElementById("queryFaaButton_" + mac);
+    const histButton = document.getElementById("histQueryFaaBtn_" + mac);
     if (button) {
         button.disabled = true;
-        const originalText = button.textContent;
         button.textContent = "Querying...";
         button.style.backgroundColor = "gray";
+    }
+    if (histButton) {
+        histButton.disabled = true;
+        histButton.textContent = "Querying...";
+        histButton.style.backgroundColor = "gray";
     }
     try {
         const response = await fetch(window.location.origin + '/api/query_faa', {
@@ -3189,26 +3188,38 @@ async function queryFaaAPI(mac, remote_id) {
             if (window.tracked_pairs && window.tracked_pairs[mac]) {
               window.tracked_pairs[mac].faa_data = result.faa_data;
             }
-            const faaDiv = document.getElementById("faaResult_" + mac);
-            if (faaDiv) {
-                let faaData = result.faa_data;
-                let item = null;
-                if (faaData.data && faaData.data.items && faaData.data.items.length > 0) {
-                  item = faaData.data.items[0];
+            // Also update historical drone data if exists
+            if (historicalDroneData) {
+              Object.keys(historicalDroneData).forEach(id => {
+                if (historicalDroneData[id].mac === mac) {
+                  historicalDroneData[id].faa_data = result.faa_data;
                 }
-                if (item) {
-                  const fields = ["makeName", "modelName", "series", "trackingNumber", "complianceCategories", "updatedAt"];
-                  let html = '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">';
-                  fields.forEach(function(field) {
-                    let value = item[field] !== undefined ? item[field] : "";
-                    html += `<div><span style="color:#FF00FF;">${field}:</span> <span style="color:#00FF00;">${value}</span></div>`;
-                  });
-                  html += '</div>';
-                  faaDiv.innerHTML = html;
-                } else {
-                  faaDiv.innerHTML = '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">No FAA data available</div>';
-                }
+              });
             }
+            
+            // Build FAA result HTML
+            let faaData = result.faa_data;
+            let item = null;
+            if (faaData.data && faaData.data.items && faaData.data.items.length > 0) {
+              item = faaData.data.items[0];
+            }
+            let html = '';
+            if (item) {
+              html = '<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.7em;">';
+              if (item.makeName) html += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">' + item.makeName + '</span></div>';
+              if (item.modelName) html += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">' + item.modelName + '</span></div>';
+              if (item.series) html += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">' + item.series + '</span></div>';
+              if (item.trackingNumber) html += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">' + item.trackingNumber + '</span></div>';
+              html += '</div>';
+            } else {
+              html = '<div style="border:1px solid rgba(99,102,241,0.3);padding:4px;margin:4px 0;border-radius:4px;color:#6b7280;font-size:0.65em;">No FAA data available</div>';
+            }
+            
+            // Update both live and historical FAA result divs
+            const faaDiv = document.getElementById("faaResult_" + mac);
+            const histFaaDiv = document.getElementById("histFaaResult_" + mac);
+            if (faaDiv) faaDiv.innerHTML = html;
+            if (histFaaDiv) histFaaDiv.innerHTML = html;
             // Immediately refresh popups with new FAA data
             const key = result.mac || mac;
             if (typeof tracked_pairs !== "undefined" && tracked_pairs[key]) {
@@ -3231,11 +3242,19 @@ async function queryFaaAPI(mac, remote_id) {
     } catch(error) {
         console.error("Error querying FAA API:", error);
     } finally {
+        // Reset live button
         const button = document.getElementById("queryFaaButton_" + mac);
         if (button) {
             button.disabled = false;
-            button.style.backgroundColor = "#333";
-            button.textContent = "Query FAA API";
+            button.style.backgroundColor = "";
+            button.textContent = "Query FAA";
+        }
+        // Reset historical button
+        const histButton = document.getElementById("histQueryFaaBtn_" + mac);
+        if (histButton) {
+            histButton.disabled = false;
+            histButton.style.backgroundColor = "";
+            histButton.textContent = "Query FAA";
         }
     }
 }
