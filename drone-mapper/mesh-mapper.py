@@ -2066,7 +2066,7 @@ HTML_PAGE = '''
     
     /* Mobile responsive styles */
     @media (max-width: 768px) {
-          #filterBox {
+      #filterBox {
         width: 85vw;
         max-width: 320px;
         right: 8px;
@@ -2075,17 +2075,21 @@ HTML_PAGE = '''
         max-height: 75vh;
       }
       .leaflet-popup {
-        max-width: 260px !important;
+        max-width: 300px !important;
       }
       .leaflet-popup-content-wrapper {
-        max-width: 250px !important;
-        padding: 8px !important;
+        max-width: 290px !important;
+        max-height: 70vh !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch !important;
+        padding: 10px !important;
         box-sizing: border-box !important;
       }
       .leaflet-popup-content {
-        margin: 4px !important;
-        font-size: 0.7rem !important;
-        width: auto !important;
+        margin: 6px !important;
+        font-size: 0.75rem !important;
+        width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
         overflow: visible !important;
@@ -2094,39 +2098,46 @@ HTML_PAGE = '''
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
+        overflow: hidden !important;
       }
-      .popup-inner > div,
-      .leaflet-popup-content > div > div {
+      .popup-inner > div {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
+        overflow-wrap: break-word !important;
       }
       .leaflet-popup-content input[type="range"] {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
-        margin: 4px 0 !important;
+        margin: 6px 0 !important;
+        height: 28px !important;
       }
       .leaflet-popup-content input[type="text"] {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
+        min-height: 38px !important;
+        font-size: 16px !important;
       }
       .leaflet-popup-content select {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
+        min-height: 38px !important;
+        font-size: 16px !important;
       }
       .leaflet-popup-content button {
-        min-height: 34px !important;
-        font-size: 0.7rem !important;
+        min-height: 36px !important;
+        font-size: 0.75rem !important;
         padding: 8px !important;
         touch-action: manipulation;
+        box-sizing: border-box !important;
       }
       .leaflet-popup-content a {
         display: inline-block;
-        padding: 4px 0;
-        font-size: 0.75rem;
+        padding: 6px 2px;
+        font-size: 0.8rem;
       }
       #replayControlBar {
         width: 95vw !important;
@@ -2154,69 +2165,83 @@ HTML_PAGE = '''
         padding: 3px 5px;
       }
       .leaflet-popup {
-        max-width: 260px !important;
+        max-width: 92vw !important;
       }
       .leaflet-popup-content-wrapper {
-        max-width: 250px !important;
-        padding: 6px !important;
-        max-height: 70vh !important;
+        max-width: 90vw !important;
+        max-height: 65vh !important;
         overflow-y: auto !important;
+        overflow-x: hidden !important;
         -webkit-overflow-scrolling: touch !important;
+        padding: 8px !important;
       }
       .leaflet-popup-content {
-        font-size: 0.7rem !important;
-        width: auto !important;
+        font-size: 0.75rem !important;
+        width: 100% !important;
         max-width: 100% !important;
         margin: 4px !important;
         overflow: visible !important;
+        box-sizing: border-box !important;
       }
       .popup-inner {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
+        overflow: hidden !important;
       }
-      .popup-inner > div,
-      .leaflet-popup-content > div > div {
+      .popup-inner > div {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
+        overflow-wrap: break-word !important;
+        word-wrap: break-word !important;
       }
       .leaflet-popup-content button {
-        min-height: 38px !important;
-        font-size: 0.7rem !important;
+        min-height: 40px !important;
+        font-size: 0.75rem !important;
         padding: 10px 8px !important;
         touch-action: manipulation;
+        box-sizing: border-box !important;
       }
       .leaflet-popup-content input[type="range"] {
         width: 100% !important;
         height: 32px !important;
         margin: 8px 0 !important;
+        box-sizing: border-box !important;
       }
       .leaflet-popup-content input[type="range"]::-webkit-slider-thumb {
-        height: 26px !important;
-        width: 26px !important;
+        height: 28px !important;
+        width: 28px !important;
       }
       .leaflet-popup-content input[type="range"]::-moz-range-thumb {
-        height: 26px !important;
-        width: 26px !important;
+        height: 28px !important;
+        width: 28px !important;
       }
       .leaflet-popup-content input[type="text"] {
-        min-height: 40px !important;
-        font-size: 16px !important; /* Prevents iOS zoom */
+        min-height: 44px !important;
+        font-size: 16px !important;
         width: 100% !important;
-        padding: 8px !important;
+        padding: 10px !important;
+        box-sizing: border-box !important;
       }
       .leaflet-popup-content select {
-        min-height: 40px !important;
-        font-size: 16px !important; /* Prevents iOS zoom */
+        min-height: 44px !important;
+        font-size: 16px !important;
         width: 100% !important;
-        padding: 8px !important;
+        padding: 10px !important;
+        box-sizing: border-box !important;
       }
       .leaflet-popup-content a {
         display: inline-block;
         padding: 8px 4px;
-        font-size: 0.75rem;
+        font-size: 0.8rem;
         color: #00ffd5 !important;
+      }
+      .leaflet-popup-content strong {
+        font-size: 0.85rem !important;
+      }
+      .leaflet-popup-content span {
+        word-break: break-all !important;
       }
     }
         #filterBox input[type="text"],
