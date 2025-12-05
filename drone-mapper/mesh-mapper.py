@@ -1984,22 +1984,28 @@ HTML_PAGE = '''
         max-height: 75vh;
       }
       .leaflet-popup {
-        max-width: 280px !important;
+        max-width: 260px !important;
       }
       .leaflet-popup-content-wrapper {
-        max-width: 270px !important;
-        padding: 6px !important;
+        max-width: 250px !important;
+        padding: 8px !important;
         box-sizing: border-box !important;
       }
       .leaflet-popup-content {
         margin: 4px !important;
         font-size: 0.7rem !important;
-        width: 250px !important;
-        max-width: 250px !important;
+        width: auto !important;
+        max-width: 100% !important;
         box-sizing: border-box !important;
         overflow: visible !important;
       }
-      .leaflet-popup-content > div {
+      .popup-inner {
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+      }
+      .popup-inner > div,
+      .leaflet-popup-content > div > div {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
@@ -2008,7 +2014,7 @@ HTML_PAGE = '''
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
-        margin: 0 !important;
+        margin: 4px 0 !important;
       }
       .leaflet-popup-content input[type="text"] {
         width: 100% !important;
@@ -2021,14 +2027,15 @@ HTML_PAGE = '''
         box-sizing: border-box !important;
       }
       .leaflet-popup-content button {
-        min-height: 32px !important;
-        font-size: 0.65rem !important;
-        padding: 6px 8px !important;
+        min-height: 34px !important;
+        font-size: 0.7rem !important;
+        padding: 8px !important;
         touch-action: manipulation;
       }
       .leaflet-popup-content a {
         display: inline-block;
-        padding: 2px 0;
+        padding: 4px 0;
+        font-size: 0.75rem;
       }
       #replayControlBar {
         width: 95vw !important;
@@ -2056,50 +2063,63 @@ HTML_PAGE = '''
         padding: 3px 5px;
       }
       .leaflet-popup {
-        max-width: 250px !important;
+        max-width: 240px !important;
       }
       .leaflet-popup-content-wrapper {
-        max-width: 240px !important;
-        padding: 5px !important;
+        max-width: 230px !important;
+        padding: 6px !important;
       }
       .leaflet-popup-content {
-        font-size: 0.6rem !important;
-        width: 220px !important;
-        max-width: 220px !important;
+        font-size: 0.65rem !important;
+        width: auto !important;
+        max-width: 100% !important;
         margin: 3px !important;
         overflow: visible !important;
       }
-      .leaflet-popup-content > div {
+      .popup-inner {
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+      }
+      .popup-inner > div,
+      .leaflet-popup-content > div > div {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
       }
       .leaflet-popup-content button {
-        min-height: 30px !important;
-        font-size: 0.55rem !important;
-        padding: 5px 6px !important;
+        min-height: 36px !important;
+        font-size: 0.65rem !important;
+        padding: 8px 6px !important;
         touch-action: manipulation;
       }
       .leaflet-popup-content input[type="range"] {
         width: 100% !important;
-        height: 24px !important;
-        margin: 4px 0 !important;
+        height: 28px !important;
+        margin: 6px 0 !important;
       }
       .leaflet-popup-content input[type="range"]::-webkit-slider-thumb {
-        height: 20px !important;
-        width: 20px !important;
+        height: 22px !important;
+        width: 22px !important;
       }
       .leaflet-popup-content input[type="range"]::-moz-range-thumb {
-        height: 20px !important;
-        width: 20px !important;
+        height: 22px !important;
+        width: 22px !important;
       }
       .leaflet-popup-content input[type="text"] {
-        min-height: 32px !important;
+        min-height: 36px !important;
         font-size: 16px !important; /* Prevents iOS zoom */
+        width: 100% !important;
       }
       .leaflet-popup-content select {
-        min-height: 32px !important;
+        min-height: 36px !important;
         font-size: 16px !important; /* Prevents iOS zoom */
+        width: 100% !important;
+      }
+      .leaflet-popup-content a {
+        display: inline-block;
+        padding: 6px 0;
+        font-size: 0.7rem;
       }
     }
         #filterBox input[type="text"],
@@ -2235,22 +2255,45 @@ HTML_PAGE = '''
       line-height: 1.35;
       white-space: normal;
       margin: 6px !important;
-      width: 260px !important;
-      max-width: 260px !important;
+      width: auto !important;
+      max-width: 100% !important;
       overflow: visible !important;
       box-sizing: border-box;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
-    .leaflet-popup-content > div {
-      width: 100% !important;
-      max-width: 100% !important;
-      box-sizing: border-box !important;
+    .popup-inner {
+      width: 100%;
+      max-width: 100%;
+      box-sizing: border-box;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .popup-inner > div {
+      width: 100%;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+    .popup-btn {
+      width: 100%;
+      display: block;
+      box-sizing: border-box;
+      font-size: 0.65em;
+      padding: 6px;
+      margin-bottom: 4px;
     }
     .leaflet-popup-content input,
     .leaflet-popup-content select,
     .leaflet-popup-content button {
       box-sizing: border-box !important;
+      max-width: 100% !important;
+    }
+    .leaflet-popup-content input[type="range"] {
+      width: 100% !important;
+      display: block;
+    }
+    .leaflet-popup-content input[type="text"] {
+      width: 100% !important;
+      display: block;
     }
     .leaflet-popup-tip {
       background: rgba(0, 255, 136, 0.4) !important; 
@@ -3127,7 +3170,7 @@ function generatePopupContent(detection, markerType) {
       return Math.abs(hash) % 360;
   })();
   
-  var content = '<div style="font-family:JetBrains Mono,monospace;width:100%;max-width:260px;box-sizing:border-box;">';
+  var content = '<div class="popup-inner">';
   
   // Header
   content += '<strong id="aliasDisplay_' + mac + '" style="color:#f0abfc;font-size:0.9em;word-break:break-all;">' + aliasText + '</strong><br>';
@@ -3137,7 +3180,7 @@ function generatePopupContent(detection, markerType) {
   // RemoteID section
   if (detection.basic_id) {
     content += '<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.75em;word-break:break-all;"><span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">' + detection.basic_id + '</span></div>';
-    content += '<button onclick="event.stopPropagation();queryFaaAPI(\\'' + mac + '\\', \\'' + detection.basic_id + '\\')" id="queryFaaButton_' + mac + '" style="width:100%;font-size:0.65em;padding:4px;margin-bottom:4px;">Query FAA</button>';
+    content += '<button onclick="event.stopPropagation();queryFaaAPI(\\'' + mac + '\\', \\'' + detection.basic_id + '\\')" id="queryFaaButton_' + mac + '" class="popup-btn">Query FAA</button>';
   } else {
     content += '<div style="color:#6b7280;font-size:0.7em;margin:4px 0;">No RemoteID detected</div>';
   }
@@ -3146,24 +3189,24 @@ function generatePopupContent(detection, markerType) {
   content += '<div id="faaResult_' + mac + '">';
   if (detection.faa_data && detection.faa_data.data && detection.faa_data.data.items && detection.faa_data.data.items.length > 0) {
     var item = detection.faa_data.data.items[0];
-    content += '<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.7em;">';
-    if (item.makeName) content += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">' + item.makeName + '</span></div>';
-    if (item.modelName) content += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">' + item.modelName + '</span></div>';
-    if (item.series) content += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">' + item.series + '</span></div>';
-    if (item.trackingNumber) content += '<div style="margin:1px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">' + item.trackingNumber + '</span></div>';
+    content += '<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.7em;word-break:break-all;">';
+    if (item.makeName) content += '<div><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">' + item.makeName + '</span></div>';
+    if (item.modelName) content += '<div><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">' + item.modelName + '</span></div>';
+    if (item.series) content += '<div><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">' + item.series + '</span></div>';
+    if (item.trackingNumber) content += '<div><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">' + item.trackingNumber + '</span></div>';
     content += '</div>';
   }
   content += '</div>';
   
   // Coordinates section
-  content += '<div style="margin:6px 0;padding:4px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:0.7em;">';
+  content += '<div style="margin:6px 0;padding:4px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:0.7em;word-break:break-all;">';
   if (detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
-    content += '<div><span style="color:#6b7280;">Drone:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.drone_lat).toFixed(6) + ', ' + parseFloat(detection.drone_long).toFixed(6) + '</span></div>';
+    content += '<div><span style="color:#6b7280;">Drone:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.drone_lat).toFixed(5) + ', ' + parseFloat(detection.drone_long).toFixed(5) + '</span></div>';
   }
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
-    content += '<div><span style="color:#6b7280;">Pilot:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.pilot_lat).toFixed(6) + ', ' + parseFloat(detection.pilot_long).toFixed(6) + '</span></div>';
+    content += '<div><span style="color:#6b7280;">Pilot:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.pilot_lat).toFixed(5) + ', ' + parseFloat(detection.pilot_long).toFixed(5) + '</span></div>';
   }
-  if (detection.drone_alt !== undefined) content += '<div><span style="color:#6b7280;">Altitude:</span> <span style="color:#e0e0e0;">' + detection.drone_alt + 'm</span></div>';
+  if (detection.drone_alt !== undefined) content += '<div><span style="color:#6b7280;">Alt:</span> <span style="color:#e0e0e0;">' + detection.drone_alt + 'm</span></div>';
   if (detection.drone_speed !== undefined) content += '<div><span style="color:#6b7280;">Speed:</span> <span style="color:#e0e0e0;">' + detection.drone_speed + '</span></div>';
   content += '</div>';
   
@@ -4517,7 +4560,7 @@ function updateColor(mac, hue) {
     const isPilot = markerType === 'pilot';
     const id = mac; // Use mac as id for replay
     
-    let content = `<div style="font-family:'JetBrains Mono',monospace;width:100%;max-width:260px;box-sizing:border-box;">`;
+    let content = `<div class="popup-inner">`;
     
     // Header
     content += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
@@ -4633,7 +4676,7 @@ function updateColor(mac, hue) {
     const aliasDisplay = currentAlias || mac || id;
     
     // Start building content - use 100% width for mobile compatibility
-    let content = `<div style="font-family:'JetBrains Mono',monospace;width:100%;max-width:260px;box-sizing:border-box;">`;
+    let content = `<div class="popup-inner">`;
     
     // Header with alias
     content += `<strong id="histAliasDisplay_${mac}" style="color:#f0abfc;font-size:0.95em;word-break:break-all;">${aliasDisplay}</strong><br>`;
