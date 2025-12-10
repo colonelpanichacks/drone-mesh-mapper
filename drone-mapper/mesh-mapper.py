@@ -2207,28 +2207,37 @@ HTML_PAGE = '''
       }
       .leaflet-popup {
         max-width: 92vw !important;
+        left: 4vw !important;
+        right: 4vw !important;
       }
       .leaflet-popup-content-wrapper {
-        max-width: 90vw !important;
-        max-height: 65vh !important;
+        max-width: 88vw !important;
+        width: 88vw !important;
+        max-height: 60vh !important;
         overflow-y: auto !important;
         overflow-x: hidden !important;
         -webkit-overflow-scrolling: touch !important;
-        padding: 8px !important;
+        padding: 10px !important;
+        box-sizing: border-box !important;
       }
       .leaflet-popup-content {
-        font-size: 0.75rem !important;
-        width: 100% !important;
-        max-width: 100% !important;
+        font-size: 0.7rem !important;
+        width: calc(88vw - 24px) !important;
+        max-width: calc(88vw - 24px) !important;
         margin: 4px !important;
-        overflow: visible !important;
+        overflow: hidden !important;
         box-sizing: border-box !important;
+        word-wrap: break-word !important;
+        overflow-wrap: break-word !important;
       }
       .popup-inner {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
         overflow: hidden !important;
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 6px !important;
       }
       .popup-inner > div {
         width: 100% !important;
@@ -2236,53 +2245,84 @@ HTML_PAGE = '''
         box-sizing: border-box !important;
         overflow-wrap: break-word !important;
         word-wrap: break-word !important;
+        word-break: break-word !important;
+      }
+      /* Collapsible sections for mobile */
+      .popup-section {
+        border: 1px solid rgba(0, 255, 136, 0.2);
+        border-radius: 4px;
+        margin: 4px 0 !important;
+        overflow: hidden;
+      }
+      .popup-section-header {
+        background: rgba(0, 255, 136, 0.1);
+        padding: 8px !important;
+        cursor: pointer;
+        font-size: 0.7rem !important;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .popup-section-content {
+        padding: 8px !important;
+        display: block;
+      }
+      .popup-section.collapsed .popup-section-content {
+        display: none !important;
       }
       .leaflet-popup-content button {
-        min-height: 40px !important;
-        font-size: 0.75rem !important;
-        padding: 10px 8px !important;
+        min-height: 38px !important;
+        font-size: 0.7rem !important;
+        padding: 8px 6px !important;
         touch-action: manipulation;
         box-sizing: border-box !important;
+        width: 100% !important;
+        margin: 2px 0 !important;
       }
       .leaflet-popup-content input[type="range"] {
         width: 100% !important;
-        height: 32px !important;
-        margin: 8px 0 !important;
+        height: 28px !important;
+        margin: 6px 0 !important;
         box-sizing: border-box !important;
       }
       .leaflet-popup-content input[type="range"]::-webkit-slider-thumb {
-        height: 28px !important;
-        width: 28px !important;
+        height: 24px !important;
+        width: 24px !important;
       }
       .leaflet-popup-content input[type="range"]::-moz-range-thumb {
-        height: 28px !important;
-        width: 28px !important;
+        height: 24px !important;
+        width: 24px !important;
       }
       .leaflet-popup-content input[type="text"] {
-        min-height: 44px !important;
+        min-height: 40px !important;
         font-size: 16px !important;
         width: 100% !important;
-        padding: 10px !important;
+        padding: 8px !important;
         box-sizing: border-box !important;
       }
       .leaflet-popup-content select {
-        min-height: 44px !important;
+        min-height: 40px !important;
         font-size: 16px !important;
         width: 100% !important;
-        padding: 10px !important;
+        padding: 8px !important;
         box-sizing: border-box !important;
       }
       .leaflet-popup-content a {
         display: inline-block;
-        padding: 8px 4px;
-        font-size: 0.8rem;
+        padding: 6px 2px;
+        font-size: 0.7rem;
         color: #00ffd5 !important;
+        word-break: break-all !important;
       }
       .leaflet-popup-content strong {
-        font-size: 0.85rem !important;
+        font-size: 0.75rem !important;
       }
       .leaflet-popup-content span {
         word-break: break-all !important;
+        font-size: 0.65rem !important;
+      }
+      .leaflet-popup-content hr {
+        margin: 6px 0 !important;
       }
     }
         #filterBox input[type="text"],
@@ -2482,6 +2522,22 @@ HTML_PAGE = '''
     .leaflet-popup.no-gps-popup .leaflet-popup-tip {
       background: transparent !important;
       box-shadow: none !important;
+    }
+    
+    /* Collapsible popup sections */
+    .popup-section {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .popup-section.collapsed .popup-section-content {
+      display: none !important;
+    }
+    .popup-section-header {
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .popup-section-content {
+      display: block;
     }
     
     /* Buttons */
@@ -3331,83 +3387,92 @@ function generatePopupContent(detection, markerType) {
       for (var i = 0; i < mac.length; i++){ hash = mac.charCodeAt(i) + ((hash << 5) - hash); }
       return Math.abs(hash) % 360;
   })();
+  var isMobile = window.innerWidth <= 520;
   
-  var content = '<div class="popup-inner">';
+  var content = '<div class="popup-inner" style="width:100%;box-sizing:border-box;">';
   
-  // Header
-  content += '<strong id="aliasDisplay_' + mac + '" style="color:#f0abfc;font-size:0.9em;word-break:break-all;">' + aliasText + '</strong><br>';
-  content += '<span style="color:#6b7280;font-size:0.7em;word-break:break-all;">MAC: ' + mac + '</span><br>';
-  content += '<span style="color:#00ffd5;font-size:0.7em;">' + (isPilot ? 'Pilot Location' : 'Drone Location') + '</span>';
+  // Header - always visible
+  content += '<div style="margin-bottom:6px;">';
+  content += '<strong id="aliasDisplay_' + mac + '" style="color:#f0abfc;font-size:0.85em;word-break:break-all;display:block;">' + aliasText + '</strong>';
+  content += '<span style="color:#6b7280;font-size:0.65em;word-break:break-all;display:block;">MAC: ' + mac + '</span>';
+  content += '<span style="color:#00ffd5;font-size:0.65em;">' + (isPilot ? 'Pilot Location' : 'Drone Location') + '</span>';
+  content += '</div>';
   
-  // RemoteID section
-    if (detection.basic_id) {
-    content += '<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:4px;margin:6px 0;border-radius:4px;font-size:0.75em;word-break:break-all;"><span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">' + detection.basic_id + '</span></div>';
-    content += '<button onclick="event.stopPropagation();queryFaaAPI(\\'' + mac + '\\', \\'' + detection.basic_id + '\\')" id="queryFaaButton_' + mac + '" class="popup-btn">Query FAA</button>';
+  // RemoteID & FAA Section
+  var ridSectionId = 'rid_section_' + mac.replace(/:/g,'');
+  content += '<div class="popup-section' + (isMobile ? '' : '') + '" id="' + ridSectionId + '">';
+  content += '<div class="popup-section-header" onclick="event.stopPropagation();this.parentElement.classList.toggle(\\'collapsed\\');" style="background:rgba(240,171,252,0.1);padding:5px;cursor:pointer;border-radius:3px;margin:2px 0;">';
+  content += '<span style="color:#f0abfc;font-size:0.7em;">RemoteID & FAA</span><span style="color:#6b7280;font-size:0.6em;">tap to toggle</span></div>';
+  content += '<div class="popup-section-content" style="padding:4px 0;">';
+  if (detection.basic_id) {
+    content += '<div style="background:rgba(240,171,252,0.08);padding:4px;border-radius:3px;font-size:0.65em;word-break:break-all;margin-bottom:4px;"><span style="color:#f0abfc;">ID:</span> <span style="color:#00ffd5;">' + detection.basic_id + '</span></div>';
+    content += '<button onclick="event.stopPropagation();queryFaaAPI(\\'' + mac + '\\', \\'' + detection.basic_id + '\\')" id="queryFaaButton_' + mac + '" style="width:100%;font-size:0.6em;padding:6px;box-sizing:border-box;">Query FAA</button>';
   } else {
-    content += '<div style="color:#6b7280;font-size:0.7em;margin:4px 0;">No RemoteID detected</div>';
+    content += '<div style="color:#6b7280;font-size:0.6em;">No RemoteID</div>';
   }
-  
-  // FAA Data section
   content += '<div id="faaResult_' + mac + '">';
   if (detection.faa_data && detection.faa_data.data && detection.faa_data.data.items && detection.faa_data.data.items.length > 0) {
     var item = detection.faa_data.data.items[0];
-    content += '<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:4px;font-size:0.7em;word-break:break-all;">';
+    content += '<div style="background:rgba(99,102,241,0.08);padding:4px;margin:4px 0;border-radius:3px;font-size:0.6em;">';
     if (item.makeName) content += '<div><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">' + item.makeName + '</span></div>';
     if (item.modelName) content += '<div><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">' + item.modelName + '</span></div>';
     if (item.series) content += '<div><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">' + item.series + '</span></div>';
-    if (item.trackingNumber) content += '<div><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">' + item.trackingNumber + '</span></div>';
-        content += '</div>';
+    if (item.trackingNumber) content += '<div><span style="color:#f0abfc;">Track#:</span> <span style="color:#00ff88;">' + item.trackingNumber + '</span></div>';
+    content += '</div>';
   }
-  content += '</div>';
+  content += '</div></div></div>';
   
-  // Coordinates section
-  content += '<div style="margin:6px 0;padding:4px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:0.7em;word-break:break-all;">';
+  // Coordinates & Maps Section
+  var coordSectionId = 'coord_section_' + mac.replace(/:/g,'');
+  content += '<div class="popup-section' + (isMobile ? ' collapsed' : '') + '" id="' + coordSectionId + '">';
+  content += '<div class="popup-section-header" onclick="event.stopPropagation();this.parentElement.classList.toggle(\\'collapsed\\');" style="background:rgba(0,255,136,0.1);padding:5px;cursor:pointer;border-radius:3px;margin:2px 0;">';
+  content += '<span style="color:#00ff88;font-size:0.7em;">GPS & Maps</span><span style="color:#6b7280;font-size:0.6em;">tap</span></div>';
+  content += '<div class="popup-section-content" style="padding:4px 0;">';
+  content += '<div style="background:rgba(0,0,0,0.2);padding:4px;border-radius:3px;font-size:0.6em;margin-bottom:4px;">';
   if (detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
-    content += '<div><span style="color:#6b7280;">Drone:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.drone_lat).toFixed(5) + ', ' + parseFloat(detection.drone_long).toFixed(5) + '</span></div>';
+    content += '<div><span style="color:#6b7280;">D:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.drone_lat).toFixed(5) + ', ' + parseFloat(detection.drone_long).toFixed(5) + '</span></div>';
   }
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
-    content += '<div><span style="color:#6b7280;">Pilot:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.pilot_lat).toFixed(5) + ', ' + parseFloat(detection.pilot_long).toFixed(5) + '</span></div>';
+    content += '<div><span style="color:#6b7280;">P:</span> <span style="color:#e0e0e0;">' + parseFloat(detection.pilot_lat).toFixed(5) + ', ' + parseFloat(detection.pilot_long).toFixed(5) + '</span></div>';
   }
   if (detection.drone_alt !== undefined) content += '<div><span style="color:#6b7280;">Alt:</span> <span style="color:#e0e0e0;">' + detection.drone_alt + 'm</span></div>';
-  if (detection.drone_speed !== undefined) content += '<div><span style="color:#6b7280;">Speed:</span> <span style="color:#e0e0e0;">' + detection.drone_speed + '</span></div>';
+  if (detection.drone_speed !== undefined) content += '<div><span style="color:#6b7280;">Spd:</span> <span style="color:#e0e0e0;">' + detection.drone_speed + '</span></div>';
   content += '</div>';
-  
-  // Google Maps links
-  content += '<div style="font-size:0.7em;margin:4px 0;">';
+  content += '<div style="font-size:0.6em;">';
   if (detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
-    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.drone_lat + ',' + detection.drone_long + '" style="color:#00ffd5;" onclick="event.stopPropagation();">Drone Maps</a>';
+    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.drone_lat + ',' + detection.drone_long + '" style="color:#00ffd5;display:inline-block;padding:3px;" onclick="event.stopPropagation();">Drone Maps</a>';
   }
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
-    if (detection.drone_lat && detection.drone_long) content += ' | ';
-    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.pilot_lat + ',' + detection.pilot_long + '" style="color:#00ffd5;" onclick="event.stopPropagation();">Pilot Maps</a>';
+    content += '<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=' + detection.pilot_lat + ',' + detection.pilot_long + '" style="color:#00ffd5;display:inline-block;padding:3px;" onclick="event.stopPropagation();">Pilot Maps</a>';
   }
-  content += '</div>';
+  content += '</div></div></div>';
   
-  // Alias input section
-  content += '<div style="border-top:1px solid rgba(99,102,241,0.3);margin-top:6px;padding-top:6px;">';
-  content += '<label style="color:#6b7280;font-size:0.7em;display:block;margin-bottom:3px;">Set Alias:</label>';
-  content += '<input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" value="' + (aliases[mac] || '') + '" style="width:100%;display:block;box-sizing:border-box;font-size:0.7em;padding:5px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;">';
-  content += '<div style="display:flex;gap:4px;margin-top:4px;">';
-  content += '<button onclick="event.stopPropagation();saveAlias(\\'' + mac + '\\')" style="flex:1;font-size:0.65em;padding:5px;">Save</button>';
-  content += '<button onclick="event.stopPropagation();clearAlias(\\'' + mac + '\\')" style="flex:1;font-size:0.65em;padding:5px;">Clear</button>';
+  // Alias Section
+  var aliasSectionId = 'alias_section_' + mac.replace(/:/g,'');
+  content += '<div class="popup-section' + (isMobile ? ' collapsed' : '') + '" id="' + aliasSectionId + '">';
+  content += '<div class="popup-section-header" onclick="event.stopPropagation();this.parentElement.classList.toggle(\\'collapsed\\');" style="background:rgba(99,102,241,0.1);padding:5px;cursor:pointer;border-radius:3px;margin:2px 0;">';
+  content += '<span style="color:#a5b4fc;font-size:0.7em;">Alias</span><span style="color:#6b7280;font-size:0.6em;">tap</span></div>';
+  content += '<div class="popup-section-content" style="padding:4px 0;">';
+  content += '<input type="text" id="aliasInput" onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" value="' + (aliases[mac] || '') + '" placeholder="Enter alias" style="width:100%;box-sizing:border-box;font-size:14px;padding:8px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;margin-bottom:4px;">';
+  content += '<div style="display:flex;gap:4px;">';
+  content += '<button onclick="event.stopPropagation();saveAlias(\\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:8px;">Save</button>';
+  content += '<button onclick="event.stopPropagation();clearAlias(\\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:8px;">Clear</button>';
+  content += '</div></div></div>';
+  
+  // Lock & Color Section
+  var lockSectionId = 'lock_section_' + mac.replace(/:/g,'');
+  content += '<div class="popup-section' + (isMobile ? ' collapsed' : '') + '" id="' + lockSectionId + '">';
+  content += '<div class="popup-section-header" onclick="event.stopPropagation();this.parentElement.classList.toggle(\\'collapsed\\');" style="background:rgba(255,136,0,0.1);padding:5px;cursor:pointer;border-radius:3px;margin:2px 0;">';
+  content += '<span style="color:#ffaa00;font-size:0.7em;">Lock & Color</span><span style="color:#6b7280;font-size:0.6em;">tap</span></div>';
+  content += '<div class="popup-section-content" style="padding:4px 0;">';
+  content += '<div style="display:flex;gap:3px;margin-bottom:4px;">';
+  content += '<button id="lock-drone-' + mac + '" onclick="event.stopPropagation();lockMarker(\\'drone\\', \\'' + mac + '\\')" style="flex:1;font-size:0.55em;padding:6px;' + (isDroneLocked ? 'background:rgba(0,255,136,0.25);' : '') + '">' + (isDroneLocked ? 'D Locked' : 'Lock D') + '</button>';
+  content += '<button id="lock-pilot-' + mac + '" onclick="event.stopPropagation();lockMarker(\\'pilot\\', \\'' + mac + '\\')" style="flex:1;font-size:0.55em;padding:6px;' + (isPilotLocked ? 'background:rgba(0,255,136,0.25);' : '') + '">' + (isPilotLocked ? 'P Locked' : 'Lock P') + '</button>';
+  content += '<button onclick="event.stopPropagation();unlockMarker(\\'drone\\', \\'' + mac + '\\');unlockMarker(\\'pilot\\', \\'' + mac + '\\');" style="flex:1;font-size:0.55em;padding:6px;background:rgba(255,100,100,0.2);">Unlock</button>';
+  content += '</div>';
+  content += '<label style="display:block;color:#6b7280;font-size:0.6em;margin-bottom:2px;">Color</label>';
+  content += '<input type="range" id="colorSlider_' + mac + '" min="0" max="360" value="' + defaultHue + '" style="width:100%;box-sizing:border-box;height:24px;" onchange="updateColor(\\'' + mac + '\\', this.value)" onclick="event.stopPropagation();">';
   content += '</div></div>';
-  
-  // Lock buttons section
-  content += '<div style="border-top:1px solid rgba(99,102,241,0.3);margin-top:6px;padding-top:6px;">';
-  content += '<div style="display:flex;gap:3px;margin-bottom:3px;">';
-  content += '<button id="lock-drone-' + mac + '" onclick="event.stopPropagation();lockMarker(\\'drone\\', \\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:4px;' + (isDroneLocked ? 'background:rgba(0,255,136,0.25);' : '') + '">' + (isDroneLocked ? 'Drone Locked' : 'Lock Drone') + '</button>';
-  content += '<button id="unlock-drone-' + mac + '" onclick="event.stopPropagation();unlockMarker(\\'drone\\', \\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:4px;' + (!isDroneLocked ? 'background:rgba(99,102,241,0.2);' : '') + '">' + (isDroneLocked ? 'Unlock' : 'Unlocked') + '</button>';
-  content += '</div>';
-  content += '<div style="display:flex;gap:3px;">';
-  content += '<button id="lock-pilot-' + mac + '" onclick="event.stopPropagation();lockMarker(\\'pilot\\', \\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:4px;' + (isPilotLocked ? 'background:rgba(0,255,136,0.25);' : '') + '">' + (isPilotLocked ? 'Pilot Locked' : 'Lock Pilot') + '</button>';
-  content += '<button id="unlock-pilot-' + mac + '" onclick="event.stopPropagation();unlockMarker(\\'pilot\\', \\'' + mac + '\\')" style="flex:1;font-size:0.6em;padding:4px;' + (!isPilotLocked ? 'background:rgba(99,102,241,0.2);' : '') + '">' + (isPilotLocked ? 'Unlock' : 'Unlocked') + '</button>';
-  content += '</div></div>';
-  
-  // Color slider section
-  content += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.2);">';
-  content += '<label style="display:block;color:#6b7280;font-size:0.7em;margin-bottom:3px;">Marker Color</label>';
-  content += '<input type="range" id="colorSlider_' + mac + '" min="0" max="360" value="' + defaultHue + '" style="width:100%;display:block;box-sizing:border-box;" onchange="updateColor(\\'' + mac + '\\', this.value)" onclick="event.stopPropagation();">';
-  content += '</div>';
   
   content += '</div>';
   return content;
@@ -4807,6 +4872,7 @@ function updateColor(mac, hue) {
     const displayName = droneData.alias || droneData.mac || id;
     const mac = droneData.mac || '';
     const isPilot = markerType.toLowerCase().includes('pilot');
+    const isMobile = window.innerWidth <= 520;
     
     // Convert hex color to hue for slider
     let hue = 120; // default green
@@ -4845,119 +4911,116 @@ function updateColor(mac, hue) {
     const currentAlias = aliases[mac] || droneData.alias || '';
     const aliasDisplay = currentAlias || mac || id;
     
-    // Start building content - use 100% width for mobile compatibility
-    let content = `<div class="popup-inner">`;
-    
-    // Header with alias
-    content += `<strong id="histAliasDisplay_${mac}" style="color:#f0abfc;font-size:0.95em;word-break:break-all;">${aliasDisplay}</strong><br>`;
-    content += `<span style="color:#6b7280;font-size:0.7em;word-break:break-all;">MAC: ${mac}</span><br>`;
-    content += `<span style="color:#00ffd5;font-size:0.7em;">${isPilot ? 'Pilot Location' : 'Drone Location'}</span>`;
-    
-    if (droneData.timestamp) {
-      content += `<br><span style="color:#6b7280;font-size:0.65em;">${droneData.timestamp}</span>`;
-    }
-    
-    // Alias input section
-    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
-      <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Set Alias:</label>
-      <input type="text" id="histAliasInput_${mac}" value="${currentAlias}" onclick="event.stopPropagation();" 
-             style="width:100%;display:block;box-sizing:border-box;font-size:0.7em;padding:6px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;">
-      <div style="display:flex;gap:3px;margin-top:4px;width:100%;">
-        <button onclick="event.stopPropagation();saveHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.65em;padding:6px;">Save</button>
-        <button onclick="event.stopPropagation();clearHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.65em;padding:6px;">Clear</button>
-      </div>
-    </div>`;
-    
     // Check for RemoteID from droneData (from KML) OR live detection data
     const liveDetection = window.tracked_pairs && window.tracked_pairs[mac];
     const basicId = droneData.basic_id || (liveDetection && liveDetection.basic_id) || '';
-    console.log('Historical popup for', mac, '- basicId:', basicId, 'droneCoords:', droneData.droneCoords ? droneData.droneCoords.length : 0);
-    
-    // ALWAYS show RemoteID/FAA section
-    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(240,171,252,0.3);">`;
-    
-    if (basicId) {
-      content += `<div style="border:1px solid rgba(240,171,252,0.4);background:rgba(240,171,252,0.08);padding:6px;margin-bottom:6px;border-radius:4px;font-size:0.7em;word-break:break-all;">
-        <span style="color:#f0abfc;">RemoteID:</span> <span style="color:#00ffd5;">${basicId}</span>
-      </div>`;
-      content += `<button onclick="event.stopPropagation();queryFaaAPI('${mac}','${basicId}')" id="histQueryFaaBtn_${mac}" style="width:100%;font-size:0.7em;padding:8px;margin-bottom:6px;">Query FAA Registry</button>`;
-    } else {
-      content += `<div style="color:#6b7280;font-size:0.65em;margin-bottom:6px;">No RemoteID - FAA lookup unavailable</div>`;
-    }
-    
-    // FAA Results container (always present)
-    content += `<div id="histFaaResult_${mac}">`;
-    
-    // FAA Data section - show if already cached
     const faaData = (liveDetection && liveDetection.faa_data) || droneData.faa_data;
-    if (faaData && faaData.data && faaData.data.items && faaData.data.items.length > 0) {
-      const item = faaData.data.items[0];
-      content += `<div style="border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.08);padding:6px;border-radius:4px;font-size:0.7em;">`;
-      content += `<div style="color:#f0abfc;font-weight:bold;margin-bottom:4px;">FAA Registration</div>`;
-      if (item.makeName) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
-      if (item.modelName) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
-      if (item.series) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">${item.series}</span></div>`;
-      if (item.trackingNumber) content += `<div style="margin:2px 0;"><span style="color:#f0abfc;">Tracking:</span> <span style="color:#00ff88;">${item.trackingNumber}</span></div>`;
+    
+    // Start building content
+    let content = `<div class="popup-inner" style="width:100%;box-sizing:border-box;">`;
+    
+    // Header - always visible, compact
+    content += `<div style="margin-bottom:4px;">`;
+    content += `<strong id="histAliasDisplay_${mac}" style="color:#f0abfc;font-size:0.8em;word-break:break-all;display:block;">${aliasDisplay}</strong>`;
+    content += `<span style="color:#6b7280;font-size:0.6em;word-break:break-all;display:block;">MAC: ${mac}</span>`;
+    content += `<span style="color:#00ffd5;font-size:0.6em;">${isPilot ? 'Pilot' : 'Drone'}</span>`;
+    if (droneData.timestamp) content += `<span style="color:#6b7280;font-size:0.55em;margin-left:4px;">${droneData.timestamp}</span>`;
+    content += `</div>`;
+    
+    // Replay Controls - always visible at top for quick access
+    if (flightCount > 0) {
+      content += `<div style="background:rgba(0,255,136,0.1);padding:6px;border-radius:4px;margin:4px 0;">`;
+      content += `<div style="display:flex;gap:3px;margin-bottom:4px;">`;
+      content += `<button onclick="event.stopPropagation();startReplay('${id}')" style="flex:1;font-size:0.6em;padding:6px;background:rgba(0,255,136,0.2);">Play</button>`;
+      content += `<button onclick="event.stopPropagation();pauseReplay()" style="flex:1;font-size:0.6em;padding:6px;">Pause</button>`;
+      content += `<button onclick="event.stopPropagation();stopReplay()" style="flex:1;font-size:0.6em;padding:6px;background:rgba(255,100,100,0.2);">Stop</button>`;
+      content += `</div>`;
+      content += `<div style="display:flex;gap:2px;">`;
+      content += `<button onclick="event.stopPropagation();setReplaySpeed(0.5)" style="flex:1;font-size:0.5em;padding:4px;">0.5x</button>`;
+      content += `<button onclick="event.stopPropagation();setReplaySpeed(1)" style="flex:1;font-size:0.5em;padding:4px;">1x</button>`;
+      content += `<button onclick="event.stopPropagation();setReplaySpeed(2)" style="flex:1;font-size:0.5em;padding:4px;">2x</button>`;
+      content += `<button onclick="event.stopPropagation();setReplaySpeed(5)" style="flex:1;font-size:0.5em;padding:4px;">5x</button>`;
+      content += `</div>`;
       content += `</div>`;
     }
-    content += `</div>`; // close histFaaResult
-    content += `</div>`; // close FAA section
     
-    // Coordinates info
+    // Flights dropdown - always visible
+    if (flightCount > 0) {
+      content += `<div style="margin:4px 0;">`;
+      content += `<select id="flightSelect_${id}" style="width:100%;font-size:14px;padding:8px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;box-sizing:border-box;" onchange="filterFlight('${id}', this.value)">${flightOptions}</select>`;
+      content += `</div>`;
+    }
+    
+    // Show/Hide and Zoom buttons - always visible
+    content += `<div style="display:flex;gap:4px;margin:4px 0;">`;
+    content += `<button onclick="event.stopPropagation();toggleHistoricalVisibility('${id}')" style="flex:1;font-size:0.6em;padding:8px;">${droneData.visible ? 'Hide' : 'Show'}</button>`;
+    content += `<button onclick="event.stopPropagation();zoomToHistoricalDrone('${id}')" style="flex:1;font-size:0.6em;padding:8px;">Zoom</button>`;
+    content += `</div>`;
+    
+    // RemoteID & FAA Section - collapsible
+    const macClean = mac.replace(/:/g,'');
+    content += `<div class="popup-section${isMobile ? '' : ''}" style="border:1px solid rgba(240,171,252,0.2);border-radius:4px;margin:4px 0;">`;
+    content += `<div onclick="event.stopPropagation();this.parentElement.classList.toggle('collapsed');" style="background:rgba(240,171,252,0.1);padding:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">`;
+    content += `<span style="color:#f0abfc;font-size:0.65em;">RemoteID & FAA</span><span style="color:#6b7280;font-size:0.5em;">tap</span></div>`;
+    content += `<div class="popup-section-content" style="padding:6px;">`;
+    if (basicId) {
+      content += `<div style="background:rgba(240,171,252,0.08);padding:4px;border-radius:3px;font-size:0.6em;word-break:break-all;margin-bottom:4px;"><span style="color:#f0abfc;">ID:</span> <span style="color:#00ffd5;">${basicId}</span></div>`;
+      content += `<button onclick="event.stopPropagation();queryFaaAPI('${mac}','${basicId}')" id="histQueryFaaBtn_${mac}" style="width:100%;font-size:0.6em;padding:6px;box-sizing:border-box;">Query FAA</button>`;
+    } else {
+      content += `<div style="color:#6b7280;font-size:0.55em;">No RemoteID</div>`;
+    }
+    content += `<div id="histFaaResult_${mac}">`;
+    if (faaData && faaData.data && faaData.data.items && faaData.data.items.length > 0) {
+      const item = faaData.data.items[0];
+      content += `<div style="background:rgba(99,102,241,0.08);padding:4px;margin-top:4px;border-radius:3px;font-size:0.55em;">`;
+      if (item.makeName) content += `<div><span style="color:#f0abfc;">Make:</span> <span style="color:#00ff88;">${item.makeName}</span></div>`;
+      if (item.modelName) content += `<div><span style="color:#f0abfc;">Model:</span> <span style="color:#00ff88;">${item.modelName}</span></div>`;
+      if (item.series) content += `<div><span style="color:#f0abfc;">Series:</span> <span style="color:#00ff88;">${item.series}</span></div>`;
+      if (item.trackingNumber) content += `<div><span style="color:#f0abfc;">Track#:</span> <span style="color:#00ff88;">${item.trackingNumber}</span></div>`;
+      content += `</div>`;
+    }
+    content += `</div></div></div>`;
+    
+    // Coordinates & Maps Section - collapsible, collapsed by default on mobile
+    content += `<div class="popup-section${isMobile ? ' collapsed' : ''}" style="border:1px solid rgba(0,255,136,0.2);border-radius:4px;margin:4px 0;">`;
+    content += `<div onclick="event.stopPropagation();this.parentElement.classList.toggle('collapsed');" style="background:rgba(0,255,136,0.1);padding:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">`;
+    content += `<span style="color:#00ff88;font-size:0.65em;">GPS & Maps</span><span style="color:#6b7280;font-size:0.5em;">tap</span></div>`;
+    content += `<div class="popup-section-content" style="padding:6px;">`;
     if (droneData.droneCoords && droneData.droneCoords.length > 0) {
       const first = droneData.droneCoords[0];
       const last = droneData.droneCoords[droneData.droneCoords.length - 1];
-      content += `<div style="margin:6px 0;padding:4px;background:rgba(0,0,0,0.2);border-radius:4px;font-size:0.65em;">
-        <div><span style="color:#6b7280;">Points:</span> <span style="color:#00ff88;">${droneData.droneCoords.length}</span></div>
-        <div><span style="color:#6b7280;">Start:</span> <span style="color:#e0e0e0;">${first[0].toFixed(5)}, ${first[1].toFixed(5)}</span></div>
-        <div><span style="color:#6b7280;">End:</span> <span style="color:#e0e0e0;">${last[0].toFixed(5)}, ${last[1].toFixed(5)}</span></div>
-      </div>`;
-      
-      // Google Maps links
-      content += `<div style="font-size:0.65em;margin:4px 0;">
-        <a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${first[0]},${first[1]}" style="color:#00ffd5;">Start</a> | 
-        <a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${last[0]},${last[1]}" style="color:#00ffd5;">End</a> (Maps)
-      </div>`;
+      content += `<div style="background:rgba(0,0,0,0.2);padding:4px;border-radius:3px;font-size:0.55em;margin-bottom:4px;">`;
+      content += `<div><span style="color:#6b7280;">Pts:</span> <span style="color:#00ff88;">${droneData.droneCoords.length}</span></div>`;
+      content += `<div><span style="color:#6b7280;">S:</span> <span style="color:#e0e0e0;">${first[0].toFixed(4)}, ${first[1].toFixed(4)}</span></div>`;
+      content += `<div><span style="color:#6b7280;">E:</span> <span style="color:#e0e0e0;">${last[0].toFixed(4)}, ${last[1].toFixed(4)}</span></div>`;
+      content += `</div>`;
+      content += `<div style="font-size:0.55em;">`;
+      content += `<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${first[0]},${first[1]}" style="color:#00ffd5;padding:2px;" onclick="event.stopPropagation();">Start</a> | `;
+      content += `<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${last[0]},${last[1]}" style="color:#00ffd5;padding:2px;" onclick="event.stopPropagation();">End</a>`;
+      content += `</div>`;
+    } else {
+      content += `<div style="color:#6b7280;font-size:0.55em;">No coordinates</div>`;
     }
+    content += `</div></div>`;
     
-    // Track Color slider
-    content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
-      <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Track Color</label>
-      <input type="range" id="histColorSlider_${id}" min="0" max="360" value="${hue}" 
-             style="width:100%;display:block;box-sizing:border-box;" onchange="updateHistoricalColor('${id}', this.value)">
-    </div>`;
+    // Alias Section - collapsible, collapsed by default on mobile
+    content += `<div class="popup-section${isMobile ? ' collapsed' : ''}" style="border:1px solid rgba(99,102,241,0.2);border-radius:4px;margin:4px 0;">`;
+    content += `<div onclick="event.stopPropagation();this.parentElement.classList.toggle('collapsed');" style="background:rgba(99,102,241,0.1);padding:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">`;
+    content += `<span style="color:#a5b4fc;font-size:0.65em;">Alias</span><span style="color:#6b7280;font-size:0.5em;">tap</span></div>`;
+    content += `<div class="popup-section-content" style="padding:6px;">`;
+    content += `<input type="text" id="histAliasInput_${mac}" value="${currentAlias}" onclick="event.stopPropagation();" placeholder="Enter alias" style="width:100%;box-sizing:border-box;font-size:14px;padding:8px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;margin-bottom:4px;">`;
+    content += `<div style="display:flex;gap:4px;">`;
+    content += `<button onclick="event.stopPropagation();saveHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.6em;padding:8px;">Save</button>`;
+    content += `<button onclick="event.stopPropagation();clearHistoricalAlias('${mac}','${id}')" style="flex:1;font-size:0.6em;padding:8px;">Clear</button>`;
+    content += `</div></div></div>`;
     
-    // Flights section
-    if (flightCount > 0) {
-      content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
-        <label style="color:#6b7280;font-size:0.65em;display:block;margin-bottom:3px;">Flights (${flightCount})</label>
-        <select id="flightSelect_${id}" style="width:100%;display:block;font-size:0.7em;padding:6px;background:#12121f;color:#e0e0e0;border:1px solid rgba(99,102,241,0.3);border-radius:3px;box-sizing:border-box;" onchange="filterFlight('${id}', this.value)">
-          ${flightOptions}
-        </select>
-      </div>`;
-      
-      // Replay controls
-      content += `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
-        <label style="color:#00ff88;font-size:0.65em;display:block;margin-bottom:3px;">Replay</label>
-        <div style="display:flex;gap:3px;margin-bottom:4px;width:100%;">
-          <button onclick="event.stopPropagation();startReplay('${id}')" style="flex:1;font-size:0.65em;padding:6px;">▶ Play</button>
-          <button onclick="event.stopPropagation();pauseReplay()" style="flex:1;font-size:0.65em;padding:6px;">⏸</button>
-          <button onclick="event.stopPropagation();stopReplay()" style="flex:1;font-size:0.65em;padding:6px;">⏹</button>
-        </div>
-        <div style="display:flex;gap:2px;width:100%;">
-          <button onclick="event.stopPropagation();setReplaySpeed(0.5)" style="flex:1;font-size:0.6em;padding:4px;">0.5x</button>
-          <button onclick="event.stopPropagation();setReplaySpeed(1)" style="flex:1;font-size:0.6em;padding:4px;">1x</button>
-          <button onclick="event.stopPropagation();setReplaySpeed(2)" style="flex:1;font-size:0.6em;padding:4px;">2x</button>
-          <button onclick="event.stopPropagation();setReplaySpeed(5)" style="flex:1;font-size:0.6em;padding:4px;">5x</button>
-        </div>
-      </div>`;
-    }
-    
-    // Show/Hide and Zoom buttons
-    content += `<div style="display:flex;gap:4px;margin-top:6px;padding-top:6px;border-top:1px solid rgba(99,102,241,0.3);width:100%;box-sizing:border-box;">
-      <button onclick="event.stopPropagation();toggleHistoricalVisibility('${id}')" style="flex:1;font-size:0.7em;padding:8px;">${droneData.visible ? 'Hide' : 'Show'}</button>
-      <button onclick="event.stopPropagation();zoomToHistoricalDrone('${id}')" style="flex:1;font-size:0.7em;padding:8px;">Zoom</button>
-    </div>`;
+    // Color Section - collapsible, collapsed by default on mobile
+    content += `<div class="popup-section${isMobile ? ' collapsed' : ''}" style="border:1px solid rgba(255,136,0,0.2);border-radius:4px;margin:4px 0;">`;
+    content += `<div onclick="event.stopPropagation();this.parentElement.classList.toggle('collapsed');" style="background:rgba(255,136,0,0.1);padding:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">`;
+    content += `<span style="color:#ffaa00;font-size:0.65em;">Track Color</span><span style="color:#6b7280;font-size:0.5em;">tap</span></div>`;
+    content += `<div class="popup-section-content" style="padding:6px;">`;
+    content += `<input type="range" id="histColorSlider_${id}" min="0" max="360" value="${hue}" style="width:100%;box-sizing:border-box;height:24px;" onchange="updateHistoricalColor('${id}', this.value)">`;
+    content += `</div></div>`;
     
     content += `</div>`;
     return content;

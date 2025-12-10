@@ -17,7 +17,7 @@
 
 ---
 
-## **What's New**
+## **What's New - Cyber UI**
 
 The mapper now features a completely redesigned **dark cyber aesthetic** with:
 
