@@ -140,7 +140,7 @@ void send_json_fast(const uav_data *UAV) {
   Serial.println(json_msg);
 }
 
-// Modified function: emits two JSON messages over Serial1
+// Modified function: emits single combined JSON message over Serial1 (aligned with mesh-mapper.py API)
 void print_compact_message(const uav_data *UAV) {
   static unsigned long lastSendTime = 0;
   const unsigned long sendInterval = 3000;  // 3-second interval for UART messages
@@ -153,21 +153,18 @@ void print_compact_message(const uav_data *UAV) {
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
 
-  // First JSON: MAC address and drone coordinates
-  char json_drone[128];
-  int len_drone = snprintf(json_drone, sizeof(json_drone),
-                           "{\"mac\":\"%s\",\"drone_lat\":%.6f,\"drone_long\":%.6f}",
-                           mac_str, UAV->lat_d, UAV->long_d);
-  if (Serial1.availableForWrite() >= len_drone) {
-    Serial1.println(json_drone);
+  // Single combined JSON message matching mesh-mapper.py API expectations
+  char json_msg[256];
+  int len_msg = snprintf(json_msg, sizeof(json_msg),
+    "{\"mac\":\"%s\",\"rssi\":%d,\"drone_lat\":%.6f,\"drone_long\":%.6f,"
+    "\"drone_altitude\":%d,\"pilot_lat\":%.6f,\"pilot_long\":%.6f,"
+    "\"basic_id\":\"%s\"}",
+    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
+    UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
+  
+  if (Serial1.availableForWrite() >= len_msg) {
+    Serial1.println(json_msg);
   }
-
-  // Second JSON: remote ID and pilot coordinates
-  char json_pilot[128];
-  snprintf(json_pilot, sizeof(json_pilot),
-           "{\"remote_id\":\"%s\",\"pilot_lat\":%.6f,\"pilot_long\":%.6f}",
-           UAV->uav_id, UAV->base_lat_d, UAV->base_long_d);
-  Serial1.println(json_pilot);
 }
 
 // Wi-Fi promiscuous packet callback
