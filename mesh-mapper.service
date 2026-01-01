@@ -1,0 +1,10 @@
+[Unit]
+Description: Mesh Drone Mapper
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/{add-your-home-dir-here}/mesh-mapper/mesh-mapper.py
+Type=simple
+
+[Install]
+WantedBy=multi-user.target
