@@ -57,7 +57,7 @@ static uint8_t chanIdx24 = 0;
 static uint8_t chanIdx5  = 0;
 static bool    on5GHz    = false;
 static unsigned long lastHop = 0;
-#define HOP_INTERVAL_MS 100  // 100ms dwell -- halves full sweep time to ~7.5s
+#define HOP_INTERVAL_MS 50   // 50ms dwell -- reliable catch window, ~3.8s full sweep
 
 static void hopChannel() {
     if (on5GHz) {
