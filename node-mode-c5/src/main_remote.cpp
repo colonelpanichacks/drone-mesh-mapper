@@ -98,11 +98,11 @@ void wifiCallback(void *, wifi_promiscuous_pkt_type_t);
 // =============================================================================
 // WiFi Channel Hopping -- Dual-band 2.4GHz + 5GHz
 // =============================================================================
-// 2.4GHz channels 1-13 + 5GHz channels commonly used for Remote ID
-static const uint8_t channels_24g[] = { 1, 6, 11, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13 };
-static const uint8_t channels_5g[]  = { 36, 40, 44, 48, 52, 56, 60, 64,
-                                        100, 104, 108, 112, 116, 120, 124, 128,
-                                        132, 136, 140, 144, 149, 153, 157, 161, 165 };
+// Only channels drones actually use for Remote ID:
+//   2.4GHz: NAN lives on ch6, beacons on 1/6/11
+//   5GHz:   UNII-3 only (149-165) -- DFS channels (36-144) not used for RID
+static const uint8_t channels_24g[] = { 6, 1, 11 };
+static const uint8_t channels_5g[]  = { 149, 153, 157, 161, 165 };
 #define NUM_24G_CH  (sizeof(channels_24g) / sizeof(channels_24g[0]))
 #define NUM_5G_CH   (sizeof(channels_5g) / sizeof(channels_5g[0]))
 
