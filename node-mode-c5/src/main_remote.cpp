@@ -110,7 +110,7 @@ static uint8_t chanIdx24 = 0;
 static uint8_t chanIdx5  = 0;
 static bool    on5GHz    = false;
 static unsigned long lastHop = 0;
-#define HOP_INTERVAL_MS 200  // Hop every 200ms
+#define HOP_INTERVAL_MS 100  // 100ms dwell -- halves full sweep time to ~7.5s
 
 static void hopChannel() {
     // Alternate between 2.4GHz and 5GHz bands
