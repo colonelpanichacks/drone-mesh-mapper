@@ -4237,6 +4237,11 @@ def startup_auto_connect():
 
 def parse_arguments():
     """Parse command line arguments"""
+    
+    # If host platform is MacOS, change default port to 8080 to avoid AirPlay conflict
+    is_macos = sys.platform == 'darwin'
+    default_port = 8080 if is_macos else 5000
+    
     parser = argparse.ArgumentParser(
         description='Drone Detection Mapper - Automatically detect and map drone activity',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -4272,8 +4277,8 @@ Examples:
     parser.add_argument(
         '--web-port',
         type=int,
-        default=5000,
-        help='Web interface port (default: 5000)'
+        default=default_port,
+        help=f'Web interface port (default: {default_port})'
     )
     
     parser.add_argument(
