@@ -112,7 +112,7 @@ void print_compact_message(const id_data *UAV);
 // Global Variables
 // ============================================================================
 
-#define MAX_UAVS 8
+#define MAX_UAVS 32
 id_data uavs[MAX_UAVS] = {0};
 NimBLEScan* pBLEScan = nullptr;
 ODID_UAS_Data UAS_data;

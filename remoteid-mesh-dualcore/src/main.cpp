@@ -41,7 +41,7 @@ void callback(void *, wifi_promiscuous_pkt_type_t);
 void send_json_fast(const id_data *UAV);
 void print_compact_message(const id_data *UAV);
 
-#define MAX_UAVS 8
+#define MAX_UAVS 32
 id_data uavs[MAX_UAVS] = {0};
 BLEScan* pBLEScan = nullptr;
 ODID_UAS_Data UAS_data;

@@ -61,7 +61,6 @@ pio run -t upload
 1. **Node ID required**: Remote nodes must send `node_id` in JSON for dedup to work
 2. **GPIO pin variations**: `remoteid-mesh` uses GPIO6/7 (different from other variants)
 3. **BLE vs WiFi**: Both run concurrently on dual-core S3 — WiFi faster, BLE better indoor
-4. **Memory limits**: Max 8 simultaneous UAVs per remote node (eviction on overflow)
 5. **Heltec V3 Meshtastic config**: Must enable serial module (`serial.enabled true`, `serial.mode TEXTMSG`, `serial.baud BAUD_115200`)
 6. **5GHz channels**: C5 variant scans UNII-3 (149, 153, 157, 161, 165), 50ms dwell each
 7. **FAA cache**: 3-tier fallback: `(mac, basic_id)` → `(mac, *)` → previous tracked entry

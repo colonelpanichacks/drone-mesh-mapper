@@ -39,7 +39,7 @@ struct uav_data {
   int      flag;
 };
 
-#define MAX_UAVS 8
+#define MAX_UAVS 32
 uav_data uavs[MAX_UAVS] = {0};
 BLEScan* pBLEScan = nullptr;
 ODID_UAS_Data UAS_data;
