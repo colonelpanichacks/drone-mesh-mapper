@@ -3,3 +3,6 @@ flask-socketio>=5.0.0
 requests>=2.25.0
 urllib3>=1.26.0
 pyserial>=3.5
+
+# Optional: enables native Beast TCP ADS-B decode (HackRF/RTL-SDR direct, no dump1090 needed)
+# pip install pyModeS

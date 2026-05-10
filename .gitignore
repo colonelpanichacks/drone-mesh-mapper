@@ -1,8 +1,54 @@
+# ── OS / Editor ────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
 
-*.DS_Store
-
+# ── PlatformIO build artifacts ─────────────────────────────
+*.pio/
+.pio/
 *.pio/build/
-
-*.vscode/
-
 node-mode-dualcore/.pio/build/
+remoteid-mesh-dualcore/.pio/build/
+remoteid-mesh/.pio/build/
+remoteid-c5-5g/.pio/build/
+
+# ── Python ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── Runtime state (user-specific, regenerated on each run) ─
+selected_ports.json
+aliases.json
+drone_tags.json
+geofences.json
+webhook_url.json
+adsb_config.json
+cache_jobs.json
+
+# ── Session detections / exports (per-run, contain positions) ─
+detections_*.csv
+detections_*.kml
+cumulative_detections.csv
+cumulative.kml
+mapper.log
+*.log
+
+# ── Offline map tile cache (large, regenerable) ────────────
+tiles/*.mbtiles
+tiles/*.mbtiles-*
+tiles/*-wal
+tiles/*-shm
+
+# ── Local secrets (just in case) ───────────────────────────
+.env
+.env.local
+*.secret
+*credentials*
+faa_cache.csv
+faa_log.csv
