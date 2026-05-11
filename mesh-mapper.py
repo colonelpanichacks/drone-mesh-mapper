@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, redirect, url_for, render_template, render_template_string, send_file, make_response
 from flask_socketio import SocketIO, emit
 from collections import deque
@@ -2675,11 +2676,14 @@ def _bbox_to_circle_tiles(bbox, max_radius_nm: int = 250, pad: float = 1.10) -> 
     step_lon_deg = step_nm / nm_per_deg_lon
     rows = max(1, math.ceil((n - s) / step_lat_deg))
     cols = max(1, math.ceil((e_eff - w) / step_lon_deg))
-    # Cap total to keep API load reasonable. 16 tiles = ~16 quick HTTP gets.
+    # Cap total to keep API load reasonable. 36 tiles = ~36 quick HTTP gets,
+    # fired in parallel by the fetchers so total wall time is still ~1-2s. At
+    # 36, full-US zoom-out gets NO seam gaps between circles — every aircraft
+    # in the lower 48 is covered.
     total = rows * cols
-    if total > 16:
-        # Trim by growing the step so we land at <=16 tiles.
-        scale = math.sqrt(total / 16.0)
+    if total > 36:
+        # Trim by growing the step so we land at <=36 tiles.
+        scale = math.sqrt(total / 36.0)
         step_lat_deg *= scale
         step_lon_deg *= scale
         rows = max(1, math.ceil((n - s) / step_lat_deg))
@@ -2703,89 +2707,99 @@ def _adsb_fetch_adsblol(cfg, sess) -> list:
     A bbox is REQUIRED — the providers do not expose a 'firehose' endpoint.
     For bboxes larger than a single 250nm circle can cover, we tile the bbox
     and aggregate. That's how a US-wide zoom-out shows aircraft coast to coast
-    instead of just within 250nm of Kansas."""
+    instead of just within 250nm of Kansas.
+
+    Tiles are fetched in parallel via a ThreadPoolExecutor so a 36-tile US-wide
+    poll completes in ~1-2s instead of 18-25s sequential."""
     bbox = cfg.get('bbox')
     if not (bbox and len(bbox) == 4):
         raise RuntimeError("adsb.lol needs a bbox; toggle 'Only fetch around current map view' or pan to your AO")
     tiles = _bbox_to_circle_tiles(bbox)
-    seen_icao = set()
-    out = []
-    for (lat_c, lon_c, radius_nm) in tiles:
+    def _fetch_one(t):
+        lat_c, lon_c, radius_nm = t
         url = f"https://api.adsb.lol/v2/lat/{lat_c:.4f}/lon/{lon_c:.4f}/dist/{radius_nm}"
         try:
             r = sess.get(url, timeout=10)
             r.raise_for_status()
-            data = r.json()
+            return r.json().get('ac', []) or []
         except Exception:
-            continue
-        for a in data.get('ac', []):
-            try:
-                lat, lon = a.get('lat'), a.get('lon')
-                if lat is None or lon is None:
+            return []
+    seen_icao = set()
+    out = []
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(tiles)))) as pool:
+        for ac in pool.map(_fetch_one, tiles):
+            for a in ac:
+                try:
+                    lat, lon = a.get('lat'), a.get('lon')
+                    if lat is None or lon is None:
+                        continue
+                    icao = str(a.get('hex', '')).lower()
+                    if not icao or icao in seen_icao:
+                        continue
+                    seen_icao.add(icao)
+                    out.append({
+                        'icao': icao,
+                        'callsign': (a.get('flight') or '').strip(),
+                        'lat': float(lat), 'lon': float(lon),
+                        'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
+                        'velocity': a.get('gs'),       # ground speed (knots)
+                        'heading': a.get('track'),
+                        'vert_rate': a.get('baro_rate'),
+                        'squawk': a.get('squawk'),
+                        'on_ground': (a.get('alt_baro') == 'ground'),
+                        'category': a.get('category'),
+                        'seen': time.time(),
+                    })
+                except (TypeError, ValueError):
                     continue
-                icao = str(a.get('hex', '')).lower()
-                if not icao or icao in seen_icao:
-                    continue
-                seen_icao.add(icao)
-                out.append({
-                    'icao': icao,
-                    'callsign': (a.get('flight') or '').strip(),
-                    'lat': float(lat), 'lon': float(lon),
-                    'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
-                    'velocity': a.get('gs'),       # ground speed (knots)
-                    'heading': a.get('track'),
-                    'vert_rate': a.get('baro_rate'),
-                    'squawk': a.get('squawk'),
-                    'on_ground': (a.get('alt_baro') == 'ground'),
-                    'category': a.get('category'),
-                    'seen': time.time(),
-                })
-            except (TypeError, ValueError):
-                continue
     return out
 
 
 def _adsb_fetch_adsbfi(cfg, sess) -> list:
     """adsb.fi — same shape as adsb.lol, free no key. Bbox required. Tiles
-    large bboxes the same way to give full-viewport coverage at any zoom."""
+    large bboxes the same way to give full-viewport coverage at any zoom.
+    Parallel tile fetch via ThreadPoolExecutor."""
     bbox = cfg.get('bbox')
     if not (bbox and len(bbox) == 4):
         raise RuntimeError("adsb.fi needs a bbox; toggle 'Only fetch around current map view' or pan to your AO")
     tiles = _bbox_to_circle_tiles(bbox)
-    seen_icao = set()
-    out = []
-    for (lat_c, lon_c, radius_nm) in tiles:
+    def _fetch_one(t):
+        lat_c, lon_c, radius_nm = t
         url = f"https://opendata.adsb.fi/api/v2/lat/{lat_c:.4f}/lon/{lon_c:.4f}/dist/{radius_nm}"
         try:
             r = sess.get(url, timeout=10)
             r.raise_for_status()
-            data = r.json()
+            return r.json().get('ac', []) or []
         except Exception:
-            continue
-        for a in data.get('ac', []):
-            try:
-                lat, lon = a.get('lat'), a.get('lon')
-                if lat is None or lon is None:
+            return []
+    seen_icao = set()
+    out = []
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(tiles)))) as pool:
+        for ac in pool.map(_fetch_one, tiles):
+            for a in ac:
+                try:
+                    lat, lon = a.get('lat'), a.get('lon')
+                    if lat is None or lon is None:
+                        continue
+                    icao = str(a.get('hex', '')).lower()
+                    if not icao or icao in seen_icao:
+                        continue
+                    seen_icao.add(icao)
+                    out.append({
+                        'icao': icao,
+                        'callsign': (a.get('flight') or '').strip(),
+                        'lat': float(lat), 'lon': float(lon),
+                        'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
+                        'velocity': a.get('gs'),
+                        'heading': a.get('track'),
+                        'vert_rate': a.get('baro_rate'),
+                        'squawk': a.get('squawk'),
+                        'on_ground': (a.get('alt_baro') == 'ground'),
+                        'category': a.get('category'),
+                        'seen': time.time(),
+                    })
+                except (TypeError, ValueError):
                     continue
-                icao = str(a.get('hex', '')).lower()
-                if not icao or icao in seen_icao:
-                    continue
-                seen_icao.add(icao)
-                out.append({
-                    'icao': icao,
-                    'callsign': (a.get('flight') or '').strip(),
-                    'lat': float(lat), 'lon': float(lon),
-                    'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
-                    'velocity': a.get('gs'),
-                    'heading': a.get('track'),
-                    'vert_rate': a.get('baro_rate'),
-                    'squawk': a.get('squawk'),
-                    'on_ground': (a.get('alt_baro') == 'ground'),
-                    'category': a.get('category'),
-                    'seen': time.time(),
-                })
-            except (TypeError, ValueError):
-                continue
     return out
 
 
@@ -2835,40 +2849,43 @@ def _adsb_fetch_airplaneslive(cfg, sess) -> list:
     if not (bbox and len(bbox) == 4):
         raise RuntimeError("airplanes.live needs a bbox; toggle 'Only fetch around current map view' or pan to your AO")
     tiles = _bbox_to_circle_tiles(bbox)
-    seen_icao = set()
-    out = []
-    for (lat_c, lon_c, radius_nm) in tiles:
+    def _fetch_one(t):
+        lat_c, lon_c, radius_nm = t
         url = f"https://api.airplanes.live/v2/point/{lat_c:.4f}/{lon_c:.4f}/{radius_nm}"
         try:
             r = sess.get(url, timeout=10)
             r.raise_for_status()
-            data = r.json()
+            return r.json().get('ac', []) or []
         except Exception:
-            continue
-        for a in data.get('ac', []):
-            try:
-                lat, lon = a.get('lat'), a.get('lon')
-                if lat is None or lon is None:
+            return []
+    seen_icao = set()
+    out = []
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(tiles)))) as pool:
+        for ac in pool.map(_fetch_one, tiles):
+            for a in ac:
+                try:
+                    lat, lon = a.get('lat'), a.get('lon')
+                    if lat is None or lon is None:
+                        continue
+                    icao = str(a.get('hex', '')).lower()
+                    if not icao or icao in seen_icao:
+                        continue
+                    seen_icao.add(icao)
+                    out.append({
+                        'icao': icao,
+                        'callsign': (a.get('flight') or '').strip(),
+                        'lat': float(lat), 'lon': float(lon),
+                        'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
+                        'velocity': a.get('gs'),
+                        'heading': a.get('track'),
+                        'vert_rate': a.get('baro_rate'),
+                        'squawk': a.get('squawk'),
+                        'on_ground': (a.get('alt_baro') == 'ground'),
+                        'category': a.get('category'),
+                        'seen': time.time(),
+                    })
+                except (TypeError, ValueError):
                     continue
-                icao = str(a.get('hex', '')).lower()
-                if not icao or icao in seen_icao:
-                    continue
-                seen_icao.add(icao)
-                out.append({
-                    'icao': icao,
-                    'callsign': (a.get('flight') or '').strip(),
-                    'lat': float(lat), 'lon': float(lon),
-                    'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
-                    'velocity': a.get('gs'),
-                    'heading': a.get('track'),
-                    'vert_rate': a.get('baro_rate'),
-                    'squawk': a.get('squawk'),
-                    'on_ground': (a.get('alt_baro') == 'ground'),
-                    'category': a.get('category'),
-                    'seen': time.time(),
-                })
-            except (TypeError, ValueError):
-                continue
     return out
 
 
@@ -3212,6 +3229,11 @@ def _adsb_poller_loop():
     """Background poller; respects ADSB_CONFIG['enabled'] and SHUTDOWN_EVENT."""
     sess = requests.Session()
     sess.headers.update({'User-Agent': 'drone-mesh-mapper/adsb (https://github.com/colonelpanichacks/drone-mesh-mapper)'})
+    # Big connection pool — we fire up to 16 parallel tile fetches per poll, so
+    # the default urllib3 pool of 10 thrashes. 32 keeps it cool with headroom.
+    _big_adapter = HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=0)
+    sess.mount('https://', _big_adapter)
+    sess.mount('http://', _big_adapter)
     while not SHUTDOWN_EVENT.is_set():
         try:
             cfg = dict(ADSB_CONFIG)  # snapshot
@@ -3312,6 +3334,9 @@ def _adsb_kick_fetch():
         return
     sess = requests.Session()
     sess.headers.update({'User-Agent': 'drone-mesh-mapper/adsb-kick'})
+    _big_adapter = HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=0)
+    sess.mount('https://', _big_adapter)
+    sess.mount('http://', _big_adapter)
     try:
         aircraft = src['fetch'](cfg, sess)
         now = time.time()
@@ -3536,7 +3561,8 @@ def api_adsb_aircraft():
     Optional query params reduce payload size for fast client polling at
     continental zoom:
       ?bbox=w,s,e,n   — return only aircraft inside this bbox (5% padded)
-      ?limit=N        — hard cap (default 1500, never returns more)
+      ?limit=N        — hard cap (default 20000, effectively unlimited unless
+                        explicitly capped). Pass 0 for no cap.
       ?fields=mini    — strip non-essential fields (no category, no squawk
                         text) to halve the JSON size when used together
     """
@@ -3571,14 +3597,18 @@ def api_adsb_aircraft():
                             and (a['lon'] >= w2 or a['lon'] <= e2)]
         except (ValueError, TypeError):
             pass   # bad bbox → just return everything
-    # Hard cap so the response never gets pathological.
+    # Effectively unlimited by default — return every aircraft we have. Pass
+    # ?limit=N to cap explicitly, ?limit=0 to disable any cap.
     try:
-        limit = int(request.args.get('limit', 1500))
-        limit = max(1, min(5000, limit))
+        limit_raw = int(request.args.get('limit', 20000))
+        if limit_raw <= 0:
+            limit = None
+        else:
+            limit = max(1, min(50000, limit_raw))
     except (ValueError, TypeError):
-        limit = 1500
+        limit = 20000
     truncated = False
-    if len(snapshot) > limit:
+    if limit is not None and len(snapshot) > limit:
         snapshot = snapshot[:limit]
         truncated = True
     # Optional mini payload — drop fields the map doesn't strictly need to
@@ -9428,6 +9458,12 @@ function _adsbUpdateOpenPopupStats(a) {
   });
 }
 
+// Chunked apply state — when snapshot.length is huge we slice the work across
+// rAF frames so we never block the main thread > 16ms. Coalesces overlapping
+// applies: if a new snapshot arrives while one is being chunked, the new one
+// replaces the queued one (we always render the most recent).
+let _adsbApplyQueued = null;
+let _adsbApplyRunning = false;
 function adsbApply(snapshot) {
   // If the map is actively moving, defer all marker churn — we'll apply the
   // most recent snapshot on moveend. Map drag/zoom stays smooth no matter how
@@ -9436,12 +9472,87 @@ function adsbApply(snapshot) {
     _adsbDeferredSnapshot = snapshot;
     return;
   }
+  // Snapshots over CHUNK_THRESHOLD aircraft get processed in rAF slabs so a
+  // single huge poll never freezes the UI. Smaller snapshots go through the
+  // fast sync path.
+  const CHUNK_THRESHOLD = 400;
+  if (snapshot.length > CHUNK_THRESHOLD) {
+    _adsbApplyQueued = snapshot;
+    if (!_adsbApplyRunning) {
+      _adsbApplyRunning = true;
+      requestAnimationFrame(_adsbApplyChunked);
+    }
+    return;
+  }
+  _adsbApplyDirect(snapshot);
+}
+
+function _adsbApplyChunked() {
+  // Always work on the MOST RECENT queued snapshot. If a new one arrived during
+  // chunking, abandon the partial pass and start fresh — we want the user to
+  // see the latest data, not stale data we've half-applied.
+  if (!_adsbApplyQueued) { _adsbApplyRunning = false; return; }
+  const snapshot = _adsbApplyQueued;
+  _adsbApplyQueued = null;
+  const SLAB = 300;             // aircraft per rAF frame
+  let i = 0;
+  const seen = new Set();
+  // Seed _lastAdsbSnapshot up front for ALL of them so the filter / lookup
+  // helpers see the latest data even before the markers are placed.
+  for (const a of snapshot) {
+    if (a && a.icao && a.lat != null && a.lon != null) {
+      _lastAdsbSnapshot[a.icao] = a;
+      _drStorePosition(a);
+    }
+  }
+  function step() {
+    // Mid-chunk: if a newer snapshot arrived, abort this pass and let the
+    // next rAF run the fresh data.
+    if (_adsbApplyQueued) {
+      requestAnimationFrame(_adsbApplyChunked);
+      return;
+    }
+    const end = Math.min(i + SLAB, snapshot.length);
+    for (; i < end; i++) {
+      _adsbApplyOne(snapshot[i], seen);
+    }
+    if (i < snapshot.length) {
+      requestAnimationFrame(step);
+    } else {
+      _adsbApplyReap(seen);
+      _adsbApplyFollowLocked();
+      _adsbApplyUpdateStatus(snapshot.length);
+      _adsbApplyRunning = false;
+      // If a newer snapshot landed during the last slab, kick it now.
+      if (_adsbApplyQueued) {
+        _adsbApplyRunning = true;
+        requestAnimationFrame(_adsbApplyChunked);
+      }
+    }
+  }
+  step();
+}
+
+function _adsbApplyDirect(snapshot) {
   const seen = new Set();
   snapshot.forEach(a => {
     if (!a.icao || a.lat == null || a.lon == null) return;
     _lastAdsbSnapshot[a.icao] = a;
     // Anchor a fresh dead-reckoning state for this aircraft
     _drStorePosition(a);
+    _adsbApplyOne(a, seen);
+  });
+  _adsbApplyReap(seen);
+  _adsbApplyFollowLocked();
+  _adsbApplyUpdateStatus(snapshot.length);
+}
+
+function _adsbApplyOne(a, seen) {
+  // Per-aircraft work extracted so it can be shared between the chunked path
+  // (rAF slabs) and the direct path (small snapshots). Pre-validated by caller
+  // that a.icao / a.lat / a.lon exist.
+  if (!a || !a.icao || a.lat == null || a.lon == null) return;
+  {
     if (!aircraftPassesFilter(a)) return;       // OSINT filter
     seen.add(a.icao);
     // Aircraft fill matches the legend chip color (OSINT tag), so
@@ -9478,23 +9589,25 @@ function adsbApply(snapshot) {
       } else if (!isOpen) {
         m.setPopupContent(adsbPopup(a));
       }
-      // Defensive: ensure every existing aircraft marker has a working click
-      // handler. Use .off().on() to avoid stacking duplicates.
-      m.off('click', _adsbMarkerClick).on('click', _adsbMarkerClick);
-      m.off('mousedown', _adsbMarkerMouseDown).on('mousedown', _adsbMarkerMouseDown);
-      m.off('touchstart', _adsbMarkerMouseDown).on('touchstart', _adsbMarkerMouseDown);
-      _adsbAttachNativeClick(m);
-      // Apply the inline pointer-events override + DOM click listener to
-      // existing markers too — same fix path as new markers.
-      const el = m.getElement && m.getElement();
-      if (el && !el.__adsbClickBound) {
-        el.__adsbClickBound = true;
-        el.style.pointerEvents = 'auto';
-        el.style.cursor = 'pointer';
-        el.addEventListener('click', (e) => {
-          e.stopPropagation();
-          try { m.openPopup(); } catch (_) {}
-        }, true);
+      // Click handlers + DOM-level override only need to be attached ONCE per
+      // marker. The hot path (1000+ aircraft × poll) was wasting time off/on'ing
+      // the same handlers every poll — this short-circuits all of that.
+      if (!m.__adsbHandlersAttached) {
+        m.__adsbHandlersAttached = true;
+        m.on('click', _adsbMarkerClick);
+        m.on('mousedown', _adsbMarkerMouseDown);
+        m.on('touchstart', _adsbMarkerMouseDown);
+        _adsbAttachNativeClick(m);
+        const el = m.getElement && m.getElement();
+        if (el && !el.__adsbClickBound) {
+          el.__adsbClickBound = true;
+          el.style.pointerEvents = 'auto';
+          el.style.cursor = 'pointer';
+          el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            try { m.openPopup(); } catch (_) {}
+          }, true);
+        }
       }
     } else {
       // bubblingMouseEvents:false → marker clicks don't bubble to the map,
@@ -9515,6 +9628,7 @@ function adsbApply(snapshot) {
       m.on('touchstart', _adsbMarkerMouseDown);
       m.addTo(adsbLayer);
       adsbMarkers[a.icao] = m;
+      m.__adsbHandlersAttached = true;
       // Native DOM listener — bypasses Leaflet's click-detection heuristics
       // (which can decide a click was a drag if the cursor moves even one
       // pixel between mousedown and mouseup, eating the click silently).
@@ -9568,8 +9682,11 @@ function adsbApply(snapshot) {
         adsbTrails[a.icao].addTo(adsbTrailLayer);
       }
     }
-  });
-  // Drop aircraft (markers + trails) no longer present
+  }
+}
+
+function _adsbApplyReap(seen) {
+  // Drop aircraft (markers + trails) no longer present in the latest snapshot.
   Object.keys(adsbMarkers).forEach(icao => {
     if (!seen.has(icao)) {
       adsbLayer.removeLayer(adsbMarkers[icao]);
@@ -9582,7 +9699,9 @@ function adsbApply(snapshot) {
       delete adsbHistory[icao];
     }
   });
-  // Follow the locked aircraft if present in this snapshot
+}
+
+function _adsbApplyFollowLocked() {
   if (lockedAircraft && _lastAdsbSnapshot[lockedAircraft]) {
     const a = _lastAdsbSnapshot[lockedAircraft];
     if (a.lat != null && a.lon != null) {
@@ -9590,8 +9709,11 @@ function adsbApply(snapshot) {
       map.panTo([a.lat, a.lon], { animate: true, duration: 0.4, noMoveStart: true });
     }
   }
+}
+
+function _adsbApplyUpdateStatus(count) {
   const status = document.getElementById('adsbStatus');
-  if (status) status.textContent = snapshot.length + ' aircraft';
+  if (status) status.textContent = count + ' aircraft';
 }
 
 // Socket push from server — also reflects fetched count + last error in UI
@@ -10455,7 +10577,7 @@ function _adsbIsEnabled() {
 //   1. Asks the server to filter by the current viewport bbox (so a US-wide
 //      pan with 3500 aircraft returns only the ~200 you can see).
 //   2. Sends `fields=mini` to strip ~half the JSON wire size.
-//   3. Caps the response at 1500 aircraft.
+//   3. Returns EVERY aircraft in the viewport — no cap.
 //   4. Single-flight: if a fetch is in flight, skip — don't queue up overlapping
 //      requests that all race to update the map.
 //   5. Re-checks enabled state both before and after the network round trip.
@@ -10467,7 +10589,8 @@ async function _adsbPullSnapshot() {
   try {
     const b = map.getBounds();
     const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',');
-    const url = `/api/adsb/aircraft?bbox=${encodeURIComponent(bbox)}&fields=mini&limit=1500`;
+    // limit=0 → no cap. Server returns every aircraft in the viewport bbox.
+    const url = `/api/adsb/aircraft?bbox=${encodeURIComponent(bbox)}&fields=mini&limit=0`;
     const snap = await (await fetch(url)).json();
     if (!_adsbIsEnabled()) return;
     if (snap && snap.aircraft) {
@@ -10481,14 +10604,17 @@ async function _adsbPullSnapshot() {
     _adsbPullInflight = false;
   }
 }
-// Periodic refresh — keep things current without bogging. 6s when zoomed out
-// (many aircraft, expensive update), 4s when zoomed in (few aircraft).
+// Periodic refresh — tight cadence for realtime feel. Chunked-rAF marker
+// placement (in adsbApply) and defer-during-motion keep the map smooth even
+// at 3-4s polls with thousands of aircraft.
+//   - Zoom 0-5  = world  → 4s (massive viewport, fetch latency dominates)
+//   - Zoom 6-8  = region → 3s
+//   - Zoom 9+   = city   → 2s (few aircraft, snap fast)
 let _adsbPollTimer = null;
 function _adsbScheduleNextPoll() {
   if (_adsbPollTimer) { clearTimeout(_adsbPollTimer); _adsbPollTimer = null; }
   const zoom = (typeof map !== 'undefined') ? map.getZoom() : 8;
-  // Zoom 0-6 = continent / world (6s). Zoom 7+ = regional / city (4s).
-  const delay = zoom < 7 ? 6000 : 4000;
+  const delay = zoom < 6 ? 4000 : (zoom < 9 ? 3000 : 2000);
   _adsbPollTimer = setTimeout(async () => {
     await _adsbPullSnapshot();
     _adsbScheduleNextPoll();
@@ -11572,7 +11698,7 @@ ________                                  _____
 # and into the no-store headers so every reload after a server restart pulls
 # fresh JS/CSS, no manual hard-reload needed.
 APP_BUILD_ID = str(int(time.time()))
-APP_BUILD_LABEL = "PLANE-CLICK-FIX-" + APP_BUILD_ID[-4:]
+APP_BUILD_LABEL = "ADSB-ALL-PLANES-" + APP_BUILD_ID[-4:]
 
 @app.route('/')
 def index():
