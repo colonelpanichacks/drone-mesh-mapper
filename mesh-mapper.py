@@ -2643,71 +2643,149 @@ def _bbox_to_radius_nm(bbox, pad: float = 1.15) -> tuple:
     return lat, lon, radius_nm
 
 
+def _bbox_to_circle_tiles(bbox, max_radius_nm: int = 250, pad: float = 1.10) -> list:
+    """Tile a bbox into a grid of (lat, lon, radius_nm) circles when a single
+    250nm circle (the per-call cap on adsb.lol / adsb.fi / airplanes.live) can't
+    cover the whole viewport. Returns one circle for small bboxes, up to ~16
+    circles for continent-scale views.
+
+    Without this, zooming out to the whole US gets you aircraft within 250nm
+    of the geographic center (Kansas) — nothing visible in LA, NYC, Miami.
+    """
+    # Try the single-circle path first.
+    c_lat, c_lon, c_r = _bbox_to_radius_nm(bbox, pad=pad)
+    if c_r < max_radius_nm:
+        return [(c_lat, c_lon, c_r)]
+
+    # Need to tile. Compute how many lat/lon steps to cover the bbox with
+    # circles of radius `max_radius_nm`. Each circle covers ~max_radius_nm * 2
+    # nm across (we use a smaller effective step so neighboring circles overlap
+    # and no plane falls into a seam).
+    w, s, e, n = bbox
+    # Antimeridian wrap: compute effective east longitude > west to make stepping
+    # straightforward, then wrap back when constructing centers.
+    e_eff = e if e >= w else e + 360.0
+    # Tile step in nm — ~80% of radius so circles overlap.
+    step_nm = max_radius_nm * 0.8
+    # Center lat used for lon-degree scaling at the bbox center.
+    lat_center = (s + n) / 2
+    nm_per_deg_lat = 60.0     # constant
+    nm_per_deg_lon = max(1.0, 60.0 * math.cos(math.radians(lat_center)))
+    step_lat_deg = step_nm / nm_per_deg_lat
+    step_lon_deg = step_nm / nm_per_deg_lon
+    rows = max(1, math.ceil((n - s) / step_lat_deg))
+    cols = max(1, math.ceil((e_eff - w) / step_lon_deg))
+    # Cap total to keep API load reasonable. 16 tiles = ~16 quick HTTP gets.
+    total = rows * cols
+    if total > 16:
+        # Trim by growing the step so we land at <=16 tiles.
+        scale = math.sqrt(total / 16.0)
+        step_lat_deg *= scale
+        step_lon_deg *= scale
+        rows = max(1, math.ceil((n - s) / step_lat_deg))
+        cols = max(1, math.ceil((e_eff - w) / step_lon_deg))
+    # Distribute centers evenly across the bbox.
+    tiles = []
+    for ri in range(rows):
+        # Center of this row
+        tlat = s + (ri + 0.5) * ((n - s) / rows)
+        for ci in range(cols):
+            tlon_unwrapped = w + (ci + 0.5) * ((e_eff - w) / cols)
+            tlon = tlon_unwrapped
+            while tlon > 180.0:  tlon -= 360.0
+            while tlon < -180.0: tlon += 360.0
+            tiles.append((tlat, tlon, max_radius_nm))
+    return tiles
+
+
 def _adsb_fetch_adsblol(cfg, sess) -> list:
     """adsb.lol — free, no key. Uses /v2/lat/lon/dist for area-bounded queries.
-    A bbox is REQUIRED — the providers do not expose a 'firehose' endpoint."""
+    A bbox is REQUIRED — the providers do not expose a 'firehose' endpoint.
+    For bboxes larger than a single 250nm circle can cover, we tile the bbox
+    and aggregate. That's how a US-wide zoom-out shows aircraft coast to coast
+    instead of just within 250nm of Kansas."""
     bbox = cfg.get('bbox')
     if not (bbox and len(bbox) == 4):
         raise RuntimeError("adsb.lol needs a bbox; toggle 'Only fetch around current map view' or pan to your AO")
-    lat, lon, radius_nm = _bbox_to_radius_nm(bbox)
-    url = f"https://api.adsb.lol/v2/lat/{lat:.4f}/lon/{lon:.4f}/dist/{radius_nm}"
-    r = sess.get(url, timeout=10)
-    r.raise_for_status()
-    data = r.json()
+    tiles = _bbox_to_circle_tiles(bbox)
+    seen_icao = set()
     out = []
-    for a in data.get('ac', []):
+    for (lat_c, lon_c, radius_nm) in tiles:
+        url = f"https://api.adsb.lol/v2/lat/{lat_c:.4f}/lon/{lon_c:.4f}/dist/{radius_nm}"
         try:
-            lat, lon = a.get('lat'), a.get('lon')
-            if lat is None or lon is None:
-                continue
-            out.append({
-                'icao': str(a.get('hex', '')).lower(),
-                'callsign': (a.get('flight') or '').strip(),
-                'lat': float(lat), 'lon': float(lon),
-                'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
-                'velocity': a.get('gs'),       # ground speed (knots)
-                'heading': a.get('track'),
-                'vert_rate': a.get('baro_rate'),
-                'squawk': a.get('squawk'),
-                'on_ground': (a.get('alt_baro') == 'ground'),
-                'category': a.get('category'),
-                'seen': time.time(),
-            })
-        except (TypeError, ValueError):
+            r = sess.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
             continue
+        for a in data.get('ac', []):
+            try:
+                lat, lon = a.get('lat'), a.get('lon')
+                if lat is None or lon is None:
+                    continue
+                icao = str(a.get('hex', '')).lower()
+                if not icao or icao in seen_icao:
+                    continue
+                seen_icao.add(icao)
+                out.append({
+                    'icao': icao,
+                    'callsign': (a.get('flight') or '').strip(),
+                    'lat': float(lat), 'lon': float(lon),
+                    'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
+                    'velocity': a.get('gs'),       # ground speed (knots)
+                    'heading': a.get('track'),
+                    'vert_rate': a.get('baro_rate'),
+                    'squawk': a.get('squawk'),
+                    'on_ground': (a.get('alt_baro') == 'ground'),
+                    'category': a.get('category'),
+                    'seen': time.time(),
+                })
+            except (TypeError, ValueError):
+                continue
     return out
 
 
 def _adsb_fetch_adsbfi(cfg, sess) -> list:
-    """adsb.fi — same shape as adsb.lol, free no key. Bbox required."""
+    """adsb.fi — same shape as adsb.lol, free no key. Bbox required. Tiles
+    large bboxes the same way to give full-viewport coverage at any zoom."""
     bbox = cfg.get('bbox')
     if not (bbox and len(bbox) == 4):
         raise RuntimeError("adsb.fi needs a bbox; toggle 'Only fetch around current map view' or pan to your AO")
-    lat, lon, radius_nm = _bbox_to_radius_nm(bbox)
-    url = f"https://opendata.adsb.fi/api/v2/lat/{lat:.4f}/lon/{lon:.4f}/dist/{radius_nm}"
-    r = sess.get(url, timeout=10)
-    r.raise_for_status()
+    tiles = _bbox_to_circle_tiles(bbox)
+    seen_icao = set()
     out = []
-    for a in r.json().get('ac', []):
+    for (lat_c, lon_c, radius_nm) in tiles:
+        url = f"https://opendata.adsb.fi/api/v2/lat/{lat_c:.4f}/lon/{lon_c:.4f}/dist/{radius_nm}"
         try:
-            lat, lon = a.get('lat'), a.get('lon')
-            if lat is None or lon is None:
-                continue
-            out.append({
-                'icao': str(a.get('hex', '')).lower(),
-                'callsign': (a.get('flight') or '').strip(),
-                'lat': float(lat), 'lon': float(lon),
-                'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
-                'velocity': a.get('gs'),
-                'heading': a.get('track'),
-                'vert_rate': a.get('baro_rate'),
-                'squawk': a.get('squawk'),
-                'on_ground': (a.get('alt_baro') == 'ground'),
-                'category': a.get('category'),
-                'seen': time.time(),
-            })
-        except (TypeError, ValueError):
+            r = sess.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
             continue
+        for a in data.get('ac', []):
+            try:
+                lat, lon = a.get('lat'), a.get('lon')
+                if lat is None or lon is None:
+                    continue
+                icao = str(a.get('hex', '')).lower()
+                if not icao or icao in seen_icao:
+                    continue
+                seen_icao.add(icao)
+                out.append({
+                    'icao': icao,
+                    'callsign': (a.get('flight') or '').strip(),
+                    'lat': float(lat), 'lon': float(lon),
+                    'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
+                    'velocity': a.get('gs'),
+                    'heading': a.get('track'),
+                    'vert_rate': a.get('baro_rate'),
+                    'squawk': a.get('squawk'),
+                    'on_ground': (a.get('alt_baro') == 'ground'),
+                    'category': a.get('category'),
+                    'seen': time.time(),
+                })
+            except (TypeError, ValueError):
+                continue
     return out
 
 
@@ -2756,31 +2834,41 @@ def _adsb_fetch_airplaneslive(cfg, sess) -> list:
     bbox = cfg.get('bbox')
     if not (bbox and len(bbox) == 4):
         raise RuntimeError("airplanes.live needs a bbox; toggle 'Only fetch around current map view' or pan to your AO")
-    lat, lon, radius_nm = _bbox_to_radius_nm(bbox)
-    url = f"https://api.airplanes.live/v2/point/{lat:.4f}/{lon:.4f}/{radius_nm}"
-    r = sess.get(url, timeout=10)
-    r.raise_for_status()
+    tiles = _bbox_to_circle_tiles(bbox)
+    seen_icao = set()
     out = []
-    for a in r.json().get('ac', []):
+    for (lat_c, lon_c, radius_nm) in tiles:
+        url = f"https://api.airplanes.live/v2/point/{lat_c:.4f}/{lon_c:.4f}/{radius_nm}"
         try:
-            lat, lon = a.get('lat'), a.get('lon')
-            if lat is None or lon is None:
-                continue
-            out.append({
-                'icao': str(a.get('hex', '')).lower(),
-                'callsign': (a.get('flight') or '').strip(),
-                'lat': float(lat), 'lon': float(lon),
-                'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
-                'velocity': a.get('gs'),
-                'heading': a.get('track'),
-                'vert_rate': a.get('baro_rate'),
-                'squawk': a.get('squawk'),
-                'on_ground': (a.get('alt_baro') == 'ground'),
-                'category': a.get('category'),
-                'seen': time.time(),
-            })
-        except (TypeError, ValueError):
+            r = sess.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
             continue
+        for a in data.get('ac', []):
+            try:
+                lat, lon = a.get('lat'), a.get('lon')
+                if lat is None or lon is None:
+                    continue
+                icao = str(a.get('hex', '')).lower()
+                if not icao or icao in seen_icao:
+                    continue
+                seen_icao.add(icao)
+                out.append({
+                    'icao': icao,
+                    'callsign': (a.get('flight') or '').strip(),
+                    'lat': float(lat), 'lon': float(lon),
+                    'alt_baro': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
+                    'velocity': a.get('gs'),
+                    'heading': a.get('track'),
+                    'vert_rate': a.get('baro_rate'),
+                    'squawk': a.get('squawk'),
+                    'on_ground': (a.get('alt_baro') == 'ground'),
+                    'category': a.get('category'),
+                    'seen': time.time(),
+                })
+            except (TypeError, ValueError):
+                continue
     return out
 
 
