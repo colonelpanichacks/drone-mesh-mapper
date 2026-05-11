@@ -3531,11 +3531,74 @@ def api_simulate_drone_stop():
 
 @app.route('/api/adsb/aircraft', methods=['GET'])
 def api_adsb_aircraft():
+    """Return aircraft from the in-memory cache.
+
+    Optional query params reduce payload size for fast client polling at
+    continental zoom:
+      ?bbox=w,s,e,n   — return only aircraft inside this bbox (5% padded)
+      ?limit=N        — hard cap (default 1500, never returns more)
+      ?fields=mini    — strip non-essential fields (no category, no squawk
+                        text) to halve the JSON size when used together
+    """
     with ADSB_AIRCRAFT_LOCK:
         snapshot = list(ADSB_AIRCRAFT.values())
+    # Bbox filter — cheap point-in-rect; antimeridian-aware.
+    bbox_str = request.args.get('bbox')
+    if bbox_str:
+        try:
+            w, s, e, n = [float(x) for x in bbox_str.split(',')]
+            # 5% padding so planes on the edge don't pop in/out during micro-pans
+            lon_pad = (e - w) * 0.05 if e >= w else 0.5
+            lat_pad = (n - s) * 0.05
+            s2 = max(-90.0, s - lat_pad)
+            n2 = min(90.0, n + lat_pad)
+            if e >= w:
+                w2 = w - lon_pad
+                e2 = e + lon_pad
+                snapshot = [a for a in snapshot
+                            if a.get('lat') is not None
+                            and a.get('lon') is not None
+                            and s2 <= a['lat'] <= n2
+                            and w2 <= a['lon'] <= e2]
+            else:
+                # Antimeridian crossing: keep planes east of `w` OR west of `e`
+                w2 = w - lon_pad
+                e2 = e + lon_pad
+                snapshot = [a for a in snapshot
+                            if a.get('lat') is not None
+                            and a.get('lon') is not None
+                            and s2 <= a['lat'] <= n2
+                            and (a['lon'] >= w2 or a['lon'] <= e2)]
+        except (ValueError, TypeError):
+            pass   # bad bbox → just return everything
+    # Hard cap so the response never gets pathological.
+    try:
+        limit = int(request.args.get('limit', 1500))
+        limit = max(1, min(5000, limit))
+    except (ValueError, TypeError):
+        limit = 1500
+    truncated = False
+    if len(snapshot) > limit:
+        snapshot = snapshot[:limit]
+        truncated = True
+    # Optional mini payload — drop fields the map doesn't strictly need to
+    # roughly halve the wire size on continental views.
+    if request.args.get('fields') == 'mini':
+        snapshot = [{
+            'icao': a.get('icao'),
+            'callsign': a.get('callsign'),
+            'lat': a.get('lat'), 'lon': a.get('lon'),
+            'alt_baro': a.get('alt_baro'),
+            'velocity': a.get('velocity'),
+            'heading': a.get('heading'),
+            'tags': a.get('tags'),
+            'on_ground': a.get('on_ground'),
+            'category': a.get('category'),
+        } for a in snapshot]
     return jsonify({
         'aircraft': snapshot,
         'count': len(snapshot),
+        'truncated': truncated,
         'source': ADSB_CONFIG.get('source'),
         'status': dict(ADSB_STATUS),
     })
@@ -9273,6 +9336,9 @@ function _startDRTicker() {
 }
 _startDRTicker();
 
+// Cache last-rendered icon params per ICAO so we can skip the expensive
+// L.divIcon() rebuild + setIcon() call when nothing visually changed.
+const _adsbIconCache = {};
 function adsbApply(snapshot) {
   const seen = new Set();
   snapshot.forEach(a => {
@@ -9287,17 +9353,21 @@ function adsbApply(snapshot) {
     const pTag = primaryTag(a.tags);
     const tagMeta = adsbTagById[pTag] || {color: '#888'};
     const fillColor = tagMeta.color;
-    const tagColor = '#000';   // outline stays black so the shape pops against any basemap
-    const icon = adsbIcon(a.heading, fillColor, tagColor, a.category);
+    const tagColor = '#000';
+    // Heading rounded to nearest 5° so 1° jitter doesn't force constant icon
+    // rebuilds — visually identical at our pixel scale, much cheaper.
+    const headRounded = (a.heading == null) ? 0 : Math.round(a.heading / 5) * 5;
+    const iconKey = headRounded + '|' + fillColor + '|' + (a.category || '');
     const ll = [a.lat, a.lon];
-    // Update marker. If an existing marker still has the old default popup
-    // wrapper (no .adsb-popup class), rebind so the new clean style applies.
-    // CRITICAL: do not refresh the popup HTML while it's open — that wipes
-    // the live DOM the user is interacting with. Re-attach the click handler
-    // every snapshot so no marker can ever silently lose its clickability.
     if (adsbMarkers[a.icao]) {
       const m = adsbMarkers[a.icao];
-      m.setLatLng(ll).setIcon(icon);
+      m.setLatLng(ll);
+      // Only rebuild + apply the icon when its visual parameters actually
+      // changed. Saves ~1500 divIcon SVG generations per poll on US-wide view.
+      if (_adsbIconCache[a.icao] !== iconKey) {
+        m.setIcon(adsbIcon(headRounded, fillColor, tagColor, a.category));
+        _adsbIconCache[a.icao] = iconKey;
+      }
       const popup = m.getPopup();
       const isOpen = m.isPopupOpen();
       if (!popup || !popup.options || popup.options.className !== 'adsb-popup') {
@@ -9332,6 +9402,8 @@ function adsbApply(snapshot) {
       // so map's closePopupOnClick=true doesn't close our popup right after
       // it opens. Map clicks on empty space STILL close popups (user wants
       // click-off-to-close behavior, just not from clicking the marker).
+      const icon = adsbIcon(headRounded, fillColor, tagColor, a.category);
+      _adsbIconCache[a.icao] = iconKey;
       const m = L.marker(ll, {
         icon,
         riseOnHover: true,
@@ -9403,6 +9475,7 @@ function adsbApply(snapshot) {
     if (!seen.has(icao)) {
       adsbLayer.removeLayer(adsbMarkers[icao]);
       delete adsbMarkers[icao];
+      delete _adsbIconCache[icao];
       if (adsbTrails[icao]) {
         adsbTrailLayer.removeLayer(adsbTrails[icao]);
         delete adsbTrails[icao];
@@ -10250,23 +10323,7 @@ const _adsbFollowMap = debounce(async () => {
     // a moment for the kick-fetch to populate the server cache, then GET
     // /api/adsb/aircraft and apply it. Reliable, viewport-aware, no socket
     // delivery quirks.
-    setTimeout(async () => {
-      // Re-check the toggle BEFORE applying. The user could have flipped
-      // ADS-B off in the 1.2s between the bbox POST and now — without this
-      // check the in-flight fetch would re-populate the map after they
-      // already turned it off.
-      if (!_adsbIsEnabled()) return;
-      try {
-        const snap = await (await fetch('/api/adsb/aircraft')).json();
-        if (!_adsbIsEnabled()) return;   // double-check after the network round trip
-        if (snap && snap.aircraft) {
-          adsbApply(snap.aircraft);
-          renderAdsbAircraftList(snap.aircraft);
-          _lastAdsbSourceId = snap.source || _lastAdsbSourceId;
-          _lastAdsbUpdateMs = Date.now();
-        }
-      } catch (_) {}
-    }, 1200);
+    setTimeout(_adsbPullSnapshot, 1200);
   } catch (e) { console.debug('adsb follow-map failed:', e); }
 }, 250);
 map.on('moveend zoomend', _adsbFollowMap);
@@ -10276,23 +10333,51 @@ function _adsbIsEnabled() {
          (document.getElementById('adsbBoxEnableToggle')?.checked) ||
          (document.getElementById('adsbEnabled')?.checked) || false;
 }
-// Also poll the snapshot endpoint every 5s so live aircraft motion + new
-// arrivals show up without relying on socket emits. Lightweight: pulls only
-// when ADS-B is enabled, and re-checks after the round trip so toggling
-// OFF mid-fetch doesn't re-populate the map.
-setInterval(async () => {
+// ── ADS-B snapshot puller ──
+// Centralized, bullet-proof against bog:
+//   1. Asks the server to filter by the current viewport bbox (so a US-wide
+//      pan with 3500 aircraft returns only the ~200 you can see).
+//   2. Sends `fields=mini` to strip ~half the JSON wire size.
+//   3. Caps the response at 1500 aircraft.
+//   4. Single-flight: if a fetch is in flight, skip — don't queue up overlapping
+//      requests that all race to update the map.
+//   5. Re-checks enabled state both before and after the network round trip.
+let _adsbPullInflight = false;
+async function _adsbPullSnapshot() {
   if (!_adsbIsEnabled()) return;
+  if (_adsbPullInflight) return;
+  _adsbPullInflight = true;
   try {
-    const snap = await (await fetch('/api/adsb/aircraft')).json();
-    if (!_adsbIsEnabled()) return;    // toggled off during the network fetch
+    const b = map.getBounds();
+    const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',');
+    const url = `/api/adsb/aircraft?bbox=${encodeURIComponent(bbox)}&fields=mini&limit=1500`;
+    const snap = await (await fetch(url)).json();
+    if (!_adsbIsEnabled()) return;
     if (snap && snap.aircraft) {
       adsbApply(snap.aircraft);
       renderAdsbAircraftList(snap.aircraft);
       _lastAdsbSourceId = snap.source || _lastAdsbSourceId;
       _lastAdsbUpdateMs = Date.now();
     }
-  } catch (_) {}
-}, 5000);
+  } catch (_) {
+  } finally {
+    _adsbPullInflight = false;
+  }
+}
+// Periodic refresh — keep things current without bogging. 6s when zoomed out
+// (many aircraft, expensive update), 4s when zoomed in (few aircraft).
+let _adsbPollTimer = null;
+function _adsbScheduleNextPoll() {
+  if (_adsbPollTimer) { clearTimeout(_adsbPollTimer); _adsbPollTimer = null; }
+  const zoom = (typeof map !== 'undefined') ? map.getZoom() : 8;
+  // Zoom 0-6 = continent / world (6s). Zoom 7+ = regional / city (4s).
+  const delay = zoom < 7 ? 6000 : 4000;
+  _adsbPollTimer = setTimeout(async () => {
+    await _adsbPullSnapshot();
+    _adsbScheduleNextPoll();
+  }, delay);
+}
+_adsbScheduleNextPoll();
 // Top-left aircraft list re-renders on every pan/zoom so it stays restricted
 // to whatever's currently in the map viewport.
 map.on('moveend zoomend', () => {
