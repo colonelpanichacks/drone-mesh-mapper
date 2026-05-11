@@ -10079,24 +10079,37 @@ document.getElementById('adsbEnabled').addEventListener('change', function() {
   setAdsbEnabled(this.checked);
 });
 
-// Follow-map: when ADS-B is enabled, debounced re-post of the current bbox on pan/zoom
-// so the polled aircraft stay focused on what the user is looking at. Skipped if the
-// in-settings 'bbox-only' checkbox is unchecked (user opted into world-wide).
+// Follow-map: re-post the current bbox on EVERY pan/zoom so the server-side
+// poller refetches the new viewport's aircraft immediately (the POST handler
+// kicks a fresh fetch + socket emit). Checks either the new top-left panel
+// toggle OR the legacy main toggle so it works regardless of which UI the
+// user is interacting with. Bbox-only gate dropped — server happily accepts
+// a bbox even when world-wide mode was previously set, and on a fresh viewport
+// the user almost certainly wants the new area's aircraft.
 const _adsbFollowMap = debounce(async () => {
-  const main = document.getElementById('adsbMainToggle');
-  const bboxOnly = document.getElementById('adsbBboxOnly');
-  if (!main || !main.checked) return;
-  if (bboxOnly && !bboxOnly.checked) return;
+  const mainEnabled = (document.getElementById('adsbMainToggle')?.checked) ||
+                      (document.getElementById('adsbBoxEnableToggle')?.checked) ||
+                      (document.getElementById('adsbEnabled')?.checked);
+  if (!mainEnabled) return;
   if (_adsbToggleInflight) return;  // toggle handler will refresh anyway
   const b = map.getBounds();
-  const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+  // Pad bbox slightly outward so aircraft right at the edge of the viewport
+  // are caught even between micro-panning (1.05× = ~5% margin).
+  const w = b.getEast() - b.getWest();
+  const h = b.getNorth() - b.getSouth();
+  const padW = w * 0.05, padH = h * 0.05;
+  const bbox = [b.getWest() - padW, b.getSouth() - padH,
+                b.getEast() + padW, b.getNorth() + padH];
   try {
     await fetch('/api/adsb/config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ bbox }),
     });
+    // Server's config POST handler auto-kicks a fresh fetch when ADS-B is
+    // enabled, so the socket 'adsb' event fires within ~1s with the new
+    // viewport's aircraft — no need for a separate trigger here.
   } catch (e) { console.debug('adsb follow-map failed:', e); }
-}, 600);
+}, 250);
 map.on('moveend zoomend', _adsbFollowMap);
 // Top-left aircraft list re-renders on every pan/zoom so it stays restricted
 // to whatever's currently in the map viewport.
