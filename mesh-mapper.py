@@ -196,7 +196,13 @@ def _mbtiles_path(name: str) -> str:
 
 
 def _validate_bbox(bbox) -> tuple:
-    """Validate a [west, south, east, north] bbox. Returns the same tuple or raises."""
+    """Validate a [west, south, east, north] bbox. Returns the same tuple,
+    clamping wildly out-of-range values rather than rejecting them so panning
+    near the poles or past the antimeridian still works.
+
+    Antimeridian crossing (west > east) is allowed and downstream code in
+    `_bbox_to_radius_nm` handles it.
+    """
     if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
         raise ValueError("bbox must be a 4-element list [west, south, east, north]")
     try:
@@ -206,14 +212,23 @@ def _validate_bbox(bbox) -> tuple:
     for v in (w, s, e, n):
         if math.isnan(v) or math.isinf(v):
             raise ValueError("bbox must contain finite numbers")
-    if not (-180.0 <= w <= 180.0 and -180.0 <= e <= 180.0):
-        raise ValueError("bbox longitudes must be in [-180, 180]")
-    # Web Mercator clips to ~85.0511 — be permissive but bounded.
-    if not (-85.06 <= s <= 85.06 and -85.06 <= n <= 85.06):
-        raise ValueError("bbox latitudes must be in [-85.06, 85.06]")
-    if w > e or s > n:
-        raise ValueError("bbox must satisfy west<=east and south<=north")
-    if (e - w) < 1e-6 or (n - s) < 1e-6:
+    # Wrap longitudes into [-180, 180] so a viewport that panned past ±180
+    # (Leaflet's worldCopyJump means Leaflet itself never reports this, but
+    # padded bboxes can drift just past) gets normalized.
+    def _wrap_lon(x: float) -> float:
+        while x > 180.0:  x -= 360.0
+        while x < -180.0: x += 360.0
+        return x
+    w = _wrap_lon(w); e = _wrap_lon(e)
+    # Clamp latitudes to the Web-Mercator-safe band.
+    s = max(-85.06, min(85.06, s))
+    n = max(-85.06, min(85.06, n))
+    if s > n:
+        s, n = n, s
+    # NOTE: do NOT reject when w > e — that's a valid bbox that wraps the
+    # antimeridian. Downstream consumers (adsb.lol uses center+radius, not
+    # bbox; same for adsb.fi / airplanes.live / OpenSky) handle it.
+    if abs(e - w) < 1e-6 or (n - s) < 1e-6:
         raise ValueError("bbox area is too small")
     return (w, s, e, n)
 
@@ -2606,12 +2621,23 @@ def _adsb_load_config():
 
 def _bbox_to_radius_nm(bbox, pad: float = 1.15) -> tuple:
     """Convert [w, s, e, n] to (lat, lon, radius_nm) for circle-based ADS-B APIs.
-    Pads the radius slightly so aircraft right at the bbox edge aren't cut off."""
+    Pads the radius slightly so aircraft right at the bbox edge aren't cut off.
+    Handles antimeridian crossing (when west > east, the bbox wraps around)."""
     w, s, e, n = bbox
     lat = (s + n) / 2
-    lon = (w + e) / 2
+    # Antimeridian-aware longitude width and center.
+    if w <= e:
+        lon_width = e - w
+        lon = (w + e) / 2
+    else:
+        # Bbox wraps the antimeridian (e.g. w=170, e=-170 → width 20° spanning ±180)
+        lon_width = (180.0 - w) + (e + 180.0)
+        lon_center = (w + e) / 2 + 180.0
+        if lon_center > 180.0: lon_center -= 360.0
+        lon = lon_center
     # Approximate KM diagonal accounting for longitudinal compression at this lat
-    diag_km = math.hypot((n - s) * 111.32, (e - w) * 111.32 * max(0.05, math.cos(math.radians(lat))))
+    diag_km = math.hypot((n - s) * 111.32,
+                         lon_width * 111.32 * max(0.05, math.cos(math.radians(lat))))
     radius_nm = max(5, int((diag_km / 1.852 / 2) * pad))
     radius_nm = min(250, radius_nm)  # adsb.lol/fi cap
     return lat, lon, radius_nm
@@ -10097,13 +10123,25 @@ const _adsbFollowMap = debounce(async () => {
   if (!mainEnabled) return;
   if (_adsbToggleInflight) return;  // toggle handler will refresh anyway
   const b = map.getBounds();
-  // Pad bbox slightly outward so aircraft right at the edge of the viewport
-  // are caught even between micro-panning (1.05× = ~5% margin).
-  const w = b.getEast() - b.getWest();
-  const h = b.getNorth() - b.getSouth();
-  const padW = w * 0.05, padH = h * 0.05;
-  const bbox = [b.getWest() - padW, b.getSouth() - padH,
-                b.getEast() + padW, b.getNorth() + padH];
+  // Pad slightly outward, then clamp lat to the Web-Mercator-safe band and
+  // wrap lon into [-180, 180]. This makes ADS-B work *anywhere on Earth*:
+  // pan to Tokyo, the Pacific, the Arctic — server gets a normalized bbox
+  // every time and the upstream API converts it to lat/lon/radius.
+  const lonSpan = b.getEast() - b.getWest();
+  const latSpan = b.getNorth() - b.getSouth();
+  const padW = lonSpan * 0.05, padH = latSpan * 0.05;
+  const clampLat = (x) => Math.max(-85.06, Math.min(85.06, x));
+  const wrapLon = (x) => {
+    while (x > 180)  x -= 360;
+    while (x < -180) x += 360;
+    return x;
+  };
+  const bbox = [
+    wrapLon(b.getWest() - padW),
+    clampLat(b.getSouth() - padH),
+    wrapLon(b.getEast() + padW),
+    clampLat(b.getNorth() + padH),
+  ];
   try {
     await fetch('/api/adsb/config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
