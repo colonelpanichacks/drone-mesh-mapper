@@ -10155,7 +10155,8 @@ async function setAdsbEnabled(enabled) {
       throw new Error(msg);
     }
     if (!enabled) {
-      // Clear all rendered aircraft + trails immediately
+      // Clear all rendered aircraft + trails immediately + the in-memory
+      // snapshot, so panel counts / lists / dead-reckoning all flip to empty.
       Object.keys(adsbMarkers).forEach(icao => {
         adsbLayer.removeLayer(adsbMarkers[icao]); delete adsbMarkers[icao];
       });
@@ -10163,6 +10164,13 @@ async function setAdsbEnabled(enabled) {
         adsbTrailLayer.removeLayer(adsbTrails[icao]); delete adsbTrails[icao];
       });
       Object.keys(adsbHistory).forEach(icao => delete adsbHistory[icao]);
+      Object.keys(_lastAdsbSnapshot).forEach(k => delete _lastAdsbSnapshot[k]);
+      // Refresh the panel header count + in-view list to show 0 / "off"
+      try { renderAdsbAircraftList([]); } catch (_) {}
+      const status = document.getElementById('adsbBoxStatus');
+      if (status) status.textContent = '';
+      const cnt = document.getElementById('adsbCount');
+      if (cnt) cnt.textContent = '— OFF —';
     } else {
       // Pull initial snapshot so the user sees aircraft within the next poll cycle
       try {
@@ -10243,8 +10251,14 @@ const _adsbFollowMap = debounce(async () => {
     // /api/adsb/aircraft and apply it. Reliable, viewport-aware, no socket
     // delivery quirks.
     setTimeout(async () => {
+      // Re-check the toggle BEFORE applying. The user could have flipped
+      // ADS-B off in the 1.2s between the bbox POST and now — without this
+      // check the in-flight fetch would re-populate the map after they
+      // already turned it off.
+      if (!_adsbIsEnabled()) return;
       try {
         const snap = await (await fetch('/api/adsb/aircraft')).json();
+        if (!_adsbIsEnabled()) return;   // double-check after the network round trip
         if (snap && snap.aircraft) {
           adsbApply(snap.aircraft);
           renderAdsbAircraftList(snap.aircraft);
@@ -10256,16 +10270,21 @@ const _adsbFollowMap = debounce(async () => {
   } catch (e) { console.debug('adsb follow-map failed:', e); }
 }, 250);
 map.on('moveend zoomend', _adsbFollowMap);
+// Helper: ADS-B enabled regardless of which UI toggle the user clicked.
+function _adsbIsEnabled() {
+  return (document.getElementById('adsbMainToggle')?.checked) ||
+         (document.getElementById('adsbBoxEnableToggle')?.checked) ||
+         (document.getElementById('adsbEnabled')?.checked) || false;
+}
 // Also poll the snapshot endpoint every 5s so live aircraft motion + new
-// arrivals show up without relying on socket emits. Kept lightweight: we
-// only pull when ADS-B is actually enabled.
+// arrivals show up without relying on socket emits. Lightweight: pulls only
+// when ADS-B is enabled, and re-checks after the round trip so toggling
+// OFF mid-fetch doesn't re-populate the map.
 setInterval(async () => {
-  const enabled = (document.getElementById('adsbMainToggle')?.checked) ||
-                  (document.getElementById('adsbBoxEnableToggle')?.checked) ||
-                  (document.getElementById('adsbEnabled')?.checked);
-  if (!enabled) return;
+  if (!_adsbIsEnabled()) return;
   try {
     const snap = await (await fetch('/api/adsb/aircraft')).json();
+    if (!_adsbIsEnabled()) return;    // toggled off during the network fetch
     if (snap && snap.aircraft) {
       adsbApply(snap.aircraft);
       renderAdsbAircraftList(snap.aircraft);
