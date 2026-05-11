@@ -10147,12 +10147,45 @@ const _adsbFollowMap = debounce(async () => {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ bbox }),
     });
-    // Server's config POST handler auto-kicks a fresh fetch when ADS-B is
-    // enabled, so the socket 'adsb' event fires within ~1s with the new
-    // viewport's aircraft — no need for a separate trigger here.
+    // The server's config-POST handler kicks an async fetch, but socketio
+    // emits from background threads are unreliable in some Flask-SocketIO
+    // setups (the regular poller emit also fails to reach the client past
+    // the initial connection). So we drive the snapshot client-side: wait
+    // a moment for the kick-fetch to populate the server cache, then GET
+    // /api/adsb/aircraft and apply it. Reliable, viewport-aware, no socket
+    // delivery quirks.
+    setTimeout(async () => {
+      try {
+        const snap = await (await fetch('/api/adsb/aircraft')).json();
+        if (snap && snap.aircraft) {
+          adsbApply(snap.aircraft);
+          renderAdsbAircraftList(snap.aircraft);
+          _lastAdsbSourceId = snap.source || _lastAdsbSourceId;
+          _lastAdsbUpdateMs = Date.now();
+        }
+      } catch (_) {}
+    }, 1200);
   } catch (e) { console.debug('adsb follow-map failed:', e); }
 }, 250);
 map.on('moveend zoomend', _adsbFollowMap);
+// Also poll the snapshot endpoint every 5s so live aircraft motion + new
+// arrivals show up without relying on socket emits. Kept lightweight: we
+// only pull when ADS-B is actually enabled.
+setInterval(async () => {
+  const enabled = (document.getElementById('adsbMainToggle')?.checked) ||
+                  (document.getElementById('adsbBoxEnableToggle')?.checked) ||
+                  (document.getElementById('adsbEnabled')?.checked);
+  if (!enabled) return;
+  try {
+    const snap = await (await fetch('/api/adsb/aircraft')).json();
+    if (snap && snap.aircraft) {
+      adsbApply(snap.aircraft);
+      renderAdsbAircraftList(snap.aircraft);
+      _lastAdsbSourceId = snap.source || _lastAdsbSourceId;
+      _lastAdsbUpdateMs = Date.now();
+    }
+  } catch (_) {}
+}, 5000);
 // Top-left aircraft list re-renders on every pan/zoom so it stays restricted
 // to whatever's currently in the map viewport.
 map.on('moveend zoomend', () => {
