@@ -5180,13 +5180,17 @@ HTML_PAGE = '''
       user-select: none;
       -webkit-user-select: none;
     }
-    /* Source line / status descriptors ("N in view") in panel header */
+    /* Live in-view aircraft count in panel header — bare number,
+       right-aligned, cyan accent, full visibility (never truncated). */
     #adsbBoxStatus {
-      color: #6b8294 !important;
-      font-weight: 600;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-      font-size: 0.72em !important;
+      color: #88c8ff !important;
+      font-weight: 700 !important;
+      letter-spacing: 0.3px;
+      text-transform: none !important;
+      font-size: 0.85em !important;
+      text-align: right;
+      overflow: visible !important;
+      text-overflow: clip !important;
     }
     /* ───── MAP LAYER panel — refined sub-elements ───── */
     /* Offline mapping wrapper (the lime-bordered cyberpunk card inside the
@@ -5740,12 +5744,12 @@ HTML_PAGE = '''
 <!-- Top-left AIR TRAFFIC panel: full ADS-B settings + live aircraft list (in current view), collapsible.
      [+]/[-] is on the LEFT of the header (because the box itself is on the left of the screen). -->
 <div id="adsbBox" style="position:absolute; top:10px; left:10px; z-index:1000; width:300px; border:1px solid rgba(136,200,255,0.28); border-radius:8px; background:linear-gradient(180deg,#11161c 0%,#0a0d12 100%); font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; color:#dde6ee; box-shadow:0 8px 24px rgba(0,0,0,0.6), 0 0 12px rgba(136,200,255,0.06); overflow:hidden;">
-  <div id="adsbBoxHeader" style="display:flex; justify-content:flex-start; align-items:center; padding:9px 14px; cursor:pointer; background:rgba(255,255,255,0.03); border-bottom:1px solid rgba(136,200,255,0.18); gap:10px; white-space:nowrap;">
-    <span id="adsbBoxToggle" style="font-size:16px; color:#88c8ff; font-weight:bold;">[-]</span>
-    <h3 style="margin:0; font-size:0.78em; color:#88c8ff; letter-spacing:2px; font-weight:700;">AIR TRAFFIC</h3>
-    <span id="adsbBoxStatus" style="color:#6b8294; font-size:0.7em; letter-spacing:1px; font-weight:600; text-transform:uppercase; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;"></span>
-    <span id="adsbBoxStateLabel" style="color:#586978; font-size:0.7em; font-weight:700; letter-spacing:1px; padding:2px 7px; border:1px solid rgba(255,255,255,0.10); border-radius:9px; background:transparent;">OFF</span>
-    <label class="switch" style="margin:0;" title="Enable ADS-B layer">
+  <div id="adsbBoxHeader" style="display:flex; justify-content:flex-start; align-items:center; padding:8px 12px; cursor:pointer; background:rgba(255,255,255,0.03); border-bottom:1px solid rgba(136,200,255,0.18); gap:8px; white-space:nowrap;">
+    <span id="adsbBoxToggle" style="font-size:15px; color:#88c8ff; font-weight:bold; flex-shrink:0;">[-]</span>
+    <h3 style="margin:0; font-size:0.72em; color:#88c8ff; letter-spacing:1.5px; font-weight:700; flex-shrink:0;">AIR TRAFFIC</h3>
+    <span id="adsbBoxStatus" style="color:#88c8ff; font-size:0.78em; font-weight:700; letter-spacing:0.3px; flex:1; min-width:0; text-align:right; overflow:visible;"></span>
+    <span id="adsbBoxStateLabel" style="color:#586978; font-size:0.65em; font-weight:700; letter-spacing:0.5px; padding:2px 6px; border:1px solid rgba(255,255,255,0.10); border-radius:8px; background:transparent; flex-shrink:0;">OFF</span>
+    <label class="switch" style="margin:0; flex-shrink:0;" title="Enable ADS-B layer">
       <input type="checkbox" id="adsbBoxEnableToggle">
       <span class="slider"></span>
     </label>
@@ -9342,7 +9346,7 @@ function _adsbRefreshInView() {
   const status = document.getElementById('adsbBoxStatus');
   if (status) {
     if (!enabled) status.textContent = '';
-    else status.textContent = visible.length + ' in view';
+    else status.textContent = visible.length.toLocaleString();
   }
   const cnt = document.getElementById('adsbCount');
   if (cnt) {
@@ -9377,7 +9381,7 @@ function renderAdsbAircraftList(snapshot) {
   // Sync the panel header + count line with the in-view total
   const enabled = document.getElementById('adsbBoxEnableToggle')?.checked;
   const status = document.getElementById('adsbBoxStatus');
-  if (status) status.textContent = enabled ? (visible.length + ' in view') : '';
+  if (status) status.textContent = enabled ? visible.length.toLocaleString() : '';
   const cnt = document.getElementById('adsbCount');
   if (cnt) cnt.textContent = enabled
     ? (visible.length + ' in view · ' + (_lastAdsbSourceId || '?'))
@@ -9930,7 +9934,7 @@ function updatePanelDescriptions() {
     } else if (typeof _adsbVisibleSnapshot === 'function') {
       const inView = _adsbVisibleSnapshot().length;
       const total  = Object.keys(_lastAdsbSnapshot || {}).length;
-      adsbStatus.textContent = total === 0 ? '— scanning —' : (inView + ' in view');
+      adsbStatus.textContent = total === 0 ? '...' : inView.toLocaleString();
     }
   }
   // GEOFENCING
