@@ -9336,10 +9336,106 @@ function _startDRTicker() {
 }
 _startDRTicker();
 
+// Live-update an OPEN drone popup's TELEMETRY section without wiping any
+// in-progress alias edit, tag dropdown selection, lock-button state, etc.
+function _droneUpdateOpenPopupStats(mac, det) {
+  const m = droneMarkers[mac];
+  if (!m || !m.isPopupOpen()) return;
+  const root = m.getPopup() && m.getPopup().getElement();
+  if (!root) return;
+  // The drone popup's TELEMETRY section uses stat() rows shaped as
+  // <div><span>LABEL</span><span>VALUE</span></div>. Walk each row, match by
+  // label, replace value only.
+  const fmt = (k, v) => {
+    if (v == null || v === '') return null;
+    const lk = String(k).toLowerCase();
+    if (typeof v !== 'number') return String(v);
+    if (lk.endsWith('lat') || lk.endsWith('long') || lk.endsWith('lon')) return v.toFixed(5);
+    if (lk.includes('alt') || lk.includes('speed') || lk.includes('heading') ||
+        lk.includes('hdg') || lk.includes('rssi')  || lk.includes('vel') ||
+        lk.includes('rate')|| lk.includes('count') || lk.includes('time')) {
+      return String(Math.round(v));
+    }
+    if (Math.abs(v) < 1 && v !== 0) return v.toFixed(3);
+    return v.toFixed(2).replace(/\\.?0+$/, '');
+  };
+  const rows = root.querySelectorAll('.leaflet-popup-content div > div');
+  rows.forEach(row => {
+    const cells = row.children;
+    if (cells.length !== 2) return;
+    const label = cells[0].textContent.trim();
+    const want = fmt(label, det[label]);
+    if (want != null && cells[1].textContent !== want) cells[1].textContent = want;
+  });
+}
+
 // Cache last-rendered icon params per ICAO so we can skip the expensive
 // L.divIcon() rebuild + setIcon() call when nothing visually changed.
 const _adsbIconCache = {};
+// True while the user is actively dragging/zooming. We defer the expensive
+// per-aircraft DOM updates until motion settles — keeps the map ENTIRELY
+// snappy even with thousands of aircraft loaded, regardless of zoom level.
+let _adsbMapMoving = false;
+let _adsbDeferredSnapshot = null;
+setTimeout(() => {
+  if (typeof map === 'undefined') return;
+  map.on('movestart zoomstart', () => { _adsbMapMoving = true; });
+  map.on('moveend zoomend',     () => {
+    _adsbMapMoving = false;
+    // If a snapshot landed while we were moving, apply it now.
+    if (_adsbDeferredSnapshot) {
+      const s = _adsbDeferredSnapshot;
+      _adsbDeferredSnapshot = null;
+      requestAnimationFrame(() => adsbApply(s));
+    }
+  });
+}, 0);
+
+// Live-update an OPEN popup's stat values (alt / spd / hdg / vs) without
+// re-rendering the popup HTML. This keeps toggle states, mid-click button
+// presses, alias text, etc. intact while still showing live telemetry.
+function _adsbUpdateOpenPopupStats(a) {
+  const m = adsbMarkers[a.icao];
+  if (!m || !m.isPopupOpen()) return;
+  const popup = m.getPopup();
+  if (!popup) return;
+  const root = popup.getElement && popup.getElement();
+  if (!root) return;
+  // Find each stat row by its label cell text and update the value cell.
+  // The popup builder renders rows as: <div><span>LABEL</span><span>VALUE</span></div>
+  const rows = root.querySelectorAll('.leaflet-popup-content div > div');
+  rows.forEach(row => {
+    const cells = row.children;
+    if (cells.length !== 2) return;
+    const label = cells[0].textContent.trim();
+    const valEl = cells[1];
+    if (label === 'ALT') {
+      const alt = (a.alt_baro === 'ground') ? 'GND'
+                : (a.alt_baro != null ? Math.round(a.alt_baro).toLocaleString() + ' ft' : '—');
+      if (valEl.textContent !== alt) valEl.textContent = alt;
+    } else if (label === 'SPD') {
+      const v = (a.velocity != null ? Math.round(a.velocity) + ' kt' : '—');
+      if (valEl.textContent !== v) valEl.textContent = v;
+    } else if (label === 'HDG') {
+      const v = (a.heading != null ? Math.round(a.heading) + '°' : '—');
+      if (valEl.textContent !== v) valEl.textContent = v;
+    } else if (label === 'V/S') {
+      const v = (a.vert_rate != null
+                  ? (a.vert_rate > 0 ? '+' : '') + Math.round(a.vert_rate) + ' fpm'
+                  : '—');
+      if (valEl.textContent !== v) valEl.textContent = v;
+    }
+  });
+}
+
 function adsbApply(snapshot) {
+  // If the map is actively moving, defer all marker churn — we'll apply the
+  // most recent snapshot on moveend. Map drag/zoom stays smooth no matter how
+  // many aircraft are loaded.
+  if (_adsbMapMoving) {
+    _adsbDeferredSnapshot = snapshot;
+    return;
+  }
   const seen = new Set();
   snapshot.forEach(a => {
     if (!a.icao || a.lat == null || a.lon == null) return;
@@ -9368,6 +9464,9 @@ function adsbApply(snapshot) {
         m.setIcon(adsbIcon(headRounded, fillColor, tagColor, a.category));
         _adsbIconCache[a.icao] = iconKey;
       }
+      // Live-update the popup stat values if it's open — keeps alt/spd/hdg/vs
+      // ticking in real time without wiping toggle / button state.
+      _adsbUpdateOpenPopupStats(a);
       const popup = m.getPopup();
       const isOpen = m.isPopupOpen();
       if (!popup || !popup.options || popup.options.className !== 'adsb-popup') {
@@ -9756,6 +9855,24 @@ async function loadAdsbBoxConfig() {
     document.getElementById('adsbBoxOpenskyPass').value = '';
     document.getElementById('adsbBoxExchangeKey').value = '';
     _adsbBoxSyncConditionals();
+    // Sync the legacy toggle + state label so _adsbIsEnabled() returns true
+    // on first poll without waiting for the user to click anything. Then
+    // post the current map bbox + kick an immediate snapshot pull so the
+    // map populates on PAGE LOAD, no hard reload required.
+    if (cfg.enabled) {
+      if (typeof _adsbSetUiEnabled === 'function') _adsbSetUiEnabled(true);
+      try {
+        const b = map.getBounds();
+        await fetch('/api/adsb/config', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            bbox: [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]
+          }),
+        });
+      } catch (_) {}
+      // Wait briefly for the server's kick fetch to populate, then pull.
+      setTimeout(() => { if (typeof _adsbPullSnapshot === 'function') _adsbPullSnapshot(); }, 1200);
+    }
   } catch (e) { console.debug('adsbBox config load failed:', e); }
 }
 loadAdsbBoxConfig();
@@ -10977,7 +11094,13 @@ async function updateData() {
       if (validDrone) {
         if (droneMarkers[mac]) {
           droneMarkers[mac].setLatLng([droneLat, droneLng]);
-          if (!droneMarkers[mac].isPopupOpen()) { droneMarkers[mac].setPopupContent(generatePopupContent(det, 'drone')); }
+          if (!droneMarkers[mac].isPopupOpen()) {
+            droneMarkers[mac].setPopupContent(generatePopupContent(det, 'drone'));
+          } else {
+            // Live-update telemetry inside the open popup without wiping
+            // alias input / tag dropdown / track buttons.
+            _droneUpdateOpenPopupStats(mac, det);
+          }
         } else {
           droneMarkers[mac] = L.marker([droneLat, droneLng], {
             icon: createIcon('🛸', color),
