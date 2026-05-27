@@ -5481,8 +5481,12 @@ HTML_PAGE = '''
        to the left edge of #offlineMappingPanel (which lives inside the Map
        Layer panel). It floats outside the Map Layer panel's right anchor so
        it doesn't push the Map Layer taller — purely horizontal expansion. */
-    #mapLayerFloatBox { overflow: visible; }
-    #mapLayerFloatContent { overflow: visible; }
+    /* While the flyout is open, let it escape the box. !important + :has()
+       beat the inline overflow:hidden / overflow-y:auto on these elements;
+       scoped to flyout-open so normal scroll + rounded-corner clipping stay
+       intact when it's closed. */
+    #mapLayerFloatBox:has(#offlineMappingPanel.flyout-open) { overflow: visible !important; }
+    #mapLayerFloatContent:has(#offlineMappingPanel.flyout-open) { overflow: visible !important; }
     #offlineMappingPanel.flyout-open #cachePanel {
       position: absolute;
       right: calc(100% + 8px);
