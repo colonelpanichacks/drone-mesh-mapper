@@ -9298,6 +9298,21 @@ const _adsbDR = {};
 
 function _drStorePosition(a) {
   if (!a.icao || a.lat == null || a.lon == null) return;
+  const prev = _adsbDR[a.icao];
+  // Pollers fire faster than the upstream source actually refreshes, so the
+  // same lat/lon comes back unchanged across several polls. Re-anchoring (i.e.
+  // resetting t to now) on those stale repeats restarts dead-reckoning from
+  // zero each time — the marker snaps back to the anchor and re-creeps forward,
+  // which is the "stuttering / paths resetting in a loop" symptom. Only
+  // re-anchor when the reported position has genuinely advanced; on an
+  // unchanged repeat, refresh kinematics but KEEP the original timestamp so
+  // extrapolation stays continuous.
+  if (prev && prev.lat === a.lat && prev.lon === a.lon) {
+    prev.heading = a.heading;
+    prev.velocity = a.velocity;
+    prev.onGround = !!a.on_ground;
+    return;
+  }
   _adsbDR[a.icao] = {
     lat: a.lat,
     lon: a.lon,
@@ -9586,7 +9601,11 @@ function _adsbApplyOne(a, seen) {
     const ll = [a.lat, a.lon];
     if (adsbMarkers[a.icao]) {
       const m = adsbMarkers[a.icao];
-      m.setLatLng(ll);
+      // Do NOT snap the marker to the raw polled [lat,lon] here. The 100ms
+      // dead-reckoning ticker is the single source of truth for marker motion —
+      // it interpolates from the DR anchor that _drStorePosition just refreshed.
+      // Snapping to the poll point on every apply fought the ticker and yanked
+      // the plane backward each poll, which is what made motion stutter.
       // Only rebuild + apply the icon when its visual parameters actually
       // changed. Saves ~1500 divIcon SVG generations per poll on US-wide view.
       if (_adsbIconCache[a.icao] !== iconKey) {
