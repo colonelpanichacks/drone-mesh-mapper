@@ -3624,6 +3624,11 @@ def api_adsb_aircraft():
             'tags': a.get('tags'),
             'on_ground': a.get('on_ground'),
             'category': a.get('category'),
+            # 'seen' = observation time of this fix. The client back-dates its
+            # dead-reckoning anchor by (now - seen) so a fix that's already a few
+            # seconds old isn't placed behind the marker's extrapolated position
+            # (which made markers snap backward on every poll).
+            'seen': a.get('seen'),
         } for a in snapshot]
     return jsonify({
         'aircraft': snapshot,
@@ -9296,49 +9301,85 @@ const _lastAdsbSnapshot = {};
 // markers visibly travel across the map instead of teleporting on each update.
 const _adsbDR = {};
 
+// Dead-reckoning is a light tracking filter, not a raw passthrough. We keep a
+// smooth model state (position + velocity, anchored at time t) and, on each new
+// fix, gently correct toward it instead of snapping. This is the "source of
+// truth": straight-line extrapolation between fixes, low-pass-corrected so
+// per-fix GPS / velocity noise (measured displacement/velocity ratio swings
+// 0.55–1.55) doesn't make the marker wobble along its path.
 function _drStorePosition(a) {
   if (!a.icao || a.lat == null || a.lon == null) return;
   const prev = _adsbDR[a.icao];
-  // Pollers fire faster than the upstream source actually refreshes, so the
-  // same lat/lon comes back unchanged across several polls. Re-anchoring (i.e.
-  // resetting t to now) on those stale repeats restarts dead-reckoning from
-  // zero each time — the marker snaps back to the anchor and re-creeps forward,
-  // which is the "stuttering / paths resetting in a loop" symptom. Only
-  // re-anchor when the reported position has genuinely advanced; on an
-  // unchanged repeat, refresh kinematics but KEEP the original timestamp so
-  // extrapolation stays continuous.
-  if (prev && prev.lat === a.lat && prev.lon === a.lon) {
+  // Stale-repeat guard: pollers fire faster than the source refreshes, so the
+  // same RAW fix returns across several polls. Don't re-filter a repeat — keep
+  // extrapolating from the existing anchor (refresh heading/ground only).
+  if (prev && prev.rawLat === a.lat && prev.rawLon === a.lon) {
     prev.heading = a.heading;
-    prev.velocity = a.velocity;
     prev.onGround = !!a.on_ground;
     return;
   }
+  const now = performance.now();
+  // Project the raw fix forward by its OWN age so it represents where the plane
+  // is *now*. Fixes arrive a few seconds stale (median ~3s, jittery 0.6–137s),
+  // so anchoring at receive-time placed the marker behind and snapped it backward
+  // every poll. a.seen is source epoch seconds; Date.now()/1000 is the client
+  // epoch (equal on localhost).
+  let ageSec = 0;
+  if (a.seen != null) {
+    const g = (Date.now() / 1000) - a.seen;
+    if (g > 0 && g < 300) ageSec = g;
+  }
+  const fixNow = _drProject(a.lat, a.lon, a.velocity, a.heading, !!a.on_ground, ageSec);
+  let lat = fixNow[0], lon = fixNow[1], vel = a.velocity;
+  if (prev) {
+    const predNow = _drCurrentLatLon(a.icao);   // where our track says it is now
+    if (predNow) {
+      const dLat = fixNow[0] - predNow[0], dLon = fixNow[1] - predNow[1];
+      if (Math.abs(dLat) > 0.05 || Math.abs(dLon) > 0.05) {
+        // Big divergence (sharp maneuver, teleport, very stale) — trust the fix.
+        lat = fixNow[0]; lon = fixNow[1];
+      } else {
+        // Gentle alpha correction toward the fix; the rest stays on the smooth
+        // predicted track. Velocity is filtered too so prediction speed (hence
+        // longitudinal motion) doesn't jitter.
+        const ALPHA_POS = 0.35, ALPHA_VEL = 0.30;
+        lat = predNow[0] + dLat * ALPHA_POS;
+        lon = predNow[1] + dLon * ALPHA_POS;
+        if (a.velocity != null && prev.velocity != null) {
+          vel = prev.velocity + (a.velocity - prev.velocity) * ALPHA_VEL;
+        }
+      }
+    }
+  }
   _adsbDR[a.icao] = {
-    lat: a.lat,
-    lon: a.lon,
+    lat: lat, lon: lon,             // filtered estimate, valid as of `t`
+    rawLat: a.lat, rawLon: a.lon,   // raw fix — for stale-repeat detection
     heading: a.heading,
-    velocity: a.velocity,    // knots
+    velocity: vel,                  // knots (filtered)
     onGround: !!a.on_ground,
-    t: performance.now(),
+    t: now,
   };
 }
 
-// Compute extrapolated position now() based on velocity + heading from the last
-// known snapshot. 1 nautical mile = 1/60 degree of latitude. Longitude scales
-// by 1/cos(lat). Cap extrapolation at 60 seconds — beyond that we trust nothing.
+// Project a position forward along its track. 1 NM = 1/60° lat; lon scales by
+// 1/cos(lat). On-ground / no-velocity / no-heading / out-of-window (>60s) → no
+// motion (we don't trust extrapolation beyond a minute).
+function _drProject(lat, lon, velocity, heading, onGround, dtSec) {
+  if (onGround || !velocity || heading == null || dtSec <= 0 || dtSec > 60) return [lat, lon];
+  const distDeg = (velocity * dtSec / 3600) / 60;
+  const hRad = heading * Math.PI / 180;
+  const dLat = distDeg * Math.cos(hRad);
+  const cosLat = Math.max(0.05, Math.cos(lat * Math.PI / 180));
+  const dLon = (distDeg * Math.sin(hRad)) / cosLat;
+  return [lat + dLat, lon + dLon];
+}
+
 function _drCurrentLatLon(icao) {
   const d = _adsbDR[icao];
   if (!d || d.lat == null) return null;
-  if (d.onGround || !d.velocity || d.heading == null) return [d.lat, d.lon];
   const dt = (performance.now() - d.t) / 1000;
-  if (dt < 0 || dt > 60) return [d.lat, d.lon];
-  const distNM = d.velocity * dt / 3600;
-  const distDeg = distNM / 60;
-  const hRad = (d.heading || 0) * Math.PI / 180;
-  const dLat = distDeg * Math.cos(hRad);
-  const cosLat = Math.max(0.05, Math.cos(d.lat * Math.PI / 180));
-  const dLon = (distDeg * Math.sin(hRad)) / cosLat;
-  return [d.lat + dLat, d.lon + dLon];
+  if (dt < 0) return [d.lat, d.lon];
+  return _drProject(d.lat, d.lon, d.velocity, d.heading, d.onGround, dt);
 }
 
 // Animation tick — runs ~10x/sec, walks every aircraft marker forward along its
@@ -9351,6 +9392,9 @@ function _startDRTicker() {
   setInterval(() => {
     Object.keys(adsbMarkers).forEach(icao => {
       const m = adsbMarkers[icao];
+      // The dead-reckoned position IS the smoothed source of truth (the tracking
+      // filter in _drStorePosition low-passes per-fix noise), so render it
+      // directly — no extra easing, no added lag.
       const ll = _drCurrentLatLon(icao);
       if (!ll || !m) return;
       m.setLatLng(ll);
@@ -9700,25 +9744,14 @@ function _adsbApplyOne(a, seen) {
         if (typeof _persistHiddenPaths === 'function') _persistHiddenPaths();
       }
     } catch (e) { /* TDZ before declaration — fine, just skip */ }
-    // Trail: append point if it's actually moved
-    const hist = adsbHistory[a.icao] = adsbHistory[a.icao] || [];
-    const last = hist[hist.length - 1];
-    if (!last || last[0] !== a.lat || last[1] !== a.lon) {
-      hist.push(ll);
-      if (hist.length > ADSB_TRAIL_MAX_POINTS) hist.splice(0, hist.length - ADSB_TRAIL_MAX_POINTS);
-    }
-    // Polyline (recreate to refresh color by current altitude)
-    if (adsbTrails[a.icao]) {
-      adsbTrails[a.icao].setLatLngs(hist).setStyle({color: fillColor});
-    } else if (hist.length > 1) {
-      adsbTrails[a.icao] = L.polyline(hist, {
-        color: fillColor, weight: 2.5, opacity: 0.8,
-      });
-      // Only attach to the visible layer if the user opted this aircraft in.
-      if (!hiddenPaths.has('aircraft:' + a.icao)) {
-        adsbTrails[a.icao].addTo(adsbTrailLayer);
-      }
-    }
+    // Trails are owned EXCLUSIVELY by the dead-reckoning ticker, which appends
+    // the marker's actual on-screen (extrapolated) position every 100ms. We must
+    // NOT also push the raw poll point here: the ticker's extrapolated points run
+    // AHEAD of the last real fix, so appending the (older, behind) poll point into
+    // the same adsbHistory array made the polyline zigzag forward/back on every
+    // poll — the "paths resetting in a loop" symptom. One writer = one clean trail
+    // that matches the marker. (Color stays as set at trail creation; tags rarely
+    // change, and the ticker uses the same per-tag color.)
   }
 }
 
@@ -9734,6 +9767,7 @@ function _adsbApplyReap(seen) {
         delete adsbTrails[icao];
       }
       delete adsbHistory[icao];
+      delete _adsbDR[icao];
     }
   });
 }
