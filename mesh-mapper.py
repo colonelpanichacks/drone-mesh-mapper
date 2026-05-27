@@ -7921,14 +7921,26 @@ function renderGeofenceShape(fence) {
   geofenceShapes[fence.id] = shape;
 }
 
+// Human-readable description of what a fence actually watches — honors
+// target_kind (drone/aircraft/both) AND both tag filters, so a 'both' fence no
+// longer mislabels itself as "all drones".
+function _gfWatchLabel(f) {
+  const tk = f.target_kind || 'drone';
+  const dt = (f.alert_tags && f.alert_tags.length) ? f.alert_tags.join(', ') : 'all';
+  const at = (f.aircraft_tags && f.aircraft_tags.length) ? f.aircraft_tags.join(', ') : 'all';
+  if (tk === 'aircraft') return 'aircraft (' + at + ')';
+  if (tk === 'both')     return 'drones (' + dt + ') + aircraft (' + at + ')';
+  return 'drones (' + dt + ')';
+}
+
 function geofencePopup(f) {
-  const tags = (f.alert_tags && f.alert_tags.length) ? f.alert_tags.join(', ') : 'all drones';
+  const watch = _gfWatchLabel(f);
   return '<div style="font-family:monospace; color:#ffaaaa; min-width:200px;">'
     + '<div style="color:' + (f.color || '#ff3333') + '; font-weight:bold;">' + f.name + '</div>'
     + '<div style="font-size:0.85em; color:#aaa; margin-top:2px;">' + f.type.toUpperCase() + ' · ' + (f.enabled ? 'enabled' : 'disabled') + '</div>'
     + '<div style="margin-top:4px;">enter alert: ' + (f.alert_on_enter ? 'on' : 'off')
     + ' · exit alert: ' + (f.alert_on_exit ? 'on' : 'off') + '</div>'
-    + '<div>tags: <span style="color:#ffcc88;">' + tags + '</span></div>'
+    + '<div>watching: <span style="color:#ffcc88;">' + watch + '</span></div>'
     + '<div style="display:flex; gap:4px; margin-top:6px;">'
     + '<button onclick="event.stopPropagation(); editGeofence(\\'' + f.id + '\\')" style="flex:1; padding:3px; background:#001a2a; border:1px solid #00aaff; color:#aaeeff; font-family:monospace; cursor:pointer;">EDIT</button>'
     + '<button onclick="event.stopPropagation(); toggleGeofenceEnabled(\\'' + f.id + '\\')" style="flex:1; padding:3px; background:#1a1a00; border:1px solid #ffaa00; color:#ffcc66; font-family:monospace; cursor:pointer;">' + (f.enabled ? 'DISABLE' : 'ENABLE') + '</button>'
@@ -7969,7 +7981,7 @@ function renderGeofenceList() {
   }
   ids.forEach(id => {
     const f = geofences[id];
-    const tags = (f.alert_tags && f.alert_tags.length) ? f.alert_tags.join(', ') : 'all drones';
+    const watch = _gfWatchLabel(f);
     const row = document.createElement('div');
     row.style.cssText =
       'margin-top:3px; border-left:4px solid ' + (f.enabled ? f.color : '#444')
@@ -7986,7 +7998,7 @@ function renderGeofenceList() {
     const detail = document.createElement('div');
     detail.style.cssText = 'display:none; padding:4px 8px 6px 8px; font-size:0.85em; color:#ddd; border-top:1px dashed #553333;';
     detail.innerHTML =
-      '<div>tags: <span style="color:#ffcc88;">' + tags + '</span></div>'
+      '<div>watching: <span style="color:#ffcc88;">' + watch + '</span></div>'
       + '<div>alerts: ' + (f.alert_on_enter ? '<span style="color:#88ff88;">enter</span>' : 'enter:off')
       + ' · ' + (f.alert_on_exit ? '<span style="color:#88ff88;">exit</span>' : 'exit:off') + '</div>'
       + '<div style="display:flex; gap:4px; margin-top:4px;">'
