@@ -8886,6 +8886,7 @@ setInterval(_refreshLockRings, 100);
 // Per-flight lock means panning to follow without zoom changes; user can pan
 // off and the lock auto-releases (so we never fight them mid-look).
 let lockedAircraft = null;
+let _lockPanUntil = 0;   // performance.now() gate so lock-follow re-centers don't stack
 function lockAircraft(icao) {
   lockedAircraft = (icao || '').toLowerCase();
   const a = (icao && _lastAdsbSnapshot[icao]) || null;
@@ -9361,10 +9362,23 @@ function _startDRTicker() {
         }
       }
     });
-    // If the user has locked an aircraft, follow its dead-reckoned position too
+    // If the user has locked an aircraft, follow its dead-reckoned position.
+    // Re-center only when it drifts past a threshold, with a single short glide
+    // gated by a timestamp cooldown. The old code panned every 100ms with an
+    // animated panTo: the eased animations stacked AND each one fired a moveend
+    // that re-ran _adsbRefreshInView (full snapshot walk + list re-render) 10x/
+    // sec — which stuttered the entire map. Now we pan at most ~2x/sec and only
+    // when needed, so the locked plane stays near center and everything stays smooth.
     if (lockedAircraft) {
       const ll = _drCurrentLatLon(lockedAircraft);
-      if (ll) map.panTo(ll, { animate: true, duration: 0.1, noMoveStart: true });
+      if (ll && performance.now() >= _lockPanUntil) {
+        const size = map.getSize();
+        const pp = map.latLngToContainerPoint(ll);
+        if (Math.abs(pp.x - size.x / 2) > 60 || Math.abs(pp.y - size.y / 2) > 60) {
+          _lockPanUntil = performance.now() + 450;   // let the 0.4s glide finish first
+          map.panTo(ll, { animate: true, duration: 0.4, easeLinearity: 0.5 });
+        }
+      }
     }
   }, 100);
 }
@@ -9588,7 +9602,7 @@ function _adsbApplyOne(a, seen) {
         if (!isOpen) {
           m.unbindPopup();
           m.bindPopup(adsbPopup(a),
-            {className: 'adsb-popup', maxWidth: 280, minWidth: 240, closeButton: true});
+            {className: 'adsb-popup', maxWidth: 280, minWidth: 240, closeButton: true, autoPan: false});
         }
       } else if (!isOpen) {
         m.setPopupContent(adsbPopup(a));
@@ -9626,7 +9640,7 @@ function _adsbApplyOne(a, seen) {
         keyboard: false,
         bubblingMouseEvents: false,
       }).bindPopup(adsbPopup(a),
-                    {className: 'adsb-popup', maxWidth: 280, minWidth: 240, closeButton: true});
+                    {className: 'adsb-popup', maxWidth: 280, minWidth: 240, closeButton: true, autoPan: false});
       m.on('click', _adsbMarkerClick);
       m.on('mousedown', _adsbMarkerMouseDown);
       m.on('touchstart', _adsbMarkerMouseDown);
