@@ -4668,8 +4668,8 @@ HTML_PAGE = '''
         /* Active / Inactive drone lists — bounded so the whole panel always
            fits without an outer scroll. Overflow stays internal to each list. */
         #activePlaceholder, #inactivePlaceholder {
-          max-height: 80px !important;
-          min-height: 38px !important;
+          max-height: 28vh !important;
+          min-height: 90px !important;
           flex: 0 0 auto;
           box-sizing: border-box;
         }
@@ -4725,7 +4725,7 @@ HTML_PAGE = '''
             max-width: calc(100vw - 20px) !important;
           }
           #activePlaceholder, #inactivePlaceholder {
-            max-height: 90px !important;
+            max-height: 24vh !important;
           }
         }
         /* Phones: panels go edge-to-edge with vertical separation. */
@@ -4868,19 +4868,28 @@ HTML_PAGE = '''
       border: 1px solid rgba(136, 255, 153, 0.18);
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.02);
-      /* Tight caps so the whole drones panel fits without an outer scroll.
-         Each list scrolls internally when there are more drones than fit. */
-      min-height: 38px;
-      max-height: 80px;
+      /* Roomier caps so several drone tags fit side-by-side without an
+         immediate inner scroll. Still bounded so the whole panel doesn't
+         overflow the viewport. */
+      min-height: 90px;
+      max-height: 28vh;
       margin-top: 4px;
       margin-bottom: 4px;
-      padding: 5px;
+      padding: 8px;
       overflow-y: auto;
       overflow-x: hidden;
       box-sizing: border-box;
       transition: border-color .15s, background .15s;
       flex: 0 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      align-content: flex-start;
+      gap: 4px;
     }
+    /* Preserve the centered "none" placeholder when a list is empty. */
+    .placeholder:empty { display: block; }
+    /* Inside the active/inactive boxes, let `gap` handle spacing. */
+    .placeholder .drone-item { margin: 0; }
     .placeholder:hover {
       border-color: rgba(136, 255, 153, 0.32);
     }
@@ -11262,6 +11271,27 @@ const droneCircles = {};
 const pilotCircles = {};
 const dronePolylines = {};
 const pilotPolylines = {};
+
+// Update a polyline in place instead of destroying and recreating it every tick.
+// Recreating the layer on each update caused visible flashing/choppiness and let
+// the path get continuously re-added, fighting the staleout removal.
+// The `visible` flag honors the hiddenPaths set so a user-hidden trail stays off
+// the layer without losing the polyline object (and re-attaches cleanly on unhide).
+function upsertPolyline(store, mac, coords, options, layer, visible) {
+  if (store[mac]) {
+    store[mac].setLatLngs(coords);
+    if (options && options.color) { store[mac].setStyle({ color: options.color }); }
+    if (visible) {
+      if (!layer.hasLayer(store[mac])) store[mac].addTo(layer);
+    } else {
+      if (layer.hasLayer(store[mac])) layer.removeLayer(store[mac]);
+    }
+  } else {
+    store[mac] = L.polyline(coords, options);
+    if (visible) store[mac].addTo(layer);
+  }
+  return store[mac];
+}
 // Path layer groups so we can toggle visibility wholesale.
 // Aircraft trails already live on adsbTrailLayer (created earlier).
 const dronePathLayer = L.layerGroup().addTo(map);
@@ -11408,12 +11438,7 @@ function showHistoricalDrone(mac, detection) {
   if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
   const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
   if (!lastDrone || lastDrone[0] != detection.drone_lat || lastDrone[1] != detection.drone_long) { dronePathCoords[mac].push([detection.drone_lat, detection.drone_long]); }
-  if (dronePolylines[mac]) { dronePathLayer.removeLayer(dronePolylines[mac]); }
-  dronePolylines[mac] = L.polyline(dronePathCoords[mac], {
-    renderer: canvasRenderer,
-    color: color
-  });
-  if (!hiddenPaths.has('drone:' + mac)) dronePolylines[mac].addTo(dronePathLayer);
+  upsertPolyline(dronePolylines, mac, dronePathCoords[mac], { renderer: canvasRenderer, color: color }, dronePathLayer, !hiddenPaths.has('drone:' + mac));
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
     if (!pilotMarkers[mac]) {
       pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {
@@ -11450,13 +11475,7 @@ function showHistoricalDrone(mac, detection) {
     if (!lastPilotHis || lastPilotHis[0] !== detection.pilot_lat || lastPilotHis[1] !== detection.pilot_long) {
       pilotPathCoords[mac].push([detection.pilot_lat, detection.pilot_long]);
     }
-    if (pilotPolylines[mac]) { pilotPathLayer.removeLayer(pilotPolylines[mac]); }
-    pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {
-      renderer: canvasRenderer,
-      color: color,
-      dashArray: '5,5'
-    });
-    if (!hiddenPaths.has('pilot:' + mac)) pilotPolylines[mac].addTo(pilotPathLayer);
+    upsertPolyline(pilotPolylines, mac, pilotPathCoords[mac], { renderer: canvasRenderer, color: color, dashArray: '5,5' }, pilotPathLayer, !hiddenPaths.has('pilot:' + mac));
   }
 }
 
@@ -11486,18 +11505,38 @@ function updateComboList(data) {
       comboListItems[mac] = item;
       item.className = "drone-item";
       item.addEventListener("dblclick", () => {
-         restorePaths();
          if (historicalDrones[mac]) {
+             // UNLOCK: drone was historic-locked. Remove the lock state and clean up
+             // anything tied to the lock — but only if the drone isn't currently active.
              delete historicalDrones[mac];
              localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
-             if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
-             if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
+             const liveDet = (window.tracked_pairs || {})[mac];
+             const stillActive = liveDet && liveDet.last_update && ((Date.now()/1000 - liveDet.last_update) <= STALE_THRESHOLD);
+             if (!stillActive) {
+               // Tear down icons AND trails immediately so a second dblclick on an
+               // inactive drone visibly "goes away" without waiting for the slow
+               // restorePaths reconcile.
+               if (droneMarkers[mac]) { map.removeLayer(droneMarkers[mac]); delete droneMarkers[mac]; }
+               if (pilotMarkers[mac]) { map.removeLayer(pilotMarkers[mac]); delete pilotMarkers[mac]; }
+               if (dronePolylines[mac]) { dronePathLayer.removeLayer(dronePolylines[mac]); delete dronePolylines[mac]; }
+               if (pilotPolylines[mac]) { pilotPathLayer.removeLayer(pilotPolylines[mac]); delete pilotPolylines[mac]; }
+               delete dronePathCoords[mac];
+               delete pilotPathCoords[mac];
+             }
+             // For an active drone we leave the icons/trail alone — updateData
+             // is still rendering it live.
              item.classList.remove("selected");
              map.closePopup();
          } else {
+             // LOCK: dblclick on an inactive drone restores its icons, drone path,
+             // and pilot path from the server's full history.
              historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
              localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
              showHistoricalDrone(mac, historicalDrones[mac]);
+             // Now that the markers exist for this locked drone, pull its full trail
+             // back from the server. restorePaths gates on marker presence, so it has
+             // to run AFTER showHistoricalDrone — not before.
+             restorePaths();
              item.classList.add("selected");
              openAliasPopup(mac);
              if (detection && detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
@@ -11723,9 +11762,7 @@ async function updateData() {
         if (!dronePathCoords[mac]) { dronePathCoords[mac] = []; }
         const lastDrone = dronePathCoords[mac][dronePathCoords[mac].length - 1];
         if (!lastDrone || lastDrone[0] != droneLat || lastDrone[1] != droneLng) { dronePathCoords[mac].push([droneLat, droneLng]); }
-        if (dronePolylines[mac]) { dronePathLayer.removeLayer(dronePolylines[mac]); }
-        dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color});
-        if (!hiddenPaths.has('drone:' + mac)) dronePolylines[mac].addTo(dronePathLayer);
+        upsertPolyline(dronePolylines, mac, dronePathCoords[mac], {color: color}, dronePathLayer, !hiddenPaths.has('drone:' + mac));
         if (currentTime - det.last_update <= 5) {
           const dynamicRadius = getDynamicSize() * 0.45;
           const ringWeight = 3 * 0.8;  // 20% thinner
@@ -11784,9 +11821,7 @@ async function updateData() {
         if (!pilotPathCoords[mac]) { pilotPathCoords[mac] = []; }
         const lastPilot = pilotPathCoords[mac][pilotPathCoords[mac].length - 1];
         if (!lastPilot || lastPilot[0] != pilotLat || lastPilot[1] != pilotLng) { pilotPathCoords[mac].push([pilotLat, pilotLng]); }
-        if (pilotPolylines[mac]) { pilotPathLayer.removeLayer(pilotPolylines[mac]); }
-        pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'});
-        if (!hiddenPaths.has('pilot:' + mac)) pilotPolylines[mac].addTo(pilotPathLayer);
+        upsertPolyline(pilotPolylines, mac, pilotPathCoords[mac], {color: color, dashArray: '5,5'}, pilotPathLayer, !hiddenPaths.has('pilot:' + mac));
         // Remove automatic follow-zoom (except for followLock, which is allowed)
         // (auto-zoom disabled except for followLock)
         if (followLock.enabled && followLock.type === 'pilot' && followLock.id === mac) { map.setView([pilotLat, pilotLng], map.getZoom()); }
@@ -11895,29 +11930,34 @@ async function restorePaths() {
   try {
     const response = await fetch(window.location.origin + '/api/paths')
     const data = await response.json();
+    // A trail should only exist while its marker is on the map. updateData owns the
+    // marker lifecycle (creates on detection, removes at staleout), so tie paths to
+    // marker presence: if the drone/pilot marker is gone, drop its trail instead of
+    // re-adding it from server history. This is what kept staled-out paths sticking
+    // around after the drone and pilot markers had already disappeared.
     for (const mac in data.dronePaths) {
-      let isActive = false;
-      if (tracked_pairs[mac] && ((Date.now()/1000) - tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
-      if (!isActive && !historicalDrones[mac]) continue;
+      if (!droneMarkers[mac]) {
+        if (dronePolylines[mac]) { dronePathLayer.removeLayer(dronePolylines[mac]); delete dronePolylines[mac]; }
+        continue;
+      }
       dronePathCoords[mac] = data.dronePaths[mac];
-      if (dronePolylines[mac]) { dronePathLayer.removeLayer(dronePolylines[mac]); }
-      const color = get_color_for_mac(mac);
-      dronePolylines[mac] = L.polyline(dronePathCoords[mac], {color: color});
-      if (!hiddenPaths.has('drone:' + mac)) dronePolylines[mac].addTo(dronePathLayer);
+      upsertPolyline(dronePolylines, mac, dronePathCoords[mac], {color: get_color_for_mac(mac)}, dronePathLayer, !hiddenPaths.has('drone:' + mac));
     }
     for (const mac in data.pilotPaths) {
-      let isActive = false;
-      if (tracked_pairs[mac] && ((Date.now()/1000) - tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
-      if (!isActive && !historicalDrones[mac]) continue;
+      if (!pilotMarkers[mac]) {
+        if (pilotPolylines[mac]) { pilotPathLayer.removeLayer(pilotPolylines[mac]); delete pilotPolylines[mac]; }
+        continue;
+      }
       pilotPathCoords[mac] = data.pilotPaths[mac];
-      if (pilotPolylines[mac]) { pilotPathLayer.removeLayer(pilotPolylines[mac]); }
-      const color = get_color_for_mac(mac);
-      pilotPolylines[mac] = L.polyline(pilotPathCoords[mac], {color: color, dashArray: '5,5'});
-      if (!hiddenPaths.has('pilot:' + mac)) pilotPolylines[mac].addTo(pilotPathLayer);
+      upsertPolyline(pilotPolylines, mac, pilotPathCoords[mac], {color: get_color_for_mac(mac), dashArray: '5,5'}, pilotPathLayer, !hiddenPaths.has('pilot:' + mac));
     }
   } catch (error) { console.error("Error restoring paths:", error); }
 }
-setInterval(restorePaths, 200);
+// restorePaths reconciles trails against the server's full history. updateData
+// already maintains live paths every tick, so this only needs to run occasionally
+// (page load + a slow self-heal). Running it at 200ms recreated every polyline
+// 5x/second, which caused the flashing and kept resurrecting expired paths.
+setInterval(restorePaths, 15000);
 restorePaths();
 
 function updateColor(mac, hue) {
