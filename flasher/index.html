@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mesh-Detect // Web Flasher</title>
+<meta name="description" content="Mesh-Detect firmware installer — Standard Dualcore + Node Mode (Remote / Home) for XIAO ESP32-S3.">
+<style>
+  :root {
+    --bg:        #030805;
+    --bg-grid:   #0a2015;
+    --panel:     rgba(6, 14, 10, 0.82);
+    --cyan:      #00e5ff;
+    --cyan-dim:  #0a5566;
+    --magenta:   #ff2bd6;
+    --green:     #00ff66;
+    --green-dim: #0a3a20;
+    --lime:      #a8ff3e;
+    --text:      #cfe8d8;
+    --muted:     #6a8878;
+    --white:     #ffffff;
+
+    --amber:     #ffb000;
+    --amber-bg:  #0a0600;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', 'JetBrains Mono', 'Courier New', ui-monospace, monospace;
+    font-size: 15px;
+    line-height: 1.55;
+    min-height: 100vh;
+    text-align: center;
+  }
+  body {
+    background:
+      radial-gradient(ellipse at 50% 0%, rgba(0,255,102,0.04), transparent 60%),
+      linear-gradient(var(--bg-grid) 1px, transparent 1px) 0 0 / 44px 44px,
+      linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px) 0 0 / 44px 44px,
+      var(--bg);
+    padding: 0 16px 48px;
+  }
+  main { max-width: 780px; margin: 0 auto; }
+  a { color: var(--green); text-decoration: none; border-bottom: 1px dotted rgba(0,255,102,0.4); }
+  a:hover { color: var(--white); border-bottom-color: var(--white); }
+  b { color: var(--white); font-weight: normal; }
+
+  /* --- TERMINAL HEADER --- */
+  .terminal {
+    background: var(--amber-bg);
+    color: var(--amber);
+    padding: 28px 16px 22px;
+    margin: 0 -16px 32px;
+    border-bottom: 1px solid var(--amber);
+    text-shadow: 0 0 4px rgba(255,176,0,0.4);
+    position: relative;
+    overflow: hidden;
+  }
+  .terminal::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse at center, rgba(255,176,0,0.06), transparent 60%),
+      repeating-linear-gradient(0deg,
+        transparent 0 2px,
+        rgba(0,0,0,0.4) 3px 3px);
+    pointer-events: none;
+  }
+  .banner {
+    color: #00e7ff;
+    text-shadow: 0 0 8px #00e7ff;
+    font-size: 10px;
+    line-height: 1.05;
+    white-space: pre;
+    margin: 0 auto;
+    display: inline-block;
+    text-align: left;
+    position: relative;
+  }
+  .subtitle {
+    color: #fff4d0;
+    letter-spacing: 5px;
+    font-size: 12px;
+    margin: 12px 0 0;
+    text-shadow: 0 0 6px rgba(255,176,0,0.6);
+    position: relative;
+  }
+  .subtitle .accent {
+    color: var(--magenta);
+    text-shadow: 0 0 8px var(--magenta);
+  }
+  .subtitle .sep { color: var(--amber); margin: 0 10px; opacity: 0.6; }
+
+  /* --- CYBER SECTIONS --- */
+  .panel {
+    border: 1px solid rgba(0,255,102,0.22);
+    background: var(--panel);
+    margin: 24px auto;
+    max-width: 720px;
+  }
+  .panel > header {
+    padding: 10px 20px;
+    background: rgba(0,255,102,0.06);
+    border-bottom: 1px solid rgba(0,255,102,0.22);
+    color: var(--green);
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .panel > header .right { color: var(--muted); font-size: 10px; letter-spacing: 2px; }
+  .panel > .body { padding: 24px 22px; }
+
+  /* Node-mode gets a magenta-tinted header so it visually reads as its own group */
+  .panel.node-mode { border-color: rgba(255,43,214,0.30); }
+  .panel.node-mode > header {
+    background: rgba(255,43,214,0.06);
+    border-bottom-color: rgba(255,43,214,0.30);
+    color: var(--magenta);
+  }
+
+  /* --- STEPS --- */
+  .step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 18px 0;
+    border-bottom: 1px dashed rgba(0,255,102,0.12);
+  }
+  .step:last-child { border-bottom: none; }
+  .step .n {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px; height: 40px;
+    border: 1px solid var(--green);
+    color: var(--green);
+    font-size: 18px;
+    font-weight: 700;
+    background: rgba(0,255,102,0.04);
+    border-radius: 50%;
+  }
+  .step h3 {
+    margin: 4px 0 0;
+    color: var(--white);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .step p {
+    margin: 0;
+    color: var(--text);
+    font-size: 14px;
+    max-width: 520px;
+  }
+
+  /* --- FLASH BUTTONS --- */
+  esp-web-install-button { display: inline-block; margin-top: 10px; }
+  esp-web-install-button::part(button) {
+    background: #050f08;
+    color: var(--green);
+    border: 1px solid var(--green);
+    padding: 12px 26px;
+    font-family: inherit;
+    font-weight: 500;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  esp-web-install-button::part(button):hover {
+    background: var(--green);
+    color: #050f08;
+  }
+  esp-web-install-button.magenta::part(button) {
+    color: var(--magenta);
+    border-color: var(--magenta);
+  }
+  esp-web-install-button.magenta::part(button):hover {
+    background: var(--magenta);
+    color: #050f08;
+  }
+  .unsupported, .not-allowed {
+    color: var(--magenta);
+    padding: 10px 14px;
+    border: 1px dashed var(--magenta);
+    display: inline-block;
+    font-size: 13px;
+    max-width: 520px;
+  }
+
+  /* --- ROLE PICKER (Node Mode sub-select) --- */
+  .role-pick {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin: 8px 0 14px;
+    justify-content: center;
+  }
+  .role-pick label {
+    flex: 1 1 260px;
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 12px 14px;
+    border: 1px solid rgba(255,43,214,0.28);
+    background: rgba(255,43,214,0.03);
+    cursor: pointer;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+    text-align: left;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .role-pick label:hover { border-color: var(--magenta); }
+  .role-pick label.on { border-color: var(--magenta); background: rgba(255,43,214,0.07); }
+  .role-pick input[type=radio] { margin: 3px 0 0 0; accent-color: var(--magenta); flex-shrink: 0; }
+  .role-pick .role-name {
+    color: var(--magenta); font-weight: 500; letter-spacing: 2px;
+    text-transform: uppercase; font-size: 12px;
+  }
+  .role-pick .role-desc { color: var(--muted); font-size: 12px; }
+
+  /* --- MODE / VARIANT BLOCKS --- */
+  .mode {
+    padding: 22px 0;
+    border-bottom: 1px dashed rgba(0,255,102,0.12);
+  }
+  .mode:last-child { border-bottom: none; }
+  .mode .tag {
+    display: inline-block;
+    color: var(--green);
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 2px;
+    padding: 2px 12px;
+    border: 1px solid var(--green);
+    background: rgba(0,255,102,0.04);
+    margin-bottom: 10px;
+  }
+  .mode.node-tag .tag {
+    color: var(--magenta);
+    border-color: var(--magenta);
+    background: rgba(255,43,214,0.04);
+  }
+  .mode h3 {
+    margin: 6px 0 4px;
+    color: var(--white);
+    font-size: 16px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  .mode p {
+    margin: 0 auto 12px;
+    max-width: 560px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .specs {
+    display: inline-grid;
+    grid-template-columns: auto auto;
+    gap: 4px 18px;
+    text-align: left;
+    padding: 10px 16px;
+    background: rgba(0,255,102,0.03);
+    border: 1px solid rgba(0,255,102,0.18);
+    font-size: 13px;
+    margin: 4px auto 12px;
+  }
+  .mode.node-tag .specs {
+    background: rgba(255,43,214,0.03);
+    border-color: rgba(255,43,214,0.20);
+  }
+  .specs dt {
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-size: 11px;
+    align-self: center;
+  }
+  .specs dd { margin: 0; color: var(--green); }
+  .mode.node-tag .specs dd { color: var(--magenta); }
+  .specs dd.val { color: var(--text); }
+
+  .kbd {
+    display: inline-block;
+    padding: 1px 8px;
+    border: 1px solid var(--green);
+    color: var(--white);
+    background: rgba(0,255,102,0.05);
+    font-size: 12px;
+    letter-spacing: 1px;
+  }
+
+  /* --- ASCII architecture diagram --- */
+  .arch {
+    display: block;
+    margin: 8px auto 18px;
+    padding: 14px 16px;
+    background: rgba(255,43,214,0.03);
+    border: 1px dashed rgba(255,43,214,0.25);
+    color: var(--text);
+    font-size: 11px;
+    line-height: 1.35;
+    white-space: pre;
+    text-align: left;
+    overflow-x: auto;
+    max-width: 640px;
+  }
+  .arch .r { color: var(--magenta); }
+  .arch .h { color: var(--cyan); }
+
+  /* --- TROUBLE --- */
+  .trouble .n {
+    border-color: var(--magenta);
+    color: var(--magenta);
+    background: rgba(255,43,214,0.05);
+  }
+
+  footer {
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 3px;
+    margin-top: 32px;
+    padding-top: 20px;
+    border-top: 1px dashed rgba(0,255,102,0.12);
+  }
+
+  @media (max-width: 520px) {
+    .banner { font-size: 7px; }
+    .subtitle { letter-spacing: 3px; font-size: 11px; }
+    .arch { font-size: 9px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="terminal">
+  <pre class="banner">  __  __           _     ____       _            _
+ |  \/  | ___  ___| |__ |  _ \  ___| |_ ___  ___| |_
+ | |\/| |/ _ \/ __| '_ \| | | |/ _ \ __/ _ \/ __| __|
+ | |  | |  __/\__ \ | | | |_| |  __/ ||  __/ (__| |_
+ |_|  |_|\___||___/_| |_|____/ \___|\__\___|\___|\__|</pre>
+  <div class="subtitle">MESH<span class="accent">&ndash;</span>DETECT<span class="sep">//</span>WEB FLASHER<span class="sep">//</span>XIAO ESP32&ndash;S3</div>
+</header>
+
+<main>
+
+<!-- =============================================================
+     INSTALL / GETTING STARTED
+     ============================================================= -->
+<section class="panel">
+  <header><span>Install</span><span class="right">3 steps</span></header>
+  <div class="body">
+
+    <div class="step">
+      <div class="n">1</div>
+      <h3>Plug the board in</h3>
+      <p>Use a real USB-C <b>data</b> cable — charge-only cables won't show up as a serial port. If it's your first flash, hold the <span class="kbd">BOOT</span> button while plugging in.</p>
+    </div>
+
+    <div class="step">
+      <div class="n">2</div>
+      <h3>Pick a build below and hit Flash</h3>
+      <p>Chrome, Edge, or Opera on desktop. Your browser will show a list of serial ports — pick the XIAO. The install takes about 30 seconds.</p>
+    </div>
+
+    <div class="step">
+      <div class="n">3</div>
+      <h3>Wire it to a Heltec V3</h3>
+      <p>All three builds send Remote ID JSON out UART on <b>GPIO5 (TX)</b> / <b>GPIO6 (RX)</b>. Wire that to a Heltec V3 running Meshtastic in serial TEXTMSG mode at 115200. See the <a href="https://github.com/colonelpanichacks/drone-mesh-mapper#hardware-setup">wiring diagram</a>.</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- =============================================================
+     STANDARD DUALCORE - the "one board, one mesh" main build
+     ============================================================= -->
+<section class="panel">
+  <header><span>Standard Dualcore</span><span class="right">1 board · main build</span></header>
+  <div class="body">
+
+    <div class="mode">
+      <span class="tag">[ MAIN ]</span>
+      <h3>RemoteID Mesh — Dualcore</h3>
+      <p>Single-board build. Core 0 sniffs WiFi (Open Drone ID NAN + beacon vendor IEs), Core 1 scans BLE for ODID advertisements. Every detection goes straight out USB and out UART to your Heltec. <b>Use this if you have one detector and one Heltec mesh</b> — no multi-node dedup needed.</p>
+      <dl class="specs">
+        <dt>Target</dt><dd class="val">XIAO ESP32-S3</dd>
+        <dt>Mode</dt><dd class="val">WiFi + BLE, concurrent</dd>
+        <dt>UART Out</dt><dd class="val">GPIO5 TX / GPIO6 RX @ 115200</dd>
+        <dt>JSON</dt><dd class="val">to USB Serial + Heltec V3</dd>
+      </dl>
+      <esp-web-install-button id="flashMain" manifest="./manifest-main.json">
+        <button slot="activate">&gt;&gt; CONNECT &amp; FLASH MAIN &lt;&lt;</button>
+        <span slot="unsupported" class="unsupported">Your browser doesn't support Web Serial. Open this page in Chrome, Edge, or Opera on a desktop.</span>
+        <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS. GitHub Pages handles that automatically.</span>
+      </esp-web-install-button>
+    </div>
+
+  </div>
+</section>
+
+<!-- =============================================================
+     NODE MODE - remote + home pair, with dedup explainer
+     ============================================================= -->
+<section class="panel node-mode">
+  <header><span>Node Mode</span><span class="right">2 roles · multi-node mesh</span></header>
+  <div class="body">
+
+    <p style="max-width: 620px; margin: 0 auto 14px; color: var(--text); font-size: 13px; text-align: left;">
+      Node Mode splits the standard build into <b>two firmwares</b>: put <b>Remote</b> on every field detector, and <b>Home</b> on the base receiver plugged into <a href="https://github.com/colonelpanichacks/drone-mesh-mapper">mesh-mapper.py</a>. Deploy as many Remotes as you want.
+    </p>
+
+    <pre class="arch"><span class="r">┌─────────────────────────────────────────────────────────────┐
+│                   REMOTE NODE   (field)                     │
+│   XIAO ESP32S3 ──UART──> Heltec V3 (Meshtastic) ──LoRa──>   │
+│   WiFi + BLE drone       GPIO5 TX -> Heltec RX              │
+│   detection              GPIO6 RX <- Heltec TX              │
+│   (Open Drone ID)                                           │
+└─────────────────────────────────────────────────────────────┘</span>
+                                │
+                         LoRa Mesh Network
+                        (multiple hops OK)
+                                │
+<span class="h">┌─────────────────────────────────────────────────────────────┐
+│                    HOME NODE   (base)                       │
+│   Heltec V3 (Meshtastic) ──UART──> XIAO ESP32S3 ──USB──>    │
+│   receives mesh data      GPIO6 RX <- Heltec TX  computer   │
+│                           GPIO5 TX -> Heltec RX  running    │
+│   NO detection.           dedup engine           mesh-mapper│
+│   Just a smart bridge.                                      │
+└─────────────────────────────────────────────────────────────┘</span></pre>
+
+    <p style="max-width: 620px; margin: 4px auto 18px; color: var(--text); font-size: 13px; text-align: left;">
+      <b>The dedup problem:</b> when 5 Remotes see the same drone, without dedup the mapper gets 5 copies of one detection. Every Remote tags its JSON with a unique <span class="kbd">node_id</span> derived from its ESP32 MAC. The Home node keys on the drone's MAC — the first hit forwards instantly, duplicates from other Remotes within <b>500ms</b> are dropped, and after 500ms the next hit goes through (drone moved). Near real-time tracking, no multi-node spam.
+    </p>
+
+    <div class="role-pick" role="radiogroup" aria-label="Node role">
+      <label class="on" data-role="remote">
+        <input type="radio" name="role" value="remote" checked>
+        <span>
+          <span class="role-name">Remote &nbsp;/&nbsp; Field</span><br>
+          <span class="role-desc">Detects drones over WiFi + BLE, tags each detection with its own <b>node_id</b>, ships JSON out UART to the Heltec mesh. Flash one per field board.</span>
+        </span>
+      </label>
+      <label data-role="home">
+        <input type="radio" name="role" value="home">
+        <span>
+          <span class="role-name">Home &nbsp;/&nbsp; Base</span><br>
+          <span class="role-desc">No detection. Reads mesh JSON from a Heltec V3 over UART, dedups on drone MAC (500ms window), forwards clean data over USB to mesh-mapper.py. Flash one for your base receiver.</span>
+        </span>
+      </label>
+    </div>
+
+    <!-- Node Remote -->
+    <div class="mode node-tag" id="modeRemote">
+      <span class="tag">[ REMOTE ]</span>
+      <h3>Node Mode — Remote (Field Detector)</h3>
+      <p>Dual-core: WiFi promiscuous on Core 0, BLE scan on Core 1. Every detection tagged with <b>node_id</b> (4-char hex from the ESP32 MAC) so the Home node can dedup. LED blinks per detection, heartbeat every 60s.</p>
+      <dl class="specs">
+        <dt>Target</dt><dd class="val">XIAO ESP32-S3</dd>
+        <dt>Role</dt><dd class="val">Detection + mesh sender</dd>
+        <dt>UART</dt><dd class="val">GPIO5 TX / GPIO6 RX @ 115200 → Heltec V3</dd>
+        <dt>Deploy</dt><dd class="val">One per field board (N remotes OK)</dd>
+      </dl>
+      <esp-web-install-button id="flashRemote" class="magenta" manifest="./manifest-node-remote.json">
+        <button slot="activate">&gt;&gt; CONNECT &amp; FLASH REMOTE &lt;&lt;</button>
+        <span slot="unsupported" class="unsupported">Your browser doesn't support Web Serial. Open this page in Chrome, Edge, or Opera on a desktop.</span>
+        <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS. GitHub Pages handles that automatically.</span>
+      </esp-web-install-button>
+    </div>
+
+    <!-- Node Home (hidden by default; toggled by radio) -->
+    <div class="mode node-tag" id="modeHome" style="display:none;">
+      <span class="tag">[ HOME ]</span>
+      <h3>Node Mode — Home (Base Bridge)</h3>
+      <p>Lean mesh-to-USB bridge. Reads JSON from the Heltec over UART, dedups on drone MAC (first-in wins within 500ms), forwards over USB to <span class="kbd">mesh-mapper.py</span>. Bidirectional pass-through for sending commands back to the Heltec. Non-JSON lines forwarded with a <span class="kbd">[MESH]</span> prefix.</p>
+      <dl class="specs">
+        <dt>Target</dt><dd class="val">XIAO ESP32-S3</dd>
+        <dt>Role</dt><dd class="val">Dedup + USB bridge (no scanning)</dd>
+        <dt>Dedup</dt><dd class="val">500ms window, keyed on drone MAC</dd>
+        <dt>Deploy</dt><dd class="val">One base board (plug into mapper)</dd>
+      </dl>
+      <esp-web-install-button id="flashHome" class="magenta" manifest="./manifest-node-home.json">
+        <button slot="activate">&gt;&gt; CONNECT &amp; FLASH HOME &lt;&lt;</button>
+        <span slot="unsupported" class="unsupported">Your browser doesn't support Web Serial. Open this page in Chrome, Edge, or Opera on a desktop.</span>
+        <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS. GitHub Pages handles that automatically.</span>
+      </esp-web-install-button>
+    </div>
+
+  </div>
+</section>
+
+<!-- =============================================================
+     TROUBLESHOOTING
+     ============================================================= -->
+<section class="panel">
+  <header><span>Troubleshooting</span><span class="right">common snags</span></header>
+  <div class="body trouble">
+
+    <div class="step">
+      <div class="n">?</div>
+      <h3>Nothing shows up in the port picker</h3>
+      <p>Try a different USB-C cable (charge-only won't work), install CH340 or CP210x drivers if your OS doesn't auto-detect, or hold <span class="kbd">BOOT</span> while plugging in to force download mode.</p>
+    </div>
+
+    <div class="step">
+      <div class="n">?</div>
+      <h3>Heltec not receiving JSON from a Remote</h3>
+      <p>Confirm serial module is enabled on the Heltec: <span class="kbd">serial.enabled true</span>, <span class="kbd">serial.mode TEXTMSG</span>, <span class="kbd">serial.baud BAUD_115200</span>, <span class="kbd">serial.rxd 19</span>, <span class="kbd">serial.txd 20</span>. All Heltecs must share the same Meshtastic channel + key.</p>
+    </div>
+
+    <div class="step">
+      <div class="n">?</div>
+      <h3>mesh-mapper.py sees duplicate detections</h3>
+      <p>You're probably running <b>Standard Dualcore</b> on multiple boards feeding one mapper. That build has no dedup. Reflash the field boards with <b>Node Mode / Remote</b> and the base board with <b>Node Mode / Home</b>.</p>
+    </div>
+
+    <div class="step">
+      <div class="n">?</div>
+      <h3>No drone detections at all</h3>
+      <p>Confirm firmware is running: open serial monitor at 115200 and look for the heartbeat line. Some drones don't broadcast Remote ID — required in many jurisdictions but not universal.</p>
+    </div>
+
+  </div>
+</section>
+
+<footer>
+  Hardware &middot; <a href="https://github.com/colonelpanichacks/mesh-detect">github.com/colonelpanichacks/mesh-detect</a><br>
+  Firmware source &middot; <a href="https://github.com/colonelpanichacks/drone-mesh-mapper">github.com/colonelpanichacks/drone-mesh-mapper</a>
+</footer>
+
+</main>
+
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<script>
+  (function () {
+    var modeRemote = document.getElementById('modeRemote');
+    var modeHome   = document.getElementById('modeHome');
+    document.querySelectorAll('.role-pick input[name="role"]').forEach(function (r) {
+      r.addEventListener('change', function () {
+        var role = r.value;
+        modeRemote.style.display = (role === 'remote') ? '' : 'none';
+        modeHome.style.display   = (role === 'home')   ? '' : 'none';
+        document.querySelectorAll('.role-pick label').forEach(function (l) {
+          l.classList.toggle('on', l.dataset.role === role);
+        });
+      });
+    });
+  })();
+</script>
+</body>
+</html>

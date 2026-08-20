@@ -29,6 +29,7 @@
 #include <BLEScan.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_mac.h>
 #include <nvs_flash.h>
 #include "opendroneid.h"
 #include "odid_wifi.h"
@@ -79,7 +80,7 @@ struct uav_data {
   int      flag;
 };
 
-#define MAX_UAVS 8
+#define MAX_UAVS 32
 static uav_data uavs[MAX_UAVS] = {0};
 static BLEScan* pBLEScan = nullptr;
 static ODID_UAS_Data UAS_data;
@@ -343,7 +344,7 @@ static void printerTask(void *param) {
 // BLE scan task (runs on core 1)
 static void bleScanTask(void *param) {
   for (;;) {
-    BLEScanResults results = pBLEScan->start(1, false);
+    pBLEScan->start(1, false);
     pBLEScan->clearResults();
     delay(100);
   }
