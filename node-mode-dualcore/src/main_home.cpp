@@ -207,13 +207,16 @@ static void txPrintf(const char* fmt, ...) {
 }
 
 // Push queued bytes to USB, strictly bounded and strictly non-blocking.
-static void txFlush() {
+// Returns the number of bytes actually handed to the CDC ring so the loop can
+// tell "making progress" from "host not draining".
+static size_t txFlush() {
+  size_t sent = 0;
   size_t budget = TXQ_MAX_DRAIN;
   while (txUsed() > 0 && budget > 0) {
     // availableForWrite() is how much the CDC ring will take right now.
     // Writing only that much guarantees write() returns without waiting.
     int room = Serial.availableForWrite();
-    if (room <= 0) return;            // host not draining - try again next pass
+    if (room <= 0) return sent;       // host not draining - try again next pass
 
     size_t chunk = txUsed();
     if (chunk > (size_t)room) chunk = (size_t)room;
@@ -222,10 +225,12 @@ static void txFlush() {
     if (txTail + chunk > TXQ_SIZE) chunk = TXQ_SIZE - txTail;
 
     size_t wrote = Serial.write(&txq[txTail], chunk);
-    if (wrote == 0) return;           // made no progress, do not spin
+    if (wrote == 0) return sent;      // made no progress, do not spin
     txTail = (txTail + wrote) % TXQ_SIZE;
     budget -= wrote;
+    sent += wrote;
   }
+  return sent;
 }
 
 // =============================================================================
@@ -608,7 +613,7 @@ void loop() {
   drainUsbToUart();
 
   // ----- Push queued output to USB (bounded, never blocks) -----
-  txFlush();
+  size_t flushed = txFlush();
 
   // ----- LED update -----
   ledUpdate(now);
@@ -656,9 +661,11 @@ void loop() {
   uint32_t passUs = micros() - passStart;
   if (passUs > loopMaxUs) loopMaxUs = passUs;
 
-  // Yield so the idle task runs. Skipped while there is still buffered mesh
-  // data so a burst is drained at full speed across consecutive passes.
-  if (!Serial1.available() && txUsed() == 0) {
+  // Yield so the idle task runs. Skip the delay only while there is real work
+  // making progress: buffered mesh data, or queued output actually moving.
+  // Crucially, "queue non-empty but the host is not draining" must NOT skip
+  // the delay, or a stalled reader would pin this core in a hot spin forever.
+  if (!Serial1.available() && (txUsed() == 0 || flushed == 0)) {
     delay(1);
   }
 }
