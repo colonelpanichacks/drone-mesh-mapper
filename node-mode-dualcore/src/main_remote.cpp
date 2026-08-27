@@ -392,6 +392,11 @@ void setup() {
 
   // Serial init
   Serial.begin(115200);
+  // Without a TX ring buffer, availableForWrite() tops out at the 128-byte
+  // hardware FIFO. The detection JSON is ~200 bytes, so the send gate
+  // (availableForWrite() >= len) could NEVER pass and the remote node never
+  // transmitted a single detection. The buffer must be set before begin().
+  Serial1.setTxBufferSize(1024);
   Serial1.begin(115200, SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
 
   // LED init

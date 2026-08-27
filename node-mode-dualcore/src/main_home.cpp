@@ -43,7 +43,14 @@
  * loopTaskWDTEnabled = false, so loop() is not subscribed to the task
  * watchdog. A wedged loop just hangs forever, silently.
  *
- * This version fixes all three:
+ * There was also a fourth bug, the one users actually saw: this node used to
+ * pass every byte from USB straight through to the Heltec. mesh-mapper.py
+ * writes "WATCHDOG_RESET" to each port it opens, the Heltec's serial module in
+ * TEXTMSG mode broadcasts every line it receives, so the whole mesh was
+ * spammed with "WATCHDOG_RESET" texts on every mapper start or reconnect. Host
+ * input is now parsed and answered locally; nothing is forwarded to the mesh.
+ *
+ * This version fixes all of it:
  *   1. Every read/forward path is BOUNDED - loop() always returns promptly.
  *   2. USB writes NEVER block: output goes through a ring buffer that is
  *      drained only as fast as availableForWrite() allows, and is dropped
@@ -478,15 +485,58 @@ static void drainUart(uint32_t now) {
 }
 
 // =============================================================================
-// Bounded USB -> UART pass-through
-// Lets mesh-mapper.py or the user send commands to the Heltec V3.
+// Bounded USB command handler
+//
+// This used to be a raw USB -> UART pass-through, and that was the bug the
+// field reports called "watchdog timer resets broadcast over the mesh":
+// mesh-mapper.py writes the literal line "WATCHDOG_RESET" to every serial
+// port it opens (startup, port selection, every reconnect). The pass-through
+// pushed those bytes into the Heltec, whose serial module in TEXTMSG mode
+// broadcasts every line it receives - so the whole mesh got spammed with
+// "WATCHDOG_RESET" text messages. The node never actually reset.
+//
+// Host bytes are now parsed as commands and NOTHING is ever forwarded to the
+// Heltec. Anything this node writes to Serial1 becomes a public mesh
+// broadcast, so that path stays closed.
 // =============================================================================
-static void drainUsbToUart() {
+static char usbLineBuf[128];
+static int  usbLinePos = 0;
+static uint32_t hostCmdsHandled = 0;
+static uint32_t hostLinesDropped = 0;
+
+static void handleHostLine(const char* line) {
+  if (strcmp(line, "WATCHDOG_RESET") == 0) {
+    // mesh-mapper.py's liveness poke. Answer immediately on USB so the mapper
+    // sees the port produce data right away.
+    hostCmdsHandled++;
+    txPrintf("{\"heartbeat\":\"home_node active\",\"ack\":\"WATCHDOG_RESET\",\"uptime_s\":%u}\n",
+             millis() / 1000);
+    return;
+  }
+  if (strcmp(line, "STATUS") == 0) {
+    hostCmdsHandled++;
+    txPrintf("{\"heartbeat\":\"home_node active\",\"uptime_s\":%u}\n", millis() / 1000);
+    return;
+  }
+  // Unknown host input is dropped, never forwarded to the mesh.
+  hostLinesDropped++;
+}
+
+static void drainUsbCommands() {
   int budget = USB_IN_CHUNK;
   while (budget-- > 0 && Serial.available()) {
-    // Never block on a full UART TX buffer either.
-    if (Serial1.availableForWrite() <= 0) return;
-    Serial1.write((uint8_t)Serial.read());
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (usbLinePos > 0) {
+        usbLineBuf[usbLinePos] = '\0';
+        handleHostLine(usbLineBuf);
+        usbLinePos = 0;
+      }
+    } else if (usbLinePos < (int)sizeof(usbLineBuf) - 1) {
+      usbLineBuf[usbLinePos++] = c;
+    } else {
+      usbLinePos = 0;   // over-long junk, resync
+    }
   }
 }
 
@@ -609,8 +659,8 @@ void loop() {
   // ----- Mesh UART -> dedup -> USB queue (bounded) -----
   drainUart(now);
 
-  // ----- USB -> Heltec UART pass-through (bounded) -----
-  drainUsbToUart();
+  // ----- USB host commands (bounded; never forwarded to the mesh) -----
+  drainUsbCommands();
 
   // ----- Push queued output to USB (bounded, never blocks) -----
   size_t flushed = txFlush();
@@ -642,6 +692,8 @@ void loop() {
     txPrintf("[HOME] Health: loop max %uus, txq %u/%u used, %u bytes dropped in %u events, %u long lines\n",
              loopMaxUs, (unsigned)txUsed(), (unsigned)TXQ_SIZE,
              txDroppedBytes, txDropEvents, linesDropped);
+    txPrintf("[HOME] Host: %u commands handled, %u unknown lines dropped (nothing is ever forwarded to the mesh)\n",
+             hostCmdsHandled, hostLinesDropped);
     if (txDropEvents > 0) {
       txPrintln("[HOME] NOTE: output was dropped - the USB host is not reading fast enough.");
     }

@@ -1,15 +1,27 @@
 {
-  "name": "Drone Mesh Mapper — Node Mode / Remote",
-  "version": "1.0",
-  "new_install_prompt_erase": false,
+  "name": "Drone Mesh Mapper \u2014 Node Mode / Remote",
+  "version": "1.1",
+  "new_install_prompt_erase": true,
   "builds": [
     {
       "chipFamily": "ESP32-S3",
       "parts": [
-        { "path": "firmware/node-remote/bootloader.bin", "offset": 0 },
-        { "path": "firmware/node-remote/partitions.bin", "offset": 32768 },
-        { "path": "firmware/node-remote/boot_app0.bin",  "offset": 57344 },
-        { "path": "firmware/node-remote/firmware.bin",   "offset": 65536 }
+        {
+          "path": "firmware/node-remote/bootloader.bin",
+          "offset": 0
+        },
+        {
+          "path": "firmware/node-remote/partitions.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/node-remote/boot_app0.bin",
+          "offset": 57344
+        },
+        {
+          "path": "firmware/node-remote/firmware.bin",
+          "offset": 65536
+        }
       ]
     }
   ]
