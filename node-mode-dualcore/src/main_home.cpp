@@ -346,19 +346,6 @@ static uint32_t linesDropped  = 0;   // Over-long lines discarded
 static uint32_t loopMaxUs     = 0;   // Longest loop pass since last stats
 
 // =============================================================================
-// JSON Validation
-// =============================================================================
-static bool looksLikeJSON(const char* line, int len) {
-  if (len < 2) return false;
-  int start = 0;
-  while (start < len && (line[start] == ' ' || line[start] == '\t')) start++;
-  if (start >= len) return false;
-  int end = len - 1;
-  while (end > start && (line[end] == ' ' || line[end] == '\t')) end--;
-  return (line[start] == '{' && line[end] == '}');
-}
-
-// =============================================================================
 // LED Helpers
 // =============================================================================
 static inline void ledFlash() {
@@ -434,14 +421,25 @@ static void processJsonLine(const char* line, int len, uint32_t now) {
 
 // =============================================================================
 // Process a complete line from Heltec V3
+//
+// Meshtastic's serial module in TEXTMSG mode does not deliver the payload
+// bare: every received message is printed as "<sender_short_name>: <payload>"
+// (e.g. '77b4: {"mac":...}'). Expecting the line to START with '{' silently
+// bypassed the dedup engine for every real detection, so locate the JSON
+// inside the line instead and forward just that.
 // =============================================================================
-static void processLine(const char* line, int len, uint32_t now) {
+static void processLine(char* line, int len, uint32_t now) {
   if (len == 0) return;
 
-  if (looksLikeJSON(line, len)) {
-    processJsonLine(line, len, now);
+  char* jstart = strchr(line, '{');
+  char* jend = jstart ? strrchr(jstart, '}') : nullptr;
+
+  if (jstart && jend && jend > jstart) {
+    jend[1] = '\0';   // trim anything after the closing brace
+    processJsonLine(jstart, (int)(jend - jstart + 1), now);
   } else {
-    // Not JSON (Meshtastic debug output, status messages, etc.)
+    // No JSON in it (Meshtastic debug, status text, a fragment of a message
+    // the sender's Heltec split mid-JSON, etc.)
     txPrint("[MESH] ");
     txPrintln(line);
     msgNonJson++;

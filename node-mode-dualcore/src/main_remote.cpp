@@ -293,12 +293,25 @@ static int buildJson(char *buf, size_t bufSize, const uav_data *UAV) {
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
 
+  // The UAS ID is attacker-controlled over-the-air data. Keep only benign
+  // characters so a hostile broadcast cannot break the JSON line or inject
+  // extra fields into mesh-mapper.
+  char safe_id[ODID_ID_SIZE + 1];
+  int si = 0;
+  for (int i = 0; UAV->uav_id[i] && si < ODID_ID_SIZE; i++) {
+    char c = UAV->uav_id[i];
+    if (isalnum((unsigned char)c) || c == '.' || c == '_' || c == '-' || c == ':') {
+      safe_id[si++] = c;
+    }
+  }
+  safe_id[si] = '\0';
+
   return snprintf(buf, bufSize,
     "{\"mac\":\"%s\",\"rssi\":%d,\"drone_lat\":%.6f,\"drone_long\":%.6f,"
     "\"drone_altitude\":%d,\"pilot_lat\":%.6f,\"pilot_long\":%.6f,"
     "\"basic_id\":\"%s\",\"node_id\":\"%s\"}",
     mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
-    UAV->base_lat_d, UAV->base_long_d, UAV->uav_id, nodeId);
+    UAV->base_lat_d, UAV->base_long_d, safe_id, nodeId);
 }
 
 // =============================================================================
@@ -315,14 +328,46 @@ static void send_json(const uav_data *UAV) {
   digitalWrite(LED_PIN, LOW);   // ON (inverted)
 }
 
-// Send to Heltec V3 over UART as fast as possible - let Meshtastic
-// handle its own queuing and channel throttling, we don't rate-limit here.
-static void send_to_mesh(const uav_data *UAV) {
-  char json[300];
-  int len = buildJson(json, sizeof(json), UAV);
+// Send to the Heltec V3, paced. Meshtastic's serial module frames its input
+// with readBytes(237 bytes / 250ms timeout): writes closer together than that
+// are coalesced into one packet (and the overflow splits into a broken
+// fragment), so one message per window is the fastest reliable rate. LoRa
+// airtime cannot move messages faster than this anyway. Pending detections sit
+// in a small queue; when it overflows the OLDEST is dropped - the home node's
+// dedup makes a fresher position strictly better than a stale one.
+#define MESH_SEND_INTERVAL_MS 350
+#define MESH_QUEUE_DEPTH      4
 
-  if (Serial1.availableForWrite() >= len) {
-    Serial1.println(json);
+static char     meshPending[MESH_QUEUE_DEPTH][300];
+static int      meshPendHead = 0;      // next slot to send
+static int      meshPendCount = 0;
+static uint32_t lastMeshSend = 0;
+static uint32_t meshDropped = 0;
+
+// Only ever called from printerTask, so no locking is needed.
+static void send_to_mesh(const uav_data *UAV) {
+  int slot = (meshPendHead + meshPendCount) % MESH_QUEUE_DEPTH;
+  if (meshPendCount == MESH_QUEUE_DEPTH) {
+    meshPendHead = (meshPendHead + 1) % MESH_QUEUE_DEPTH;   // drop oldest
+    meshPendCount--;
+    meshDropped++;
+  }
+  buildJson(meshPending[slot], sizeof(meshPending[slot]), UAV);
+  meshPendCount++;
+}
+
+static void meshQueueDrain() {
+  if (meshPendCount == 0) return;
+  uint32_t now = millis();
+  if ((uint32_t)(now - lastMeshSend) < MESH_SEND_INTERVAL_MS) return;
+
+  const char* msg = meshPending[meshPendHead];
+  int len = strlen(msg);
+  if (Serial1.availableForWrite() >= len + 2) {   // +2 for println's \r\n
+    Serial1.println(msg);
+    lastMeshSend = now;
+    meshPendHead = (meshPendHead + 1) % MESH_QUEUE_DEPTH;
+    meshPendCount--;
   }
 }
 
@@ -334,10 +379,13 @@ static void send_to_mesh(const uav_data *UAV) {
 static void printerTask(void *param) {
   uav_data UAV;
   for (;;) {
-    if (xQueueReceive(printQueue, &UAV, portMAX_DELAY)) {
+    // Bounded wait instead of portMAX_DELAY so queued mesh messages keep
+    // draining even when no new detections arrive.
+    if (xQueueReceive(printQueue, &UAV, pdMS_TO_TICKS(100))) {
       send_json(&UAV);
       send_to_mesh(&UAV);
     }
+    meshQueueDrain();
   }
 }
 
