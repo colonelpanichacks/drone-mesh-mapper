@@ -13254,10 +13254,28 @@ def main():
         logger.info(f"Starting web interface on port {args.web_port}")
         logger.info(f"Access the interface at: http://localhost:{args.web_port}")
         try:
-            # Use SocketIO to run the app
-            socketio.run(app, host='0.0.0.0', port=args.web_port, debug=False)
+            # flask-socketio >= 5.3 refuses to serve under Werkzeug unless we
+            # say so explicitly. Without this it raises RuntimeError, which the
+            # old `except KeyboardInterrupt` did not catch - the finally block
+            # below then called signal_handler(), which calls sys.exit(0), so
+            # the real error was swallowed and the process exited 0 having
+            # printed "Access the interface at ...". The web UI simply never
+            # came up and nothing said why. Werkzeug is the right server for a
+            # LAN tool like this; the warning is about public deployment.
+            try:
+                socketio.run(app, host='0.0.0.0', port=args.web_port,
+                             debug=False, allow_unsafe_werkzeug=True)
+            except TypeError:
+                # flask-socketio < 5.3 has no such argument.
+                socketio.run(app, host='0.0.0.0', port=args.web_port, debug=False)
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
+        except OSError as e:
+            # Almost always "address already in use".
+            logger.error(f"Could not start the web interface on port {args.web_port}: {e}")
+            logger.error(f"Another process is using it. Try: python mesh-mapper.py --web-port {args.web_port + 1}")
+        except Exception as e:
+            logger.exception(f"Web interface failed to start: {e}")
         finally:
             signal_handler(signal.SIGTERM, None)
 
