@@ -12868,6 +12868,36 @@ def api_paths():
     for mac in pilot_paths: pilot_paths[mac] = dedupe(pilot_paths[mac])
     return jsonify({"dronePaths": drone_paths, "pilotPaths": pilot_paths})
 
+def open_serial_no_reset(port, baudrate=None, timeout=1):
+    """Open a serial port WITHOUT rebooting the board on the other end.
+
+    pyserial asserts both DTR and RTS when it opens a port. On an ESP32-S3
+    talking over its native USB (the XIAO node boards), those lines are wired
+    straight into the USB-Serial/JTAG peripheral's reset logic - asserting RTS
+    is exactly the "chip reset" step of esptool's own reset sequence. So every
+    plain serial.Serial(port, ...) here rebooted the node, and the reader
+    thread's reconnect loop rebooted it again on every retry. Boards showed
+    rst:0x15 (USB_UART_CHIP_RESET) and looked like they were watchdog-resetting
+    in a loop; they were being reset by us.
+
+    Setting dtr/rts False before open() stores the desired line state, which
+    open() then applies - leaving the chip out of reset and running.
+    """
+    ser = serial.Serial()
+    ser.port = port
+    ser.baudrate = baudrate if baudrate is not None else BAUD_RATE
+    ser.timeout = timeout
+    try:
+        ser.dtr = False
+        ser.rts = False
+    except Exception as e:
+        # Some platforms/drivers refuse line-state changes before open; the
+        # port is still usable, it may just reset the board on connect.
+        logger.debug(f"Could not pre-clear DTR/RTS for {port}: {e}")
+    ser.open()
+    return ser
+
+
 # ----------------------
 # Serial Reader Threads: Each selected port gets its own thread.
 # ----------------------
@@ -12878,13 +12908,14 @@ def serial_reader(port):
     data_received_count = 0
     last_data_time = time.time()
     
+
     logger.info(f"Starting serial reader thread for port: {port}")
     
     while not SHUTDOWN_EVENT.is_set():
         # Try to open or re-open the serial port
         if ser is None or not getattr(ser, 'is_open', False):
             try:
-                ser = serial.Serial(port, BAUD_RATE, timeout=1)
+                ser = open_serial_no_reset(port)
                 serial_connected_status[port] = True
                 connection_attempts = 0  # Reset counter on successful connection
                 logger.info(f"Opened serial port {port} at {BAUD_RATE} baud.")
