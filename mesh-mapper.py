@@ -2591,6 +2591,10 @@ ADSB_CONFIG: dict = {
     'dump1090_url': 'http://localhost:8080/data/aircraft.json',
     'beast_host': 'localhost',    # Beast TCP feed (raw Mode-S, port 30005 by default)
     'beast_port': 30005,
+    # When a circle-based source (adsb.lol/adsb.fi/airplanes.live) is selected and
+    # the viewport is zoomed out past what 250nm-circle tiling can cover, fall back
+    # to OpenSky's global feed so the world view actually shows worldwide traffic.
+    'auto_global': True,
 }
 
 
@@ -3222,7 +3226,61 @@ ADSB_STATUS = {
     'last_source': '',
     'last_error': '',
     'consec_errors': 0,
+    'global_mode': False,          # True while the auto-global OpenSky fallback is active
 }
+
+
+# ── Auto-global fallback ──────────────────────────────────────────────────
+# The free circle feeds (adsb.lol / adsb.fi / airplanes.live) cap at a 250nm
+# radius per call, and we tile a viewport into at most ~36 such circles — enough
+# for continental scale, but a world/hemispheric zoom-out would need thousands of
+# circles, so it only shows sparse patches. When the viewport gets that wide we
+# transparently switch to OpenSky's global /states/all feed (the one source with a
+# real firehose), then switch back to the fast circle feed on zoom-in. The user's
+# saved source is never mutated — this is a per-cycle override decided from bbox.
+_ADSB_CIRCLE_SOURCES = ('adsblol', 'adsbfi', 'airplaneslive')
+_adsb_global_active = False          # hysteresis latch (shared single-viewport state)
+_adsb_last_global_fetch = 0.0        # wall-clock of the last global upstream hit
+ADSB_GLOBAL_MIN_INTERVAL = 30        # seconds — throttle to protect OpenSky's quota
+
+
+def _adsb_bbox_max_dim_nm(bbox) -> float:
+    """Largest viewport dimension in nautical miles (antimeridian-aware)."""
+    try:
+        w, s, e, n = bbox
+    except (TypeError, ValueError):
+        return 0.0
+    e_eff = e if e >= w else e + 360.0
+    lat_center = (s + n) / 2.0
+    nm_per_deg_lon = max(1.0, 60.0 * math.cos(math.radians(lat_center)))
+    width_nm = (e_eff - w) * nm_per_deg_lon
+    height_nm = (n - s) * 60.0
+    return max(width_nm, height_nm)
+
+
+def _adsb_effective_source(cfg) -> tuple:
+    """Pick the source to actually poll this cycle: (src_id, is_global).
+
+    Engages the OpenSky global fallback only when (a) the fallback is enabled,
+    (b) the configured source is a circle feed, and (c) the viewport is wider
+    than circle-tiling can cover. Hysteresis (engage >3200nm, release <2400nm)
+    keeps the source from flapping when the user lingers near the threshold."""
+    global _adsb_global_active
+    configured = cfg.get('source', 'adsblol')
+    if not cfg.get('auto_global', True) or configured not in _ADSB_CIRCLE_SOURCES:
+        _adsb_global_active = False
+        return configured, False
+    bbox = cfg.get('bbox')
+    if not (bbox and len(bbox) == 4):
+        _adsb_global_active = False
+        return configured, False
+    max_dim = _adsb_bbox_max_dim_nm(bbox)
+    if _adsb_global_active:
+        if max_dim < 2400:
+            _adsb_global_active = False
+    elif max_dim > 3200:
+        _adsb_global_active = True
+    return ('opensky', True) if _adsb_global_active else (configured, False)
 
 
 def _adsb_poller_loop():
@@ -3241,7 +3299,7 @@ def _adsb_poller_loop():
                 if SHUTDOWN_EVENT.wait(2.0): break
                 continue
 
-            src_id = cfg.get('source', 'adsblol')
+            src_id, is_global = _adsb_effective_source(cfg)
             src = ADSB_SOURCES.get(src_id)
             if not src:
                 ADSB_STATUS['last_error'] = f"unknown source '{src_id}'"
@@ -3250,6 +3308,7 @@ def _adsb_poller_loop():
                 continue
 
             ADSB_STATUS['last_source'] = src_id
+            ADSB_STATUS['global_mode'] = is_global
             try:
                 aircraft = src['fetch'](cfg, sess)
                 ADSB_STATUS['consec_errors'] = 0
@@ -3285,6 +3344,8 @@ def _adsb_poller_loop():
 
             ADSB_STATUS['last_poll'] = now
             ADSB_STATUS['last_count'] = len(aircraft)
+            if is_global:
+                globals()['_adsb_last_global_fetch'] = now
 
             # Geofence check for aircraft — only fences whose target_kind includes
             # aircraft will trigger. Drone fences are skipped automatically.
@@ -3302,6 +3363,11 @@ def _adsb_poller_loop():
                 pass
 
             interval = max(2, int(cfg.get('interval', ADSB_DEFAULT_INTERVAL)))
+            if is_global:
+                # World-wide OpenSky calls are quota-expensive — poll much slower
+                # than the regional circle feed. The client keeps reading the cache
+                # at its normal cadence; dead reckoning carries planes between.
+                interval = max(interval, ADSB_GLOBAL_MIN_INTERVAL)
             if SHUTDOWN_EVENT.wait(interval):
                 break
         except Exception:
@@ -3326,10 +3392,17 @@ def _adsb_kick_fetch():
     """One-shot immediate fetch so the user sees aircraft within ~1 second of
     flicking the toggle, instead of waiting for the next poll cycle. Background
     thread; never blocks the request."""
+    global _adsb_last_global_fetch
     cfg = dict(ADSB_CONFIG)
     if not cfg.get('enabled'):
         return
-    src = ADSB_SOURCES.get(cfg.get('source', 'adsblol'))
+    src_id, is_global = _adsb_effective_source(cfg)
+    # At world zoom the kick fires on every pan. Don't burn OpenSky's quota with a
+    # fresh global call each time — if we hit it recently, let the cache + the slow
+    # poller serve this one.
+    if is_global and (time.time() - _adsb_last_global_fetch) < ADSB_GLOBAL_MIN_INTERVAL:
+        return
+    src = ADSB_SOURCES.get(src_id)
     if not src:
         return
     sess = requests.Session()
@@ -3350,11 +3423,14 @@ def _adsb_kick_fetch():
             snapshot = list(ADSB_AIRCRAFT.values())
         ADSB_STATUS['last_poll'] = now
         ADSB_STATUS['last_count'] = len(aircraft)
-        ADSB_STATUS['last_source'] = cfg.get('source', '')
+        ADSB_STATUS['last_source'] = src_id
+        ADSB_STATUS['global_mode'] = is_global
         ADSB_STATUS['last_error'] = ''
+        if is_global:
+            _adsb_last_global_fetch = now
         try:
             socketio.emit('adsb', {
-                'aircraft': snapshot, 'source': cfg.get('source'),
+                'aircraft': snapshot, 'source': src_id,
                 'count': len(snapshot), 'fetched': len(aircraft), 'error': '',
             })
         except Exception:
@@ -3362,7 +3438,7 @@ def _adsb_kick_fetch():
     except Exception as e:
         ADSB_STATUS['last_error'] = f"{type(e).__name__}: {e}"
         try:
-            socketio.emit('adsb', {'aircraft': [], 'source': cfg.get('source'),
+            socketio.emit('adsb', {'aircraft': [], 'source': src_id,
                                    'count': 0, 'fetched': 0, 'error': ADSB_STATUS['last_error']})
         except Exception:
             pass
@@ -3400,10 +3476,10 @@ def api_adsb_config_set():
     # Whitelist keys
     for k in ('enabled', 'source', 'interval', 'bbox',
               'opensky_user', 'opensky_pass', 'adsbx_key',
-              'dump1090_url', 'beast_host', 'beast_port'):
+              'dump1090_url', 'beast_host', 'beast_port', 'auto_global'):
         if k in data:
             v = data[k]
-            if k == 'enabled':
+            if k in ('enabled', 'auto_global'):
                 ADSB_CONFIG[k] = bool(v)
             elif k == 'interval':
                 try: ADSB_CONFIG[k] = max(2, min(120, int(v)))
@@ -3634,7 +3710,11 @@ def api_adsb_aircraft():
         'aircraft': snapshot,
         'count': len(snapshot),
         'truncated': truncated,
-        'source': ADSB_CONFIG.get('source'),
+        # Report the source actually feeding the cache (so the UI shows "opensky"
+        # when the auto-global fallback is engaged), falling back to the configured
+        # source before the first poll completes.
+        'source': ADSB_STATUS.get('last_source') or ADSB_CONFIG.get('source'),
+        'global_mode': ADSB_STATUS.get('global_mode', False),
         'status': dict(ADSB_STATUS),
     })
 
@@ -3651,59 +3731,145 @@ _TRACE_HOSTS = {
     'airplaneslive': 'https://globe.airplanes.live',
 }
 
+# globe.adsb.fi / globe.airplanes.live return 403 to non-browser User-Agents — so
+# the old 'drone-mesh-mapper/trace' UA got rejected and those fallbacks never worked
+# (only adsb.lol, which doesn't check UA, ever served traces). A browser-like UA +
+# Referer gets HTTP 200 from all of them. This is what actually fixes flight paths.
+_TRACE_UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 '
+             '(KHTML, like Gecko) Version/17.0 Safari/605.1.15')
+
+def _trace_session():
+    """Fast, NO-retry session for high-volume trace fetches.
+
+    Traces were being fetched with create_retry_session() — the FAA-query session
+    (retries=3, backoff_factor=2). A single slow/hanging host then became
+    ~8s timeout x (1 + 3 retries) + 2s/4s/8s backoff, repeated across 2 URLs x 3
+    hosts = a MINUTES-long stall per aircraft. So the real flight trace never
+    arrived in time and the trail fell back to the dead-reckoned straight line.
+    Traces are best-effort: fail fast, move on. Browser-like default headers so the
+    globe.* hosts don't 403 us."""
+    s = requests.Session()
+    s.headers.update({'User-Agent': _TRACE_UA, 'Accept': 'application/json,text/plain,*/*'})
+    a = HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=0)
+    s.mount('https://', a)
+    s.mount('http://', a)
+    return s
+
+# In-memory trace cache so a path fetched once draws INSTANTLY on the next toggle,
+# reap-return, or for another client — instead of re-hitting the upstream globe
+# feed every time (the source of the load delay). Positive entries live _TRACE_TTL;
+# "no trace" results are negative-cached briefly so planes with no recorded track
+# aren't re-hammered on every toggle.
+_TRACE_CACHE = {}
+_TRACE_CACHE_LOCK = threading.Lock()
+_TRACE_TTL = 120.0
+_TRACE_NEG_TTL = 45.0
+_TRACE_CACHE_MAX = 4000
+
+def _trace_cache_get(icao):
+    """Return ('hit', points) / ('neg', None) / None (miss or expired)."""
+    with _TRACE_CACHE_LOCK:
+        e = _TRACE_CACHE.get(icao)
+    if not e:
+        return None
+    ts, pts = e
+    age = time.time() - ts
+    if pts is None:
+        return ('neg', None) if age < _TRACE_NEG_TTL else None
+    return ('hit', pts) if age < _TRACE_TTL else None
+
+def _trace_cache_put(icao, pts):
+    with _TRACE_CACHE_LOCK:
+        if len(_TRACE_CACHE) >= _TRACE_CACHE_MAX:
+            for k in sorted(_TRACE_CACHE, key=lambda k: _TRACE_CACHE[k][0])[:_TRACE_CACHE_MAX // 5]:
+                _TRACE_CACHE.pop(k, None)
+        _TRACE_CACHE[icao] = (time.time(), pts)
+
 def _fetch_trace_points(icao, sess, max_points=400):
     """Fetch + decimate one aircraft's upstream historical track.
-    Returns (points, source) or (None, None). Tries the configured source first,
-    then the others. Decimates evenly to <= max_points (endpoints preserved) so a
-    2,000-point flight doesn't bloat the wire or the polyline render."""
+    Returns (points, source) or (None, None). Checks the in-memory cache first,
+    then tries the configured source, then the others. Decimates evenly to
+    <= max_points (endpoints preserved) so a 2,000-point flight doesn't bloat the
+    wire or the polyline render."""
     icao = (icao or '').strip().lower()
     if not icao or not all(c in '0123456789abcdef' for c in icao) or len(icao) > 8:
         return None, None
-    src = (ADSB_CONFIG.get('source') or 'adsblol').lower()
-    order = [src] + [k for k in _TRACE_HOSTS.keys() if k != src]
-    for s in order:
-        host = _TRACE_HOSTS.get(s)
-        if not host:
-            continue
-        last2 = icao[-2:].zfill(2)
-        for url in (f"{host}/data/traces/{last2}/trace_full_{icao}.json",
-                    f"{host}/data/traces/{last2}/trace_recent_{icao}.json"):
+    cached = _trace_cache_get(icao)
+    if cached is not None:
+        kind, pts = cached
+        return (pts, 'cache') if kind == 'hit' else (None, None)
+    last2 = icao[-2:].zfill(2)
+    def _parse(r):
+        if r.status_code != 200:
+            return None
+        try:
+            trace = (r.json().get('trace') or [])
+        except Exception:
+            return None
+        pts = []
+        for row in trace:
+            if not isinstance(row, list) or len(row) < 3:
+                continue
+            lat, lon = row[1], row[2]
+            if lat is None or lon is None:
+                continue
             try:
-                r = sess.get(url, timeout=8, headers={'User-Agent': 'drone-mesh-mapper/trace'})
-                if r.status_code != 200:
-                    continue
-                trace = (r.json().get('trace') or [])
-                pts = []
-                for row in trace:
-                    if not isinstance(row, list) or len(row) < 3:
-                        continue
-                    lat, lon = row[1], row[2]
-                    if lat is None or lon is None:
-                        continue
-                    try:
-                        lat = float(lat); lon = float(lon)
-                    except (TypeError, ValueError):
-                        continue
-                    if not (math.isfinite(lat) and math.isfinite(lon)):
-                        continue
-                    pts.append([lat, lon])
+                lat = float(lat); lon = float(lon)
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                continue
+            pts.append([lat, lon])
+        if not pts:
+            return None
+        if len(pts) > max_points:
+            step = (len(pts) + max_points - 1) // max_points
+            dec = pts[::step]
+            if dec[-1] != pts[-1]:
+                dec.append(pts[-1])
+            pts = dec
+        return pts
+    def _one(s):
+        host = _TRACE_HOSTS[s]
+        # Per-host Referer (the globe.* hosts want it); (connect, read) timeout so a
+        # slow/blocked host fails fast. trace_full preferred, trace_recent fallback.
+        for fn in ('trace_full', 'trace_recent'):
+            try:
+                r = sess.get(f"{host}/data/traces/{last2}/{fn}_{icao}.json",
+                             timeout=(2.0, 4), headers={'Referer': host + '/'})
+                pts = _parse(r)
                 if pts:
-                    if len(pts) > max_points:
-                        step = (len(pts) + max_points - 1) // max_points
-                        dec = pts[::step]
-                        if dec[-1] != pts[-1]:
-                            dec.append(pts[-1])
-                        pts = dec
-                    return pts, s
+                    return pts
             except Exception:
                 continue
+        return None
+    # Race ALL trace hosts in parallel; take the first that returns a usable track.
+    # A single slow/redirecting host (e.g. adsb.lol's 302) no longer stalls the whole
+    # fetch — latency is the fastest host (~1s), not the sum of sequential timeouts.
+    # That sequential walk is exactly why toggling one plane's path felt "sooooo
+    # delayed". shutdown(wait=False) so we don't block on the slow losers.
+    hosts = list(_TRACE_HOSTS.keys())
+    ex = ThreadPoolExecutor(max_workers=len(hosts))
+    try:
+        futs = {ex.submit(_one, s): s for s in hosts}
+        for fut in as_completed(futs):
+            try:
+                pts = fut.result()
+            except Exception:
+                pts = None
+            if pts:
+                _trace_cache_put(icao, pts)
+                return pts, futs[fut]
+    finally:
+        ex.shutdown(wait=False)
+    _trace_cache_put(icao, None)   # negative-cache: no recorded trace right now
     return None, None
 
 
 @app.route('/api/adsb/trace/<icao>', methods=['GET'])
 def api_adsb_trace(icao):
     """Single-aircraft historical track (used by the per-plane popup toggle)."""
-    pts, s = _fetch_trace_points(icao, create_retry_session())
+    pts, s = _fetch_trace_points(icao, _trace_session())
     if pts:
         return jsonify({'ok': True, 'source': s, 'icao': (icao or '').strip().lower(),
                         'points': pts, 'count': len(pts)})
@@ -3729,7 +3895,7 @@ def api_adsb_traces():
             break
     out = {}
     if clean:
-        sess = create_retry_session()
+        sess = _trace_session()
         with ThreadPoolExecutor(max_workers=16) as ex:
             futs = {ex.submit(_fetch_trace_points, ic, sess): ic for ic in clean}
             for fut in as_completed(futs):
@@ -6066,17 +6232,16 @@ HTML_PAGE = '''
       <div style="font-size:0.65em; color:#7a8b9a; letter-spacing:1.5px; font-weight:700; margin-bottom:5px;">FILTER</div>
       <div id="adsbBoxFilterChips" style="display:flex; flex-wrap:wrap; gap:4px; font-size:0.72em;"></div>
     </div>
-    <!-- Flight-path bulk controls: show all in view, clear, or toggle by category -->
+    <!-- Flight paths are PER-PLANE only: click a plane, toggle its path in the popup.
+         The per-type chips + ALL IN VIEW were removed — they lit up thousands of full
+         traces at once (unreadable spaghetti) and the bulk trace-fetch hammered the
+         upstream hosts into rate-limiting us. CLEAR ALL wipes whatever's shown. -->
     <div style="padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.05);">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
         <span style="font-size:0.65em; color:#7a8b9a; letter-spacing:1.5px; font-weight:700;">FLIGHT PATHS</span>
-        <span style="display:flex; gap:4px;">
-          <button id="adsbPathsAllBtn" title="Show paths for every aircraft currently in view" style="padding:2px 6px; background:#001a2a; border:1px solid #00aaff; color:#aaeeff; font-family:monospace; font-size:0.72em; border-radius:3px; cursor:pointer;">ALL IN VIEW</button>
-          <button id="adsbPathsClearBtn" title="Hide all flight paths" style="padding:2px 6px; background:#2a0010; border:1px solid #ff5577; color:#ffccd5; font-family:monospace; font-size:0.72em; border-radius:3px; cursor:pointer;">CLEAR</button>
-        </span>
+        <button id="adsbPathsClearBtn" title="Hide all flight paths" style="padding:2px 6px; background:#2a0010; border:1px solid #ff5577; color:#ffccd5; font-family:monospace; font-size:0.72em; border-radius:3px; cursor:pointer;">CLEAR ALL</button>
       </div>
-      <div style="font-size:0.6em; color:#586978; letter-spacing:0.5px; margin-bottom:4px;">tap a category to toggle its in-view paths</div>
-      <div id="adsbPathTagChips" style="display:flex; flex-wrap:wrap; gap:4px; font-size:0.72em;"></div>
+      <div style="font-size:0.6em; color:#586978; letter-spacing:0.5px; margin-top:4px;">click a plane, then toggle its path in the popup</div>
     </div>
     <!-- Live count + aircraft list. Zero right-padding so the scrollbar sits
          flush with the panel border; rows have their own internal right
@@ -6415,8 +6580,11 @@ HTML_PAGE = '''
         </div>
         <div id="geofenceList" style="margin-top:6px; max-height:240px; overflow-y:auto;"></div>
         <div style="margin-top:6px; padding-top:4px; border-top:1px dashed #552222;">
-          <div style="color:#ffaaaa; font-weight:bold; margin-bottom:3px;">Recent alerts</div>
-          <div id="geofenceAlertList" style="max-height:140px; overflow-y:auto; font-size:0.95em; color:#ffcccc;">— none —</div>
+          <div id="geofenceAlertHeader" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer; color:#ffaaaa; font-weight:bold; margin-bottom:3px;">
+            <span>Recent alerts <span id="geofenceAlertCount" style="color:#a87f87; font-weight:normal;"></span></span>
+            <span id="geofenceAlertArrow" style="color:#ff8888;">−</span>
+          </div>
+          <div id="geofenceAlertList" style="max-height:220px; overflow-y:auto; font-size:0.95em; color:#ffcccc;">— none —</div>
         </div>
       </div>
     </div>
@@ -6629,13 +6797,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // Start polling based on current setting
   updateData();
   updateDataInterval = setInterval(updateData, mainSwitch && mainSwitch.checked ? 1000 : 100);
-  // Adaptive polling: slow down during map interactions
+  // Adaptive polling: PAUSE detection updates entirely during a pan/zoom gesture.
+  // Running updateData mid-gesture moves markers, rebuilds trails and re-renders
+  // the list — all of which fight the map's pan/zoom transform and cause hitching.
+  // We stop the loop on gesture start and resume it (with one immediate refresh so
+  // drones snap to current data the instant the gesture ends) on gesture end.
   map.on('zoomstart dragstart', () => {
-    clearInterval(updateDataInterval);
-    updateDataInterval = setInterval(updateData, 500);
+    if (updateDataInterval) { clearInterval(updateDataInterval); updateDataInterval = null; }
   });
   map.on('zoomend dragend', () => {
-    clearInterval(updateDataInterval);
+    if (updateDataInterval) clearInterval(updateDataInterval);
+    updateData();   // snap to current data immediately when the gesture ends
     const interval = mainSwitch && mainSwitch.checked ? 1000 : 100;
     updateDataInterval = setInterval(updateData, interval);
   });
@@ -6766,7 +6938,7 @@ window.onload = function() {
         // Restore drone marker if valid coordinates exist.
         if (det.drone_lat && det.drone_long && det.drone_lat != 0 && det.drone_long != 0) {
           if (!droneMarkers[mac]) {
-            droneMarkers[mac] = L.marker([det.drone_lat, det.drone_long], {icon: createIcon('🛸', color), pane: 'droneIconPane', bubblingMouseEvents: false, opacity: restoreOpacity})
+            droneMarkers[mac] = L.marker([det.drone_lat, det.drone_long], {icon: createDroneIcon(color), pane: 'droneIconPane', bubblingMouseEvents: false, opacity: restoreOpacity})
                                   .bindPopup(generatePopupContent(det, 'drone'), {className: 'drone-popup', maxWidth: 300, minWidth: 240, closeButton: true})
                                   .addTo(map);
           }
@@ -6774,7 +6946,7 @@ window.onload = function() {
         // Restore pilot marker if valid coordinates exist.
         if (det.pilot_lat && det.pilot_long && det.pilot_lat != 0 && det.pilot_long != 0) {
           if (!pilotMarkers[mac]) {
-            pilotMarkers[mac] = L.marker([det.pilot_lat, det.pilot_long], {icon: createIcon('👤', color), pane: 'pilotIconPane', bubblingMouseEvents: false, opacity: restoreOpacity})
+            pilotMarkers[mac] = L.marker([det.pilot_lat, det.pilot_long], {icon: createPilotIcon(color), pane: 'pilotIconPane', bubblingMouseEvents: false, opacity: restoreOpacity})
                                   .bindPopup(generatePopupContent(det, 'pilot'), {className: 'drone-popup', maxWidth: 300, minWidth: 240, closeButton: true})
                                   .addTo(map);
           }
@@ -6959,17 +7131,7 @@ function generateObserverPopup() {
   return `
   <div>
     <strong>Observer Location</strong><br>
-    <label for="observerEmoji">Select Observer Icon:</label>
-    <select id="observerEmoji" onchange="updateObserverEmoji()">
-       <option value="😎" ${storedObserverEmoji === "😎" ? "selected" : ""}>😎</option>
-       <option value="👽" ${storedObserverEmoji === "👽" ? "selected" : ""}>👽</option>
-       <option value="🤖" ${storedObserverEmoji === "🤖" ? "selected" : ""}>🤖</option>
-       <option value="🏎️" ${storedObserverEmoji === "🏎️" ? "selected" : ""}>🏎️</option>
-       <option value="🕵️‍♂️" ${storedObserverEmoji === "🕵️‍♂️" ? "selected" : ""}>🕵️‍♂️</option>
-       <option value="🥷" ${storedObserverEmoji === "🥷" ? "selected" : ""}>🥷</option>
-       <option value="👁️" ${storedObserverEmoji === "👁️" ? "selected" : ""}>👁️</option>
-    </select><br>
-    <div style="display:flex; gap:4px; justify-content:center; margin-top:4px;">
+    <div style="display:flex; gap:4px; justify-content:center; margin-top:6px;">
         <button id="lock-observer" onclick="lockObserver()" style="background-color: ${observerLocked ? 'green' : ''};">
           ${observerLocked ? 'Locked on Observer' : 'Lock on Observer'}
         </button>
@@ -6987,7 +7149,7 @@ function updateObserverEmoji() {
   var selectedEmoji = select.value;
   localStorage.setItem('observerEmoji', selectedEmoji);
   if (observerMarker) {
-    observerMarker.setIcon(createIcon(selectedEmoji, 'blue'));
+    observerMarker.setIcon(createObserverIcon('blue'));
   }
 }
 
@@ -7555,7 +7717,15 @@ const map = L.map('map', {
   easeLinearity: 0.25,
   // Fade animation on tile load — masks the pop-in.
   fadeAnimation: true,
-  markerZoomAnimation: true,
+  // Do NOT animate marker DOM nodes through a zoom. Every aircraft/drone/pilot is
+  // a divIcon (an SVG DOM element); tweening hundreds-to-thousands of them on each
+  // zoom is THE biggest cause of janky zooming. With this off, Leaflet repositions
+  // markers once at zoomend — they sit at their true lat/lon the entire time, only
+  // the in-between tween is skipped — and the 100ms dead-reckoning ticker re-anchors
+  // aircraft immediately after. Canvas shapes (circles/trails via preferCanvas) keep
+  // zooming smoothly. Net: the gesture stays smooth no matter how many contacts are
+  // on the map — which is the whole point.
+  markerZoomAnimation: false,
   // Render circles/polylines on a single canvas instead of one SVG element
   // per shape. With hundreds of aircraft + trails this is night-and-day for
   // pan/zoom smoothness.
@@ -7581,18 +7751,23 @@ map.on('moveend zoomend', function() {
 });
 
 // Update marker icon sizes whenever the map zoom changes
-map.on('zoomend', function() {
+// Rescale drone/pilot marker icons + circle radii to the new zoom. Each setIcon
+// rebuilds a divIcon DOM node, so on a continuous wheel zoom (zoomSnap 0.25 emits
+// several settles) this could rebuild every marker many times in a row. Debounced
+// so it runs once, ~130ms after the zoom settles — invisible to the user, and it
+// keeps the rebuild burst off the gesture entirely.
+map.on('zoomend', debounce(function() {
   // Scale circle and ring radii based on current zoom
   const zoomLevel = map.getZoom();
   const size = Math.max(12, Math.min(zoomLevel * 1.5, 24));
   const circleRadius = size * 0.45;
   Object.keys(droneMarkers).forEach(mac => {
     const color = get_color_for_mac(mac);
-    droneMarkers[mac].setIcon(createIcon('🛸', color));
+    droneMarkers[mac].setIcon(createDroneIcon(color));
   });
   Object.keys(pilotMarkers).forEach(mac => {
     const color = get_color_for_mac(mac);
-    pilotMarkers[mac].setIcon(createIcon('👤', color));
+    pilotMarkers[mac].setIcon(createPilotIcon(color));
   });
   // Update circle marker sizes
   Object.values(droneCircles).forEach(circle => circle.setRadius(circleRadius));
@@ -7602,9 +7777,9 @@ map.on('zoomend', function() {
   // Update observer icon size based on zoom level
   if (observerMarker) {
     const storedObserverEmoji = localStorage.getItem('observerEmoji') || "😎";
-    observerMarker.setIcon(createIcon(storedObserverEmoji, 'blue'));
+    observerMarker.setIcon(createObserverIcon('blue'));
   }
-});
+}, 130));
 
 // ---------- Tiny UI utilities ----------
 // Prevent double-submits on async actions: locks the button while the promise runs.
@@ -7898,8 +8073,10 @@ function showGeofenceToast(payload) {
     + tagColor + '; color:' + tagColor + '; border-radius:3px; font-size:0.85em;">'
     + (payload.drone_tag || 'unknown').toUpperCase() + '</span>';
   t.innerHTML =
-    '<div style="color:' + accent + '; font-weight:bold;">'
-    + (payload.transition === 'enter' ? '▶ ENTERED' : '◀ LEFT') + ' · ' + payload.fence_name + '</div>'
+    '<div style="font-weight:bold;">'
+    + '<span style="color:' + (payload.transition === 'enter' ? '#4ade80' : '#ff6b6b') + ';">'
+    + (payload.transition === 'enter' ? '▶ ENTERED' : '◀ LEFT') + '</span>'
+    + ' <span style="color:' + accent + ';">· ' + payload.fence_name + '</span></div>'
     + '<div style="margin-top:3px;">' + (payload.alias || payload.mac) + ' ' + tagPill + '</div>'
     + '<div style="font-size:0.85em; color:#888; margin-top:2px;">' + dt.toLocaleTimeString() + '</div>';
   document.getElementById('geofenceToasts').appendChild(t);
@@ -8050,13 +8227,60 @@ const FENCE_PALETTE = ['#ff3333','#ff8800','#ffcc00','#88ff88','#33aaff','#cc66f
 let _pendingDrawing = null;   // {kind, layer, geometry}
 let _gfEditId = null;         // when set, the fence form is editing this fence (PUT), not creating (POST)
 
+// Custom CENTER-OUT circle draw: click to drop the center, move the mouse and the
+// circle grows from that center, click again to lock the radius. (Leaflet.draw's
+// built-in circle is press-and-drag, which the user didn't want.) Esc cancels.
+let _circleDrawCleanup = null;
+function _startCircleDraw() {
+  if (_circleDrawCleanup) _circleDrawCleanup();   // cancel any in-progress placement
+  document.getElementById('geofenceCreateForm').style.display = 'none';
+  const style = { color: '#ff3333', weight: 2, fillColor: '#ff3333', fillOpacity: 0.10 };
+  let center = null, preview = null;
+  map.getContainer().style.cursor = 'crosshair';
+  const radiusTo = (ll) => Math.max(1, map.distance(center, ll));
+  const onMove = (ev) => {
+    if (!center || !preview) return;
+    preview.setRadius(radiusTo(ev.latlng));
+  };
+  const onClick = (ev) => {
+    if (!center) {
+      // first click: drop center, start a zero-radius preview that follows the mouse
+      center = ev.latlng;
+      preview = L.circle(center, { radius: 1, ...style }).addTo(map);
+    } else {
+      // second click: lock the radius and hand off to the create form
+      const r = radiusTo(ev.latlng);
+      preview.setRadius(r);
+      const layer = preview;
+      cleanup();
+      _pendingDrawing = { kind: 'circle', layer: layer, type: 'circle',
+                          geometry: { center: [center.lat, center.lng], radius_m: r } };
+      _showFenceCreateForm();
+    }
+  };
+  const onKey = (e) => { if (e.key === 'Escape') { if (preview) map.removeLayer(preview); cleanup(); } };
+  function cleanup() {
+    map.off('mousemove', onMove);
+    map.off('click', onClick);
+    document.removeEventListener('keydown', onKey);
+    map.getContainer().style.cursor = '';
+    _circleDrawCleanup = null;
+  }
+  _circleDrawCleanup = () => { if (preview && !center) map.removeLayer(preview); cleanup(); };
+  map.on('mousemove', onMove);
+  map.on('click', onClick);
+  document.addEventListener('keydown', onKey);
+}
+
 function _startDraw(kind) {
   // Hide any open form first
   document.getElementById('geofenceCreateForm').style.display = 'none';
+  // Circle uses the custom center-out, two-click flow above (click center, move to
+  // size, click to lock) instead of Leaflet.draw's press-and-drag.
+  if (kind === 'circle') { _startCircleDraw(); return; }
   const opts = { showArea: false, shapeOptions: { color: '#ff3333', weight: 2 } };
   let handler;
   if (kind === 'polygon')   handler = new L.Draw.Polygon(map, opts);
-  else if (kind === 'circle') handler = new L.Draw.Circle(map, opts);
   else if (kind === 'rectangle') handler = new L.Draw.Rectangle(map, opts);
   else return;
   handler.enable();
@@ -8289,6 +8513,16 @@ document.getElementById('drawPolygonBtn').addEventListener('click', () => _start
 document.getElementById('drawCircleBtn').addEventListener('click',  () => _startDraw('circle'));
 const rectBtn = document.getElementById('drawRectangleBtn');
 if (rectBtn) rectBtn.addEventListener('click', () => _startDraw('rectangle'));
+// Collapsible "Recent alerts" — expands/collapses the alert history list.
+const gfAlertHeader = document.getElementById('geofenceAlertHeader');
+if (gfAlertHeader) gfAlertHeader.addEventListener('click', () => {
+  const list = document.getElementById('geofenceAlertList');
+  const arr = document.getElementById('geofenceAlertArrow');
+  if (!list) return;
+  const open = list.style.display === 'none';
+  list.style.display = open ? 'block' : 'none';
+  if (arr) arr.textContent = open ? '−' : '+';
+});
 
 socket.on('geofences', (msg) => {
   if (msg && msg.fences) {
@@ -8304,7 +8538,7 @@ socket.on('geofences', (msg) => {
 
 async function refreshGeofenceAlerts() {
   try {
-    const r = await fetch('/api/geofence_alerts?limit=50');
+    const r = await fetch('/api/geofence_alerts?limit=200');
     const d = await r.json();
     renderGeofenceAlertList(d.alerts || []);
   } catch (e) {}
@@ -8313,6 +8547,8 @@ async function refreshGeofenceAlerts() {
 function renderGeofenceAlertList(alerts) {
   const c = document.getElementById('geofenceAlertList');
   if (!c) return;
+  const cnt = document.getElementById('geofenceAlertCount');
+  if (cnt) cnt.textContent = alerts.length ? '(' + alerts.length + ')' : '';
   if (!alerts.length) { c.innerHTML = '— none —'; return; }
   c.innerHTML = '';
   alerts.slice().reverse().forEach(p => {
@@ -8321,8 +8557,10 @@ function renderGeofenceAlertList(alerts) {
     const div = document.createElement('div');
     div.style.cssText = 'padding:3px; margin-top:2px; border-left:2px solid ' + (p.fence_color || '#ff3333') + '; padding-left:5px; background:rgba(40,0,0,0.3);';
     div.innerHTML =
-      '<div style="color:' + (p.fence_color || '#ff3333') + '; font-weight:bold;">'
-      + (p.transition === 'enter' ? '▶ enter' : '◀ exit') + ' · ' + p.fence_name + '</div>'
+      '<div style="font-weight:bold;">'
+      + '<span style="color:' + (p.transition === 'enter' ? '#4ade80' : '#ff6b6b') + ';">'
+      + (p.transition === 'enter' ? '▶ ENTER' : '◀ EXIT') + '</span>'
+      + ' <span style="color:' + (p.fence_color || '#ff3333') + ';">· ' + p.fence_name + '</span></div>'
       + '<div style="color:#ccc;">' + (p.alias || p.mac) + ' '
       + '<span style="color:' + tagColor + ';">[' + (p.drone_tag || 'unknown') + ']</span></div>'
       + '<div style="color:#666; font-size:0.85em;">' + dt.toLocaleTimeString() + '</div>';
@@ -8343,7 +8581,7 @@ async function _pollGeofenceAlerts() {
   if (_gfPollInflight) return;            // single-flight so socket+timer can't double-toast
   _gfPollInflight = true;
   try {
-    const r = await fetch('/api/geofence_alerts?limit=50');
+    const r = await fetch('/api/geofence_alerts?limit=200');
     const d = await r.json();
     const alerts = d.alerts || [];
     if (!_gfAlertsPrimed) {
@@ -8357,8 +8595,12 @@ async function _pollGeofenceAlerts() {
       fresh.forEach(showGeofenceToast);
       if (fresh.length) _gfAlertWatermark = fresh.reduce((m, a) => Math.max(m, a.ts || 0), _gfAlertWatermark);
     }
-    const panel = document.getElementById('geofencePanel');
-    if (panel && panel.style.display !== 'none') renderGeofenceAlertList(alerts);
+    // Always render. The alert list was relocated into the bottom-left float, which
+    // left #geofencePanel an empty, permanently display:none leftover — so gating on
+    // its visibility meant the poll NEVER repopulated the list and recent alerts
+    // never showed. Rendering into a (possibly collapsed) container is cheap and
+    // keeps it current the instant the user expands the panel.
+    renderGeofenceAlertList(alerts);
   } catch (e) {
   } finally {
     _gfPollInflight = false;
@@ -8914,6 +9156,17 @@ document.getElementById('importFileBtn').addEventListener('click', async (ev) =>
 // ADS-B air traffic
 // ============================================================
 const adsbMarkers = {};         // icao -> L.marker
+const _adsbLastSeenMs = {};     // icao -> Date.now() when last present in an applied snapshot
+// Grace window before a vanished aircraft is removed from the map. ADS-B feeds
+// jitter: an aircraft can be absent from one poll then back the next, a single
+// upstream fetch can fail or rate-limit (returning an empty/partial set), and
+// planes skirting the viewport edge drop out of the bbox for a cycle. Reaping a
+// marker the instant it misses ONE snapshot is what made planes "randomly
+// disappear" and the count crater to 0. We instead keep a marker until it has
+// been missing for longer than this window — the dead-reckoning ticker carries
+// it smoothly in the meantime. 30s comfortably spans several missed 2-4s polls
+// while staying well under the server's own 180s stale-eviction.
+const _ADSB_REAP_GRACE_MS = 30000;
 const adsbTrails = {};          // icao -> L.polyline
 const adsbHistory = {};         // icao -> [[lat, lon], ...]  (bounded)
 const ADSB_TRAIL_MAX_POINTS = 1500;   // high so a loaded full-flight trace (decimated to ~400) plus live extension persists; was 60 (which slid the path off over seconds)
@@ -8945,6 +9198,14 @@ window._persistShownAircraftPaths = window._persistShownAircraftPaths || functio
 };
 var shownAircraftPaths = window.shownAircraftPaths;
 var _persistShownAircraftPaths = window._persistShownAircraftPaths;
+// Per-type / ALL-IN-VIEW bulk path toggling was removed; paths are per-plane now.
+// Oversized residue from the old bulk feature would re-draw as spaghetti AND re-fetch
+// thousands of traces on load (rate-limit risk) — so a large set can only be stale
+// bulk leftovers. Drop it for a clean per-plane start.
+if (shownAircraftPaths.size > 50) {
+  shownAircraftPaths.clear();
+  _persistShownAircraftPaths();
+}
 // Per-aircraft custom trail color, stored as a hue (0-359). Absent = use the
 // OSINT tag color. Persisted so a chosen color survives reaps/reloads.
 window.pathColors = window.pathColors
@@ -9399,11 +9660,15 @@ function adsbPopup(a) {
 // gives them the entire recorded flight — takeoff to now — instead of only
 // the chunk we've observed since the page loaded. SDR sources don't have
 // that endpoint; the polyline gracefully falls back to our local history.
-const _adsbTraceFetched = new Set();
+const _adsbTraceFetched = new Set();    // succeeded — don't refetch
+const _adsbTraceInflight = new Set();   // in-flight — dedupe concurrent toggles
 async function _adsbFetchAndDrawTrace(icao) {
   if (!icao) return;
-  if (_adsbTraceFetched.has(icao)) return;   // already loaded once this session
-  _adsbTraceFetched.add(icao);
+  // Only SUCCESS marks an icao fetched. A failed/empty fetch must stay retryable —
+  // otherwise one slow miss froze the plane on its dead-reckoned straight line for
+  // the rest of the session.
+  if (_adsbTraceFetched.has(icao) || _adsbTraceInflight.has(icao)) return;
+  _adsbTraceInflight.add(icao);
   try {
     const r = await fetch('/api/adsb/trace/' + encodeURIComponent(icao));
     const d = await r.json();
@@ -9423,8 +9688,11 @@ async function _adsbFetchAndDrawTrace(icao) {
     // Draw/refresh immediately — the polyline may not exist yet if the plane
     // hadn't moved when the path was toggled on. Reconcile creates it if shown.
     _adsbReconcileTrail(icao, true);
+    _adsbTraceFetched.add(icao);   // mark done ONLY after a real trace landed
   } catch (e) {
     console.debug('trace fetch failed for', icao, e);
+  } finally {
+    _adsbTraceInflight.delete(icao);
   }
 }
 function _adsbTogglePath(icao, on) {
@@ -9442,8 +9710,8 @@ const _adsbTraceQueued = new Set();    // icaos queued or in-flight (dedupe)
 const _adsbBatchQueue = [];            // pending batches (each an icao array)
 let _adsbBatchActive = 0;
 const _ADSB_TRACE_BATCH = 50;          // icaos per batch request
-const _ADSB_BATCH_CONCURRENCY = 2;     // concurrent batch requests
-const _ADSB_TRACE_BULK_CAP = 600;      // max icaos accepted per bulk action
+const _ADSB_BATCH_CONCURRENCY = 2;     // concurrent batch requests — gentle; the trace host hard-blocks on volume
+const _ADSB_TRACE_BULK_CAP = 150;      // max icaos per bulk action — the trace host hard-blocks the IP on high volume, so keep bulk modest
 function _adsbQueueTraces(icaos) {
   const fresh = [];
   for (const icao of icaos) {
@@ -9470,10 +9738,13 @@ function _adsbBatchDrain() {
     }).then(r => r.json()).then(d => {
       const traces = (d && d.traces) || {};
       batch.forEach(icao => {
-        _adsbTraceFetched.add(icao);
         _adsbTraceQueued.delete(icao);
         const pts = traces[icao];
-        if (pts && pts.length >= 2) { adsbHistory[icao] = pts; _adsbReconcileTrail(icao, true); }
+        if (pts && pts.length >= 2) {
+          adsbHistory[icao] = pts;
+          _adsbReconcileTrail(icao, true);
+          _adsbTraceFetched.add(icao);   // mark done ONLY on a real trace; misses stay retryable
+        }
       });
     }).catch(() => {
       batch.forEach(icao => _adsbTraceQueued.delete(icao));   // allow a later retry
@@ -9683,8 +9954,9 @@ function _adsbToggleTagPathsInView(tagId) {
     const a = _lastAdsbSnapshot[icao];
     // Match on PRIMARY tag only (the category the plane is colored as on the
     // map) so a multi-tagged plane belongs to exactly one chip — clicking MIL
-    // never also flips GOV/etc.
-    return primaryTag(a && a.tags) === tagId;
+    // never also flips GOV/etc. Also require the plane to pass the visibility
+    // filter: a type that's been filtered out shouldn't be path-toggled.
+    return a && aircraftPassesFilter(a) && primaryTag(a.tags) === tagId;
   });
   if (!inView.length) return;
   const allShown = inView.every(icao => shownAircraftPaths.has(icao));
@@ -9706,7 +9978,10 @@ function renderAdsbPathTagChips() {
   ADSB_TAGS.forEach(t => {
     const matching = inView.filter(icao => {
       const a = _lastAdsbSnapshot[icao];
-      return primaryTag(a && a.tags) === t.id;   // primary classification only
+      // primary classification only, and only planes that pass the visibility
+      // filter (so a filtered-out type shows 0 and its chip dims, instead of
+      // offering a path toggle that can't draw anything).
+      return a && aircraftPassesFilter(a) && primaryTag(a.tags) === t.id;
     });
     const active = matching.length > 0 && matching.every(icao => shownAircraftPaths.has(icao));
     const chip = document.createElement('span');
@@ -10044,6 +10319,10 @@ function _adsbApplyOne(a, seen) {
       if (_adsbIconCache[a.icao] !== iconKey) {
         m.setIcon(adsbIcon(headRounded, fillColor, tagColor, a.category));
         _adsbIconCache[a.icao] = iconKey;
+        // setIcon() replaces the marker's DOM element, which DROPS the native click
+        // listener bound to the old element — so a plane that had turned became
+        // unclickable (click "track" failed, no popup). Re-bind to the new element.
+        _adsbAttachNativeClick(m);
       }
       // Live-update the popup stat values if it's open — keeps alt/spd/hdg/vs
       // ticking in real time without wiping toggle / button state.
@@ -10126,7 +10405,9 @@ function _adsbApplyOne(a, seen) {
     // flips this — instant, no refetch, no wipe-all flash.
     const _fm = adsbMarkers[a.icao];
     if (_fm) {
-      if (_pass) { if (!adsbLayer.hasLayer(_fm)) _fm.addTo(adsbLayer); }
+      if (_pass) {
+        if (!adsbLayer.hasLayer(_fm)) { _fm.addTo(adsbLayer); _adsbAttachNativeClick(_fm); }  // re-add = new element → re-bind click
+      }
       else if (adsbLayer.hasLayer(_fm)) adsbLayer.removeLayer(_fm);
     }
     // Trail visibility is opt-IN via shownAircraftPaths (default hidden), so we
@@ -10146,23 +10427,38 @@ function _adsbApplyOne(a, seen) {
 }
 
 function _adsbApplyReap(seen) {
-  // Drop aircraft no longer present in the latest snapshot. The MARKER always
-  // goes (the live plane is gone), but if the user opted this aircraft's PATH in,
-  // we KEEP the trail + history on the map — a shown flight path persists until
-  // the user clears it or toggles it off, even after the plane leaves the feed.
+  // Grace-based reap. Every aircraft present in THIS snapshot is stamped as
+  // freshly seen; an aircraft is only actually removed once it has been ABSENT
+  // for longer than _ADSB_REAP_GRACE_MS. This is the core fix for "planes
+  // randomly disappear and the count vanishes": a single empty/partial/failed
+  // poll no longer wipes the map — markers ride out the gap on dead reckoning
+  // and only leave when they're genuinely gone.
+  const now = Date.now();
+  seen.forEach(icao => { _adsbLastSeenMs[icao] = now; });
   Object.keys(adsbMarkers).forEach(icao => {
-    if (!seen.has(icao)) {
-      adsbLayer.removeLayer(adsbMarkers[icao]);
-      delete adsbMarkers[icao];
-      delete _adsbIconCache[icao];
-      if (shownAircraftPaths.has(icao)) return;   // keep the opted-in path frozen on the map
-      if (adsbTrails[icao]) {
-        adsbTrailLayer.removeLayer(adsbTrails[icao]);
-        delete adsbTrails[icao];
-      }
-      delete adsbHistory[icao];
-      delete _adsbDR[icao];
+    if (seen.has(icao)) return;                                  // still present — keep
+    if ((now - (_adsbLastSeenMs[icao] || 0)) < _ADSB_REAP_GRACE_MS) return;  // within grace — keep
+    // Missing beyond the grace window — really gone. Remove the marker. If the
+    // user opted this aircraft's PATH in, KEEP the trail + history frozen on the
+    // map (a shown flight path persists until they clear or toggle it off).
+    adsbLayer.removeLayer(adsbMarkers[icao]);
+    delete adsbMarkers[icao];
+    delete _adsbIconCache[icao];
+    delete _adsbLastSeenMs[icao];
+    // Drop it from the count's backing store too, so the in-view tally stops
+    // counting an aircraft we've stopped tracking.
+    delete _lastAdsbSnapshot[icao];
+    // Let a re-appeared plane re-fetch its real flight trace instead of being
+    // stuck with a fresh dead-reckoned straight line.
+    _adsbTraceFetched.delete(icao);
+    _adsbTraceQueued.delete(icao);
+    if (shownAircraftPaths.has(icao)) return;   // keep the opted-in path frozen on the map
+    if (adsbTrails[icao]) {
+      adsbTrailLayer.removeLayer(adsbTrails[icao]);
+      delete adsbTrails[icao];
     }
+    delete adsbHistory[icao];
+    delete _adsbDR[icao];
   });
 }
 
@@ -10195,8 +10491,10 @@ socket.on('adsb', (msg) => {
     if (msg.error) detail.textContent = '⚠ ' + msg.error;
     else detail.textContent = (msg.fetched || 0) + ' fetched · ' + (msg.count || 0) + ' tracked · ' + (msg.source || '?');
   }
-  // Realtime aircraft-list + counts (counts reflect what's in current map view)
-  renderAdsbAircraftList(msg.aircraft || []);
+  // Realtime aircraft-list + counts (counts reflect what's in current map view).
+  // Render from the retained snapshot, NOT the raw push payload, so a transient
+  // empty/partial frame can't blank the list or drop the count to 0.
+  renderAdsbAircraftList(Object.values(_lastAdsbSnapshot));
 });
 let _lastAdsbSourceId = '?';
 
@@ -10521,18 +10819,16 @@ function renderAdsbBoxFilterChips() {
       if (adsbVisible.has(t.id)) adsbVisible.delete(t.id);
       else adsbVisible.add(t.id);
       renderAdsbBoxFilterChips();
-      renderAdsbFilterChips();   // keep the older copy in sync if it exists
-      // Force list + map re-render
-      fetch('/api/adsb/aircraft').then(r => r.json()).then(d => {
-        if (d && d.aircraft) {
-          Object.keys(adsbMarkers).forEach(icao => {
-            adsbLayer.removeLayer(adsbMarkers[icao]); delete adsbMarkers[icao];
-            if (adsbTrails[icao]) { adsbTrailLayer.removeLayer(adsbTrails[icao]); delete adsbTrails[icao]; }
-          });
-          adsbApply(d.aircraft);
-          renderAdsbAircraftList(d.aircraft);
-        }
-      });
+      renderAdsbFilterChips();   // keep the other chip copy in sync
+      if (typeof _adsbIsEnabled === 'function' && !_adsbIsEnabled()) return;
+      // Apply the filter to markers ALREADY on the map, in place — show/hide each
+      // and reconcile its trail. The old path DELETED every marker + trail and
+      // refetched the whole feed on each click, which flashed the fleet AND wiped
+      // shown flight paths (so per-type path filtering looked broken). This keeps
+      // type filtering — markers AND paths — instant and stable.
+      _adsbReapplyFilter();
+      renderAdsbAircraftList(Object.values(_lastAdsbSnapshot));   // refresh list + count
+      if (typeof renderAdsbPathTagChips === 'function') renderAdsbPathTagChips();
     });
     c.appendChild(chip);
   });
@@ -11060,7 +11356,9 @@ async function _adsbPullSnapshot() {
     if (!_adsbIsEnabled()) return;
     if (snap && snap.aircraft) {
       adsbApply(snap.aircraft);
-      renderAdsbAircraftList(snap.aircraft);
+      // Render from the retained snapshot (post-apply/grace), not the raw poll
+      // payload — a single empty/partial response must not blank the count.
+      renderAdsbAircraftList(Object.values(_lastAdsbSnapshot));
       _lastAdsbSourceId = snap.source || _lastAdsbSourceId;
       _lastAdsbUpdateMs = Date.now();
     }
@@ -11153,6 +11451,9 @@ function renderAdsbFilterChips() {
       // "wonky" churn). Now we just show/hide what's already rendered: instant,
       // no flash, no refetch. The normal poll keeps the set fresh.
       _adsbReapplyFilter();
+      renderAdsbAircraftList(Object.values(_lastAdsbSnapshot));   // refresh list + count
+      if (typeof renderAdsbBoxFilterChips === 'function') renderAdsbBoxFilterChips();  // keep the panel copy in sync
+      if (typeof renderAdsbPathTagChips === 'function') renderAdsbPathTagChips();      // path chips honor the filter now
     });
     c.appendChild(chip);
   });
@@ -11194,9 +11495,7 @@ renderAdsbFilterChips();
 // Flight-path bulk controls (AIR TRAFFIC panel)
 renderAdsbPathTagChips();
 (function _wireAdsbPathBulkBtns() {
-  const allBtn = document.getElementById('adsbPathsAllBtn');
   const clrBtn = document.getElementById('adsbPathsClearBtn');
-  if (allBtn) allBtn.addEventListener('click', (e) => { e.stopPropagation(); _adsbShowAllPathsInView(); });
   if (clrBtn) clrBtn.addEventListener('click', (e) => { e.stopPropagation(); _adsbClearAllPaths(); });
 })();
 document.getElementById('adsbSource').addEventListener('change', syncAdsbConditionalBoxes);
@@ -11366,7 +11665,7 @@ if (navigator.geolocation) {
     const lng = position.coords.longitude;
     // Use stored observer emoji or default to "😎"
     const storedObserverEmoji = localStorage.getItem('observerEmoji') || "😎";
-    const observerIcon = createIcon(storedObserverEmoji, 'blue');
+    const observerIcon = createObserverIcon('blue');
     if (!observerMarker) {
       observerMarker = L.marker([lat, lng], {icon: observerIcon})
                         .bindPopup(generateObserverPopup())
@@ -11403,7 +11702,7 @@ function showHistoricalDrone(mac, detection) {
   const color = get_color_for_mac(mac);
   if (!droneMarkers[mac]) {
     droneMarkers[mac] = L.marker([detection.drone_lat, detection.drone_long], {
-      icon: createIcon('🛸', color),
+      icon: createDroneIcon(color),
       pane: 'droneIconPane',
       bubblingMouseEvents: false
     })
@@ -11442,7 +11741,7 @@ function showHistoricalDrone(mac, detection) {
   if (detection.pilot_lat && detection.pilot_long && detection.pilot_lat != 0 && detection.pilot_long != 0) {
     if (!pilotMarkers[mac]) {
       pilotMarkers[mac] = L.marker([detection.pilot_lat, detection.pilot_long], {
-        icon: createIcon('👤', color),
+        icon: createPilotIcon(color),
         pane: 'pilotIconPane',
         bubblingMouseEvents: false
       })
@@ -11738,7 +12037,7 @@ async function updateData() {
           }
         } else {
           droneMarkers[mac] = L.marker([droneLat, droneLng], {
-            icon: createIcon('🛸', color),
+            icon: createDroneIcon(color),
             pane: 'droneIconPane'
           })
                                 .bindPopup(generatePopupContent(det, 'drone'), {className: 'drone-popup', maxWidth: 300, minWidth: 240, closeButton: true})
@@ -11796,7 +12095,7 @@ async function updateData() {
           if (!pilotMarkers[mac].isPopupOpen()) { pilotMarkers[mac].setPopupContent(generatePopupContent(det, 'pilot')); }
         } else {
           pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {
-            icon: createIcon('👤', color),
+            icon: createPilotIcon(color),
             pane: 'pilotIconPane',
             bubblingMouseEvents: false
           })
@@ -11874,6 +12173,63 @@ function createIcon(emoji, color) {
     className: '',
     iconSize: [isize, isize],
     iconAnchor: [half, half]
+  });
+}
+
+// Top-down quadcopter UAV marker (SVG, not an emoji) for drones — 4 rotor rings on
+// an X-frame with a solid central body, tinted to the drone's color.
+function createDroneIcon(color) {
+  const size = Math.round(getDynamicSize());
+  const half = Math.round(size / 2);
+  const svg =
+    '<svg viewBox="0 0 24 24" width="' + size + '" height="' + size + '" style="display:block;" '
+    + 'fill="none" stroke="' + color + '" stroke-width="1.6" stroke-linecap="round">'
+    + '<line x1="6.5" y1="6.5" x2="17.5" y2="17.5"/>'
+    + '<line x1="17.5" y1="6.5" x2="6.5" y2="17.5"/>'
+    + '<circle cx="6" cy="6" r="3.2"/><circle cx="18" cy="6" r="3.2"/>'
+    + '<circle cx="6" cy="18" r="3.2"/><circle cx="18" cy="18" r="3.2"/>'
+    + '<rect x="9.3" y="9.3" width="5.4" height="5.4" rx="1.2" fill="' + color + '" stroke="none"/>'
+    + '</svg>';
+  return L.divIcon({
+    html: '<div style="width:' + size + 'px; height:' + size + 'px;">' + svg + '</div>',
+    className: '',
+    iconSize: [size, size],
+    iconAnchor: [half, half]
+  });
+}
+
+// Pilot marker — a clean person glyph (head + shoulders), tinted to the pair color.
+// Slightly smaller than the drone so the drone reads as the primary contact.
+function createPilotIcon(color) {
+  const size = Math.round(getDynamicSize() * 0.85);
+  const half = Math.round(size / 2);
+  const svg =
+    '<svg viewBox="0 0 24 24" width="' + size + '" height="' + size + '" style="display:block;" fill="' + color + '">'
+    + '<circle cx="12" cy="7.8" r="3.4"/>'
+    + '<path d="M5.5 19.5 C5.5 14, 18.5 14, 18.5 19.5 Z"/>'
+    + '</svg>';
+  return L.divIcon({
+    html: '<div style="width:' + size + 'px; height:' + size + 'px;">' + svg + '</div>',
+    className: '', iconSize: [size, size], iconAnchor: [half, half]
+  });
+}
+
+// Observer marker — a crosshair/target "you are here" glyph. Distinct from the
+// quadcopter (drone) and the person (pilot). Replaces the old emoji picker.
+function createObserverIcon(color) {
+  const size = Math.round(getDynamicSize());
+  const half = Math.round(size / 2);
+  const svg =
+    '<svg viewBox="0 0 24 24" width="' + size + '" height="' + size + '" style="display:block;" '
+    + 'fill="none" stroke="' + color + '" stroke-width="1.7" stroke-linecap="round">'
+    + '<circle cx="12" cy="12" r="6"/>'
+    + '<circle cx="12" cy="12" r="1.9" fill="' + color + '" stroke="none"/>'
+    + '<line x1="12" y1="1.5" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22.5"/>'
+    + '<line x1="1.5" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22.5" y2="12"/>'
+    + '</svg>';
+  return L.divIcon({
+    html: '<div style="width:' + size + 'px; height:' + size + 'px;">' + svg + '</div>',
+    className: '', iconSize: [size, size], iconAnchor: [half, half]
   });
 }
 
@@ -11965,8 +12321,8 @@ function updateColor(mac, hue) {
   colorOverrides[mac] = hue;
   localStorage.setItem('colorOverrides', JSON.stringify(colorOverrides));
   var newColor = "hsl(" + hue + ", 70%, 50%)";
-  if (droneMarkers[mac]) { droneMarkers[mac].setIcon(createIcon('🛸', newColor)); droneMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'drone')); }
-  if (pilotMarkers[mac]) { pilotMarkers[mac].setIcon(createIcon('👤', newColor)); pilotMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'pilot')); }
+  if (droneMarkers[mac]) { droneMarkers[mac].setIcon(createDroneIcon(newColor)); droneMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'drone')); }
+  if (pilotMarkers[mac]) { pilotMarkers[mac].setIcon(createPilotIcon(newColor)); pilotMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'pilot')); }
   if (droneCircles[mac]) { droneCircles[mac].setStyle({ color: newColor, fillColor: newColor }); }
   if (pilotCircles[mac]) { pilotCircles[mac].setStyle({ color: newColor, fillColor: newColor }); }
   if (dronePolylines[mac]) { dronePolylines[mac].setStyle({ color: newColor }); }
