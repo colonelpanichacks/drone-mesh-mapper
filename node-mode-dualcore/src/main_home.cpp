@@ -145,6 +145,15 @@ static const char* resetReasonName(esp_reset_reason_t r) {
     case ESP_RST_DEEPSLEEP: return "deep sleep wake";
     case ESP_RST_BROWNOUT:  return "BROWNOUT (power supply)";
     case ESP_RST_SDIO:      return "SDIO";
+#if ESP_IDF_VERSION_MAJOR >= 5
+    // A host opening the USB port drives the S3's USB-Serial/JTAG reset lines.
+    // This is by far the most common reset here and is NOT a fault.
+    case ESP_RST_USB:       return "USB peripheral (host opened the port)";
+    case ESP_RST_JTAG:      return "JTAG";
+    case ESP_RST_EFUSE:     return "efuse error";
+    case ESP_RST_PWR_GLITCH:return "power glitch";
+    case ESP_RST_CPU_LOCKUP:return "CPU lockup (double exception)";
+#endif
     default:                return "unknown";
   }
 }
@@ -552,11 +561,16 @@ static void watchdogSetup() {
   cfg.timeout_ms = WDT_TIMEOUT_MS;
   cfg.idle_core_mask = (1 << 0);     // keep watching IDLE0, the default
   cfg.trigger_panic = true;          // panic -> clean reboot -> reset reason
-  // The IDF already initialises the TWDT at boot (CONFIG_ESP_TASK_WDT_INIT),
-  // so init returns INVALID_STATE and reconfigure is the correct call.
+  // CONFIG_ESP_TASK_WDT_INIT means the IDF already started the TWDT during
+  // boot, so reconfigure is the only correct call - calling init first would
+  // log "E task_wdt: TWDT already initialized" on every healthy boot.
+#if defined(CONFIG_ESP_TASK_WDT_INIT) && CONFIG_ESP_TASK_WDT_INIT
+  esp_task_wdt_reconfigure(&cfg);
+#else
   if (esp_task_wdt_init(&cfg) == ESP_ERR_INVALID_STATE) {
     esp_task_wdt_reconfigure(&cfg);
   }
+#endif
 #else
   esp_task_wdt_init(WDT_TIMEOUT_MS / 1000, true);
 #endif
