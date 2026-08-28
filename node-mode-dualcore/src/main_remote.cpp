@@ -121,6 +121,15 @@ static void txPrintln(const char* s) {
   txWrite("\n", 1);
 }
 
+static void txPrintf(const char* fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n > 0) txWrite(buf, (size_t)min((int)sizeof(buf) - 1, n));
+}
+
 // Push queued bytes to USB, strictly bounded and strictly non-blocking.
 static void txFlush() {
   size_t budget = TXQ_MAX_DRAIN;
@@ -548,13 +557,9 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);  // OFF (inverted logic on XIAO)
 
-  Serial.println();
-  Serial.println("================================================");
-  Serial.println("  DRONE MESH MAPPER - REMOTE NODE");
-  Serial.printf("  Node ID: %s\n", nodeId);
-  Serial.println("  WiFi + BLE Remote ID Detection");
-  Serial.println("  UART -> Heltec V3 Meshtastic Mesh");
-  Serial.println("================================================");
+  txPrintln("");
+  txPrintln("Mesh Detect - Node Mode / REMOTE");
+  txPrintf("Node ID: %s   WiFi + BLE -> mesh\n", nodeId);
 
   nvs_flash_init();
 
@@ -573,7 +578,6 @@ void setup() {
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&callback);
   esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
-  Serial.println("[REMOTE] WiFi promiscuous mode active (ch6)");
 
   // BLE scanner for ODID BLE advertisements
   BLEDevice::init("DroneID");
@@ -582,7 +586,6 @@ void setup() {
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
-  Serial.println("[REMOTE] BLE scanner active");
 
   // Launch FreeRTOS tasks on separate cores
   xTaskCreatePinnedToCore(bleScanTask,     "BLE",     10000, NULL, 1, NULL, 1);
@@ -590,7 +593,8 @@ void setup() {
   xTaskCreatePinnedToCore(printerTask,     "Print",   10000, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(uartForwardTask, "UART_FW",  4096, NULL, 1, NULL, 1);
 
-  Serial.println("[REMOTE] All tasks launched - scanning for drones...\n");
+  txPrintln("Scanning.");
+  txPrintln("");
 }
 
 void loop() {

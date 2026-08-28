@@ -614,30 +614,21 @@ void setup() {
     delay(50);
   }
 
+  // Quiet by default: identity only. Detail is available on request (send
+  // STATUS over USB) and problems still announce themselves - an abnormal
+  // reset is reported below, and the periodic stats line carries the rest.
   txPrintln("");
-  txPrintln("================================================");
-  txPrintln("  DRONE MESH MAPPER - HOME NODE");
-  txPrintln("  Mesh-to-USB Bridge + Multi-Node Dedup");
-  txPrintln("  Heltec V3 UART -> Dedup -> USB Serial");
-  txPrintln("================================================");
-  txPrintln("");
-  txPrintf("[BOOT] Boot #%u, reset reason: %s\n", rtcBootCount, resetReasonName(reason));
-  if (rtcValid && rtcLastUptimeMs > 0) {
-    txPrintf("[BOOT] Previous run lasted %us\n", rtcLastUptimeMs / 1000);
-  }
+  txPrintln("Mesh Detect - Node Mode / HOME");
+  txPrintln("Mesh -> dedup -> USB");
+
   if (reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT || reason == ESP_RST_WDT) {
-    txPrintln("[BOOT] WARNING: last reset was a WATCHDOG. The bridge stalled and self-recovered.");
+    txPrintf("[WARN] Boot #%u after a WATCHDOG reset - the bridge stalled and self-recovered\n",
+             rtcBootCount);
   } else if (reason == ESP_RST_BROWNOUT) {
-    txPrintln("[BOOT] WARNING: last reset was a BROWNOUT. Check the USB supply and cable.");
+    txPrintf("[WARN] Boot #%u after a BROWNOUT - check the USB supply and cable\n", rtcBootCount);
   } else if (reason == ESP_RST_PANIC) {
-    txPrintln("[BOOT] WARNING: last reset was a PANIC / exception.");
+    txPrintf("[WARN] Boot #%u after a PANIC / exception\n", rtcBootCount);
   }
-  txPrintf("[HOME] Watchdog: %ums, loop task subscribed\n", WDT_TIMEOUT_MS);
-  txPrintf("[HOME] Dedup: %dms window, %d max drones tracked\n",
-           DEDUP_WINDOW_MS, DEDUP_MAX_DRONES);
-  txPrintf("[HOME] UART pins: TX=GPIO%d  RX=GPIO%d  Baud=%d  RXbuf=%d\n",
-           SERIAL1_TX_PIN, SERIAL1_RX_PIN, UART_BAUD, UART_RX_BUFFER);
-  txPrintln("[HOME] Listening for mesh data...");
   txPrintln("");
 
   uint32_t now = millis();

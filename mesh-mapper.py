@@ -13059,11 +13059,37 @@ def serial_reader(port):
                 serial_objs.pop(port, None)
             time.sleep(1)
     
+    with SERIAL_THREADS_LOCK:
+        if SERIAL_THREADS.get(port) is threading.current_thread():
+            SERIAL_THREADS.pop(port, None)
+
     logger.info(f"Serial reader thread for {port} shutting down. Total data packets received: {data_received_count}")
 
+# One serial reader thread per port, and only one. start_serial_thread() is
+# called from four places - startup auto-connect, the port-monitor thread, the
+# port-selection form and the saved-port restore - none of which knew about the
+# others. Every extra call spawned another reader on the SAME port, and those
+# readers then stole bytes from each other: JSON arrived with characters
+# missing, pyserial raised "device reports readiness to read but returned no
+# data (device disconnected or multiple access on port?)", each reader closed
+# and reopened, and the UI showed the node connecting and disconnecting
+# forever. Registering live threads here makes duplicate starts harmless.
+SERIAL_THREADS = {}                      # port -> Thread
+SERIAL_THREADS_LOCK = threading.Lock()
+
+
 def start_serial_thread(port):
-    thread = threading.Thread(target=serial_reader, args=(port,), daemon=True)
-    thread.start()
+    """Start the reader thread for `port`, unless one is already running."""
+    with SERIAL_THREADS_LOCK:
+        existing = SERIAL_THREADS.get(port)
+        if existing is not None and existing.is_alive():
+            logger.info(f"Serial reader already running for {port} - not starting a second one")
+            return existing
+        thread = threading.Thread(target=serial_reader, args=(port,),
+                                  daemon=True, name=f"serial-reader:{port}")
+        SERIAL_THREADS[port] = thread
+        thread.start()
+        return thread
 
 # Download endpoints for CSV, KML, and Aliases files
 @app.route('/download/csv')
