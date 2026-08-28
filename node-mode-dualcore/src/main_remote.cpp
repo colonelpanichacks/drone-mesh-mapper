@@ -11,6 +11,13 @@
  *   - USB Serial (for local monitoring / direct mesh-mapper.py connection)
  *   - Serial1 UART (GPIO5 TX / GPIO6 RX -> Heltec V3 running Meshtastic)
  *
+ * USB output NEVER blocks: on this board Serial is the native USB CDC
+ * (HWCDC), whose write() waits on the TX ring when an attached host stops
+ * draining (~2s per call worst case). Everything steady-state goes through a
+ * non-blocking ring that drops oldest-first, so a stalled or absent host can
+ * never back up printerTask and stall mesh sending. Same disease the home
+ * node was hardened against; see main_home.cpp's header for the full story.
+ *
  * JSON format (matches mesh-mapper.py API, includes node_id for dedup):
  *   {"mac":"xx:xx:xx:xx:xx:xx","rssi":-50,"drone_lat":0.0,"drone_long":0.0,
  *    "drone_altitude":0,"pilot_lat":0.0,"pilot_long":0.0,"basic_id":"...",
@@ -58,6 +65,85 @@ static void generateNodeId() {
   esp_efuse_mac_get_default(mac);
   // Use last 2 bytes of factory MAC -> unique 4-hex-char ID per board
   snprintf(nodeId, sizeof(nodeId), "%02X%02X", mac[4], mac[5]);
+}
+
+// =============================================================================
+// Non-blocking USB output ring
+//
+// Two tasks write USB output here (printerTask: detections/heartbeat,
+// uartForwardTask: Heltec echoes), so all ring access is mutex-guarded.
+// Nothing steady-state calls Serial.print directly. txFlush() pushes queued
+// bytes only as far as availableForWrite() permits, so a host that stops
+// reading can never stall the node. When the queue fills, the OLDEST bytes
+// are dropped: a fresh detection is worth more than a stale one.
+// =============================================================================
+#define TXQ_SIZE       8192
+#define TXQ_MAX_DRAIN  1024    // Max bytes pushed to USB per flush
+
+static uint8_t  txq[TXQ_SIZE];
+static volatile size_t txHead = 0;   // write index
+static volatile size_t txTail = 0;   // read index
+static uint32_t txDroppedBytes = 0;
+static SemaphoreHandle_t txqMutex = nullptr;
+
+static inline size_t txUsed() {
+  return (txHead >= txTail) ? (txHead - txTail) : (TXQ_SIZE - txTail + txHead);
+}
+
+static inline size_t txFree() {
+  return TXQ_SIZE - txUsed() - 1;   // keep one slot free to distinguish states
+}
+
+static void txWrite(const char* data, size_t len) {
+  if (len == 0) return;
+  if (len > TXQ_SIZE - 1) {           // absurdly long, keep the tail of it
+    data += (len - (TXQ_SIZE - 1));
+    len = TXQ_SIZE - 1;
+  }
+  if (!txqMutex) return;
+  if (xSemaphoreTake(txqMutex, pdMS_TO_TICKS(50)) != pdTRUE) return;  // drop rather than block
+  if (txFree() < len) {
+    // Drop whole bytes from the oldest end until `len` bytes fit.
+    while (txFree() < len && txUsed() > 0) {
+      txTail = (txTail + 1) % TXQ_SIZE;
+      txDroppedBytes++;
+    }
+  }
+  for (size_t i = 0; i < len; i++) {
+    txq[txHead] = (uint8_t)data[i];
+    txHead = (txHead + 1) % TXQ_SIZE;
+  }
+  xSemaphoreGive(txqMutex);
+}
+
+static void txPrintln(const char* s) {
+  txWrite(s, strlen(s));
+  txWrite("\n", 1);
+}
+
+// Push queued bytes to USB, strictly bounded and strictly non-blocking.
+static void txFlush() {
+  size_t budget = TXQ_MAX_DRAIN;
+  if (!txqMutex) return;
+  if (xSemaphoreTake(txqMutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
+  while (txUsed() > 0 && budget > 0) {
+    // availableForWrite() is how much the CDC ring will take right now.
+    // Writing only that much guarantees write() returns without waiting.
+    int room = Serial.availableForWrite();
+    if (room <= 0) break;             // host not draining - try again next pass
+
+    size_t chunk = txUsed();
+    if (chunk > (size_t)room) chunk = (size_t)room;
+    if (chunk > budget) chunk = budget;
+    // Do not wrap past the end of the ring in one write
+    if (txTail + chunk > TXQ_SIZE) chunk = TXQ_SIZE - txTail;
+
+    size_t wrote = Serial.write(&txq[txTail], chunk);
+    if (wrote == 0) break;            // made no progress, do not spin
+    txTail = (txTail + wrote) % TXQ_SIZE;
+    budget -= wrote;
+  }
+  xSemaphoreGive(txqMutex);
 }
 
 // =============================================================================
@@ -175,9 +261,11 @@ public:
 
     // Queue for printing (non-blocking, ISR-safe)
     uav_data tmp = *UAV;
-    BaseType_t woken = pdFALSE;
-    xQueueSendFromISR(printQueue, &tmp, &woken);
-    if (woken) portYIELD_FROM_ISR();
+    if (printQueue) {
+      BaseType_t woken = pdFALSE;
+      xQueueSendFromISR(printQueue, &tmp, &woken);
+      if (woken) portYIELD_FROM_ISR();
+    }
   }
 };
 
@@ -194,6 +282,9 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   // --- NAN Action Frame (WiFi Aware / Neighbor Awareness Networking) ---
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
+    // Zero first, same as the beacon path below: a NAN frame missing a
+    // message type must not inherit stale fields from the previous frame.
+    memset(&UAS_data, 0, sizeof(UAS_data));
     if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nullptr, payload, length) == 0) {
       uav_data UAV;
       memset(&UAV, 0, sizeof(UAV));
@@ -223,9 +314,11 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       stored->flag = 1;
 
       uav_data tmp = *stored;
-      BaseType_t woken = pdFALSE;
-      xQueueSendFromISR(printQueue, &tmp, &woken);
-      if (woken) portYIELD_FROM_ISR();
+      if (printQueue) {
+        BaseType_t woken = pdFALSE;
+        xQueueSendFromISR(printQueue, &tmp, &woken);
+        if (woken) portYIELD_FROM_ISR();
+      }
     }
     return;
   }
@@ -274,9 +367,11 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           stored->flag = 1;
 
           uav_data tmp = *stored;
-          BaseType_t woken = pdFALSE;
-          xQueueSendFromISR(printQueue, &tmp, &woken);
-          if (woken) portYIELD_FROM_ISR();
+          if (printQueue) {
+            BaseType_t woken = pdFALSE;
+            xQueueSendFromISR(printQueue, &tmp, &woken);
+            if (woken) portYIELD_FROM_ISR();
+          }
         }
       }
       offset += len + 2;
@@ -321,8 +416,9 @@ static void send_json(const uav_data *UAV) {
   char json[300];
   buildJson(json, sizeof(json), UAV);
 
-  // USB Serial (local monitoring / direct connection to mesh-mapper.py)
-  Serial.println(json);
+  // USB Serial (local monitoring / direct connection to mesh-mapper.py).
+  // Queued, never blocking - a stalled host must not back up mesh sending.
+  txPrintln(json);
 
   // LED flash on detection (quick blink)
   digitalWrite(LED_PIN, LOW);   // ON (inverted)
@@ -386,6 +482,7 @@ static void printerTask(void *param) {
       send_to_mesh(&UAV);
     }
     meshQueueDrain();
+    txFlush();   // runs at least every 100ms even with zero detections
   }
 }
 
@@ -417,7 +514,7 @@ static void uartForwardTask(void *param) {
       if (c == '\n' || c == '\r') {
         if (linePos > 0) {
           lineBuf[linePos] = '\0';
-          Serial.println(lineBuf);
+          txPrintln(lineBuf);   // queued, never blocking
           linePos = 0;
         }
       } else if (linePos < (int)sizeof(lineBuf) - 1) {
@@ -461,6 +558,15 @@ void setup() {
 
   nvs_flash_init();
 
+  // Everything the radio callbacks touch must exist BEFORE any radio is armed.
+  // esp_wifi_set_promiscuous_rx_cb() starts delivering frames immediately, and
+  // the callback pushes to printQueue - creating the queue afterwards left a
+  // window where a frame arriving on a busy channel hit a null handle and
+  // panicked at boot.
+  printQueue = xQueueCreate(MAX_UAVS * 2, sizeof(uav_data));
+  txqMutex = xSemaphoreCreateMutex();
+  memset(uavs, 0, sizeof(uavs));
+
   // WiFi promiscuous mode for ODID NAN/Beacon frames
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -478,12 +584,6 @@ void setup() {
   pBLEScan->setWindow(99);
   Serial.println("[REMOTE] BLE scanner active");
 
-  // Print queue (ISR-safe bridge between callbacks and printer task)
-  printQueue = xQueueCreate(MAX_UAVS * 2, sizeof(uav_data));
-
-  // Clear tracking array
-  memset(uavs, 0, sizeof(uavs));
-
   // Launch FreeRTOS tasks on separate cores
   xTaskCreatePinnedToCore(bleScanTask,     "BLE",     10000, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(wifiProcessTask, "WiFi",    10000, NULL, 1, NULL, 0);
@@ -496,9 +596,9 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Heartbeat every 60 seconds
+  // Heartbeat every 60 seconds (queued, never blocking)
   if (now - last_status > 60000UL) {
-    Serial.println("{\"heartbeat\":\"remote_node active\"}");
+    txPrintln("{\"heartbeat\":\"remote_node active\"}");
     last_status = now;
   }
 
