@@ -391,6 +391,20 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
 // =============================================================================
 // JSON Builder (shared format for USB + mesh, includes node_id)
 // =============================================================================
+// Coordinate text at full 6-decimal precision - identical value to what this
+// firmware has always sent - with only trailing zeros and a trailing dot
+// removed. "34.050000" -> "34.05" is the same number in fewer bytes, so this
+// is lossless: no rounding, no reduced precision.
+static int fmtCoord(char* out, int outSize, double v) {
+  int n = snprintf(out, outSize, "%.6f", v);
+  if (n <= 0 || n >= outSize) return n;
+  int e = n - 1;
+  while (e > 0 && out[e] == '0') e--;
+  if (e > 0 && out[e] == '.') e--;
+  out[e + 1] = '\0';
+  return e + 1;
+}
+
 static int buildJson(char *buf, size_t bufSize, const uav_data *UAV) {
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -410,12 +424,41 @@ static int buildJson(char *buf, size_t bufSize, const uav_data *UAV) {
   }
   safe_id[si] = '\0';
 
-  return snprintf(buf, bufSize,
-    "{\"mac\":\"%s\",\"rssi\":%d,\"drone_lat\":%.6f,\"drone_long\":%.6f,"
-    "\"drone_altitude\":%d,\"pilot_lat\":%.6f,\"pilot_long\":%.6f,"
-    "\"basic_id\":\"%s\",\"node_id\":\"%s\"}",
-    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
-    UAV->base_lat_d, UAV->base_long_d, safe_id, nodeId);
+  // Every byte here is LoRa airtime: a 233-byte packet costs ~2s on air at
+  // Meshtastic's default LONG_FAST. Both savings below are LOSSLESS - no
+  // value is rounded and no populated field is dropped:
+  //   - coordinates keep full 6-decimal precision, only trailing zeros go
+  //   - a field is omitted only when it carries nothing (pilot position not
+  //     broadcast, empty UAS ID); absent and zero mean the same thing here
+  // mesh-mapper reads every field with .get() and gates only on one of
+  // mac/drone_lat/pilot_lat/basic_id being present, so omission is safe.
+  char dlat[16], dlon[16];
+  fmtCoord(dlat, sizeof(dlat), UAV->lat_d);
+  fmtCoord(dlon, sizeof(dlon), UAV->long_d);
+
+  int n = snprintf(buf, bufSize,
+    "{\"mac\":\"%s\",\"rssi\":%d,\"drone_lat\":%s,\"drone_long\":%s,\"drone_altitude\":%d",
+    mac_str, UAV->rssi, dlat, dlon, UAV->altitude_msl);
+  if (n < 0 || n >= bufSize) return n;
+
+  // Pilot position is frequently absent - omitting it saves ~40 bytes.
+  if (UAV->base_lat_d != 0.0 || UAV->base_long_d != 0.0) {
+    char plat[16], plon[16];
+    fmtCoord(plat, sizeof(plat), UAV->base_lat_d);
+    fmtCoord(plon, sizeof(plon), UAV->base_long_d);
+    int m = snprintf(buf + n, bufSize - n,
+                     ",\"pilot_lat\":%s,\"pilot_long\":%s", plat, plon);
+    if (m < 0 || m >= bufSize - n) return n;
+    n += m;
+  }
+  if (safe_id[0]) {
+    int m = snprintf(buf + n, bufSize - n, ",\"basic_id\":\"%s\"", safe_id);
+    if (m < 0 || m >= bufSize - n) return n;
+    n += m;
+  }
+  int m = snprintf(buf + n, bufSize - n, ",\"node_id\":\"%s\"}", nodeId);
+  if (m < 0 || m >= bufSize - n) return n;
+  return n + m;
 }
 
 // =============================================================================
