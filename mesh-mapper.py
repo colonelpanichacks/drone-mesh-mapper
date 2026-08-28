@@ -12973,6 +12973,13 @@ def serial_reader(port):
                     detection = json.loads(json_str)
                     logger.debug(f"Parsed JSON from {port}: {detection}")
                     
+                    # Heartbeats and command acks are normal traffic, not
+                    # detections - drop them before the MAC logic below, which
+                    # would otherwise log a WARNING for every one of them.
+                    if 'heartbeat' in detection:
+                        logger.debug(f"Skipping heartbeat from {port}")
+                        continue
+
                     # MAC tracking logic...
                     if 'mac' in detection:
                         last_mac_by_port[port] = detection['mac']
@@ -12982,11 +12989,6 @@ def serial_reader(port):
                         logger.debug(f"Using cached MAC for {port}: {detection['mac']}")
                     else:
                         logger.warning(f"No MAC found in detection from {port}: {detection}")
-                    
-                    # Skip heartbeat messages
-                    if 'heartbeat' in detection:
-                        logger.debug(f"Skipping heartbeat from {port}")
-                        continue
                     
                     # Skip status messages without detection data
                     if not any(key in detection for key in ['mac', 'drone_lat', 'pilot_lat', 'basic_id', 'remote_id']):
