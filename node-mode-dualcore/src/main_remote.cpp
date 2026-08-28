@@ -589,6 +589,10 @@ void setup() {
 
   // Serial init
   Serial.begin(115200);
+
+  // Must exist before the first txPrintln below - txWrite drops anything
+  // queued while this is null, which silently ate the boot banner.
+  txqMutex = xSemaphoreCreateMutex();
   // Without a TX ring buffer, availableForWrite() tops out at the 128-byte
   // hardware FIFO. The detection JSON is ~200 bytes, so the send gate
   // (availableForWrite() >= len) could NEVER pass and the remote node never
@@ -612,7 +616,6 @@ void setup() {
   // window where a frame arriving on a busy channel hit a null handle and
   // panicked at boot.
   printQueue = xQueueCreate(MAX_UAVS * 2, sizeof(uav_data));
-  txqMutex = xSemaphoreCreateMutex();
   memset(uavs, 0, sizeof(uavs));
 
   // WiFi promiscuous mode for ODID NAN/Beacon frames
