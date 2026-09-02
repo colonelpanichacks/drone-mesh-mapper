@@ -6,3 +6,6 @@ pyserial>=3.5
 
 # Optional: enables native Beast TCP ADS-B decode (HackRF/RTL-SDR direct, no dump1090 needed)
 # pip install pyModeS
+
+# Optional: only needed by tools/ds110_bridge.py (DroneScout Bridge ds110 BLE relay ingest)
+bleak>=0.21

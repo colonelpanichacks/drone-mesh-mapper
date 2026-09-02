@@ -56,6 +56,51 @@ pio run -t upload
 - Stale detection: Marked inactive but NOT deleted (30+ min → `"inactive_old"`)
 - KML generation: Throttled to 30s intervals
 
+## DroneScout Bridge ds110 Integration (2026-08-30)
+
+Adds support for the BlueMark DroneScout Bridge ds110 (triple-band Remote ID
+receiver dongle) as a host-side receiver. The ds110 re-broadcasts everything it
+hears (2.4/5/5.8 GHz) as BT4 Legacy Advertising ODID frames so phones can
+receive them; we now ingest that relay directly over the host's Bluetooth.
+
+**Files in this changeset:**
+- `tools/ds110_bridge.py` (NEW) — bleak-based BLE listener. Decodes ODID
+  BasicID/Location/System messages (layouts match firmware `opendroneid.h`),
+  tracks per-drone state, POSTs to `/api/detections` in the exact firmware
+  JSON schema. Keys relayed drones by synthesized MAC from `sha1(basic_id)`
+  (avoids the all-relayed-drones-share-the-bridge's-advertiser-MAC collapse
+  that both `node-mode-dualcore` and `remoteid-mesh-dualcore` have on their
+  BLE path). Heartbeats `POST /api/receiver_status` every 15 s.
+  `--list` = debug mode (print ads, no POST), `--url` = mapper override.
+- `mesh-mapper.py` —
+  - `update_detection()`: filters the ds110 idle self-advertisement
+    (`DroneScout Bridge`, both spellings) and merges cross-path duplicates by
+    `basic_id` via new `basic_id_index` (direct node detection + ds110 relay
+    of the same drone = one map entry; first-seen MAC key wins).
+  - New `POST /api/receiver_status` endpoint + `receiver_status` dict +
+    `combined_connection_status()`: HTTP receivers render in the same
+    connection-status UI panel as USB serial ports (stale after 45 s). Covers
+    `/api/serial_status`, `/api/diagnostics`, and the `serial_status` socket
+    event; no JS changes needed.
+- `requirements.txt` — added `bleak>=0.21` (only needed by the bridge script).
+- `README.md` — ds110 section under Features + `tools/` tree entry.
+
+**Run:**
+```bash
+./venv/bin/python mesh-mapper.py --web-port 5001   # 5001, not 5000 — see gotcha #11
+./venv/bin/python tools/ds110_bridge.py
+```
+
+**Verified:** end-to-end POST ingest, placeholder suppression (both BLE and
+node paths), Connected/Disconnected UI flips, cross-path dedup (2 POSTs, 1
+entry). NOT yet field-tested with a real drone — the assumption that the ds110
+relay preserves original `basic_id`s is unconfirmed; if it doesn't, keying
+falls back to per-advertiser-MAC (pre-existing behavior).
+
+**Note:** project uses a local `venv/` (python3.12) because the system
+python3.14 has a broken eventlet/pyOpenSSL combo that crashes flask-socketio
+at startup.
+
 ## Gotchas
 
 1. **Node ID required**: Remote nodes must send `node_id` in JSON for dedup to work
@@ -67,6 +112,8 @@ pio run -t upload
 8. **Thread safety**: Serial reads use locks — detections arrive from multiple USB ports simultaneously
 9. **CSV logging**: Every detection written immediately to prevent data loss on crash
 10. **Webhook rate limiting**: Triggered on detection transitions only (new/reactivation)
+11. **DroneScout Bridge ds110**: `tools/ds110_bridge.py` ingests the ds110's BT4 Legacy relay over host BLE (bleak) and POSTs to `/api/detections`; relayed drones keyed by synthesized MAC from `basic_id`. Its idle `DroneScout Bridge` self-advertisement is filtered in `update_detection()`. Connection status: the script heartbeats `POST /api/receiver_status` every 15 s; the server merges HTTP receivers into `combined_connection_status()` (stale after 45 s) so they render in the same UI panel as USB ports. Note: on this dev machine `127.0.0.1:5000` is owned by another app — run the mapper with `--web-port 5001` and use `http://localhost:5001` (the bridge script's default).
+12. **Cross-path dedup**: `update_detection()` merges by `basic_id` via `basic_id_index` — the same drone seen directly by a node and relayed through the DroneScout Bridge (different MAC keys) yields ONE tracked entry; first-seen key wins, later updates fold in (so `source_port` reflects the most recent path).
 
 ## Supported Platforms
 

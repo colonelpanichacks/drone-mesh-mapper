@@ -121,6 +121,19 @@ pio run -t upload
 - Webhook callbacks on detection transitions
 - Service worker tile cache for the live UI
 
+### DroneScout Bridge ds110 (BLE relay ingest)
+- `tools/ds110_bridge.py` listens on the Mac's Bluetooth for the ds110's BT4 Legacy Remote ID relay (ODID service data, UUID 0xFFFA), decodes it, and POSTs to `/api/detections`
+- Shows up as **DroneScout Bridge (BLE)** in the connection-status panel next to the USB nodes — it heartbeats `POST /api/receiver_status` every 15 s and flips to Disconnected after 45 s of silence
+- Relayed drones are keyed by their original `basic_id` (synthesized MAC), so multiple drones relayed by one bridge stay separate map entries — the ESP32 BLE path tags them all with the bridge's advertiser MAC
+- The bridge's idle self-advertisement (`DroneScout Bridge`) is filtered out in `update_detection()`
+- Requires `bleak` (in `requirements.txt`); macOS will ask for Bluetooth permission on first run
+
+```bash
+./venv/bin/python mesh-mapper.py --web-port 5001   # 5000's loopback is taken by another app on this machine
+./venv/bin/python tools/ds110_bridge.py --list    # debug: print heard ODID ads
+./venv/bin/python tools/ds110_bridge.py           # feed mapper at http://localhost:5001 (default; --url to override)
+```
+
 ### Offline Maps
 - 8 raster tile sources, vendored Leaflet + MapLibre GL
 - One-click world baseline, region presets, place search
@@ -511,7 +524,8 @@ drone-mesh-mapper/
 |-- tiles/                      # MBTiles files (auto-discovered)
 |   `-- README.md               # Tile import / format notes
 |-- tools/
-|   `-- cache_tiles.py          # CLI tile pre-cacher
+|   |-- cache_tiles.py          # CLI tile pre-cacher
+|   `-- ds110_bridge.py         # DroneScout Bridge ds110 BLE relay -> /api/detections
 |-- RPI/                        # Raspberry Pi installer scripts
 |-- node-mode-dualcore/         # ESP32-S3 dual-role firmware
 |-- remoteid-mesh-dualcore/     # ESP32-S3 BLE+WiFi firmware

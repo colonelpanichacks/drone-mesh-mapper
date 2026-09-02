@@ -710,7 +710,7 @@ def _cache_worker(job_id):
 # Define emit_serial_status early to avoid NameError in threads
 def emit_serial_status():
     try:
-        socketio.emit('serial_status', serial_connected_status, )
+        socketio.emit('serial_status', combined_connection_status(), )
     except Exception as e:
         logger.debug(f"Error emitting serial status: {e}")
         pass  # Ignore if no clients connected or serialization error
@@ -811,6 +811,10 @@ def load_webhook_url():
 # Global Variables & Files
 # ----------------------
 tracked_pairs = {}
+# basic_id -> tracked_pairs key (mac), to merge the same drone arriving via
+# multiple receive paths (direct node detection vs DroneScout Bridge relay,
+# which reports under a different/synthesized MAC) into one map entry.
+basic_id_index = {}
 detection_history = deque(maxlen=MAX_DETECTION_HISTORY)  # Limit size to prevent memory growth
 
 # Changed: Instead of one selected port, we allow up to three.
@@ -819,6 +823,18 @@ BAUD_RATE = 115200
 staleThreshold = 60  # Global stale threshold in seconds (changed from 300 seconds -> 1 minute)
 # For each port, we track its connection status.
 serial_connected_status = {}  # e.g. {"port1": True, "port2": False, ...}
+# Non-serial receivers reporting over HTTP (e.g. DroneScout Bridge BLE relay
+# via tools/ds110_bridge.py): name -> {"last_seen": ts, "stats": dict}
+receiver_status = {}
+RECEIVER_TIMEOUT_S = 45  # show Disconnected if no heartbeat within this
+
+def combined_connection_status():
+    """Serial port statuses plus HTTP receivers, computed fresh each call."""
+    statuses = dict(serial_connected_status)
+    now = time.time()
+    for name, info in receiver_status.items():
+        statuses[name] = (now - info.get("last_seen", 0)) < RECEIVER_TIMEOUT_S
+    return statuses
 # Mapping to merge fragmented detections: port -> last seen mac
 last_mac_by_port = {}
 
@@ -1695,6 +1711,22 @@ def update_detection(detection):
     mac = detection.get("mac")
     if not mac:
         return
+    # Drop DroneScout Bridge idle self-advertisements (placeholder relay with
+    # zeroed GPS) — they are not drones. Seen as "DroneScout Bridge" (raw BLE)
+    # and "DroneScoutBridge" (node firmware strips the space).
+    bid = detection.get("basic_id")
+    if bid and bid.replace(" ", "").lower() == "dronescoutbridge":
+        return
+    # Dedup across receive paths: if this basic_id is already tracked under a
+    # different MAC (e.g. direct node detection vs DroneScout Bridge relay),
+    # fold this detection into the existing entry instead of creating a dupe.
+    if bid:
+        owner = basic_id_index.get(bid)
+        if owner and owner != mac and owner in tracked_pairs:
+            logger.info(f"Merging {mac} into existing track {owner} (same basic_id {bid})")
+            detection["mac"] = mac = owner
+        else:
+            basic_id_index[bid] = mac
     prev = tracked_pairs.get(mac)
 
     # Retrieve new drone coordinates from the detection
@@ -12833,7 +12865,19 @@ def api_ports():
 # Updated status endpoint: returns a dict of statuses for each selected USB.
 @app.route('/api/serial_status', methods=['GET'])
 def api_serial_status():
-    return jsonify({"statuses": serial_connected_status})
+    return jsonify({"statuses": combined_connection_status()})
+
+# Heartbeat endpoint for non-serial receivers (e.g. tools/ds110_bridge.py).
+# They show up alongside USB ports in the connection status UI.
+@app.route('/api/receiver_status', methods=['POST'])
+def api_receiver_status():
+    data = request.get_json(force=True, silent=True) or {}
+    name = data.get("name")
+    if not name:
+        return jsonify({"status": "error", "reason": "no receiver name"}), 400
+    receiver_status[name] = {"last_seen": time.time(), "stats": data.get("stats", {})}
+    emit_serial_status()
+    return jsonify({"status": "ok"})
 
 # New endpoint to get currently selected ports
 @app.route('/api/selected_ports', methods=['GET'])
@@ -13314,7 +13358,7 @@ def api_diagnostics():
     diagnostics = {
         "timestamp": datetime.now().isoformat(),
         "selected_ports": SELECTED_PORTS,
-        "serial_status": serial_connected_status,
+        "serial_status": combined_connection_status(),
         "tracked_pairs": len(tracked_pairs),
         "detection_history_count": len(detection_history),
         "last_mac_by_port": last_mac_by_port,
@@ -13396,7 +13440,7 @@ def handle_connect():
 
 def emit_serial_status():
     try:
-        socketio.emit('serial_status', serial_connected_status, )
+        socketio.emit('serial_status', combined_connection_status(), )
     except Exception as e:
         logger.debug(f"Error emitting serial status: {e}")
         pass  # Ignore if no clients connected or serialization error
