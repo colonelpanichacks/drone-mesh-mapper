@@ -126,12 +126,13 @@ pio run -t upload
 - Shows up as **DroneScout Bridge (BLE)** in the connection-status panel next to the USB nodes — it heartbeats `POST /api/receiver_status` every 15 s and flips to Disconnected after 45 s of silence
 - Relayed drones are keyed by their original `basic_id` (synthesized MAC), so multiple drones relayed by one bridge stay separate map entries — the ESP32 BLE path tags them all with the bridge's advertiser MAC
 - The bridge's idle self-advertisement (`DroneScout Bridge`) is filtered out in `update_detection()`
-- Requires `bleak` (in `requirements.txt`); macOS will ask for Bluetooth permission on first run
+- Requires `bleak` (in `requirements.txt`). On macOS run it through `tools/ds110_bridge_macos.sh`: no stock Python declares `NSBluetoothAlwaysUsageDescription`, so a plain `python tools/ds110_bridge.py` is killed by TCC with SIGABRT the moment it touches CoreBluetooth. The script wraps the interpreter in a signed .app that declares the key and launches it via `open` (so macOS holds the bundle, not your terminal, responsible for the request) - you then get the normal Bluetooth permission prompt. The bundle is built under `venv/` and is disposable
 
 ```bash
 ./venv/bin/python mesh-mapper.py --web-port 5001   # 5000's loopback is taken by another app on this machine
-./venv/bin/python tools/ds110_bridge.py --list    # debug: print heard ODID ads
-./venv/bin/python tools/ds110_bridge.py           # feed mapper at http://localhost:5001 (default; --url to override)
+./tools/ds110_bridge_macos.sh --list              # debug: print heard ODID ads
+./tools/ds110_bridge_macos.sh                     # feed mapper at http://localhost:5001 (default; --url to override)
+# non-macOS: ./venv/bin/python tools/ds110_bridge.py
 ```
 
 ### Offline Maps

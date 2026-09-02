@@ -82,13 +82,24 @@ receive them; we now ingest that relay directly over the host's Bluetooth.
     connection-status UI panel as USB serial ports (stale after 45 s). Covers
     `/api/serial_status`, `/api/diagnostics`, and the `serial_status` socket
     event; no JS changes needed.
+- `tools/ds110_bridge_macos.sh` (NEW) — required launcher on macOS. TCC aborts
+  (SIGABRT, exit 134, no traceback) any Python touching CoreBluetooth without
+  `NSBluetoothAlwaysUsageDescription`, and no stock interpreter declares it.
+  The script copies the framework's `Python.app` stub into `venv/ds110-host/`,
+  adds the key, re-signs ad-hoc, and launches it with `open` — running the
+  stub directly still aborts, because TCC blames the *responsible* process
+  (your terminal), not the bundle. Passes args through; tails the log so it
+  behaves like a foreground run. Two non-obvious constraints, both found the
+  hard way: `open -n` fails with LaunchServices -10810 on this unregistered
+  bundle, and so does any `open` whose `--stdout`/`--stderr` log sits in the
+  bundle's own directory — hence log + pidfile live in `$TMPDIR`.
 - `requirements.txt` — added `bleak>=0.21` (only needed by the bridge script).
 - `README.md` — ds110 section under Features + `tools/` tree entry.
 
 **Run:**
 ```bash
 ./venv/bin/python mesh-mapper.py --web-port 5001   # 5001, not 5000 — see gotcha #11
-./venv/bin/python tools/ds110_bridge.py
+./tools/ds110_bridge_macos.sh                     # macOS; see gotcha #13
 ```
 
 **Verified:** end-to-end POST ingest, placeholder suppression (both BLE and
@@ -113,6 +124,7 @@ at startup.
 9. **CSV logging**: Every detection written immediately to prevent data loss on crash
 10. **Webhook rate limiting**: Triggered on detection transitions only (new/reactivation)
 11. **DroneScout Bridge ds110**: `tools/ds110_bridge.py` ingests the ds110's BT4 Legacy relay over host BLE (bleak) and POSTs to `/api/detections`; relayed drones keyed by synthesized MAC from `basic_id`. Its idle `DroneScout Bridge` self-advertisement is filtered in `update_detection()`. Connection status: the script heartbeats `POST /api/receiver_status` every 15 s; the server merges HTTP receivers into `combined_connection_status()` (stale after 45 s) so they render in the same UI panel as USB ports. Note: on this dev machine `127.0.0.1:5000` is owned by another app — run the mapper with `--web-port 5001` and use `http://localhost:5001` (the bridge script's default).
+13. **macOS Bluetooth/TCC**: never run `tools/ds110_bridge.py` with a bare `python` on macOS — it dies with SIGABRT/exit 134 and *no output at all* (the crash reason is only in `~/Library/Logs/DiagnosticReports/Python-*.ips`, namespace TCC). Use `tools/ds110_bridge_macos.sh`. Same trap for any future host-side BLE tool.
 12. **Cross-path dedup**: `update_detection()` merges by `basic_id` via `basic_id_index` — the same drone seen directly by a node and relayed through the DroneScout Bridge (different MAC keys) yields ONE tracked entry; first-seen key wins, later updates fold in (so `source_port` reflects the most recent path).
 
 ## Supported Platforms
