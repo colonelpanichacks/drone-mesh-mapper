@@ -276,7 +276,15 @@ class Bridge:
             await asyncio.sleep(0.25)
 
     async def run(self):
-        scanner = BleakScanner(detection_callback=self.on_advertisement)
+        # BlueZ (Linux/Raspberry Pi) defaults to DuplicateData=False, i.e. it
+        # suppresses repeats of byte-identical advertisement data. A hovering
+        # drone re-broadcasts the same Location message unchanged, so those
+        # repeats would never reach us, last_seen would stop advancing and the
+        # drone would expire off the map while still in the air. CoreBluetooth
+        # delivers every advertisement, which is why this only bites on Linux.
+        # The kwarg is a plain TypedDict and is ignored by other backends.
+        scanner = BleakScanner(detection_callback=self.on_advertisement,
+                               bluez={"filters": {"DuplicateData": True}})
         await scanner.start()
         logger.info("BLE scan started%s",
                     " (list-only, no POSTs)" if self.list_only else f", posting to {self.url}")

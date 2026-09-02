@@ -177,6 +177,7 @@ def get_all_dependencies():
         "MarkupSafe",        # String handling library
         "wheel",             # Built-package format
         "setuptools",        # Package development tools
+        "bleak",             # BLE scanning for tools/ds110_bridge.py (DroneScout Bridge ds110)
         "eventlet",          # Async networking library (for socketio)
         "python-socketio",   # Socket.IO client/server
     ]

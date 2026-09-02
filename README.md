@@ -128,6 +128,8 @@ pio run -t upload
 - The bridge's idle self-advertisement (`DroneScout Bridge`) is filtered out in `update_detection()`
 - Requires `bleak` (in `requirements.txt`). On macOS run it through `tools/ds110_bridge_macos.sh`: no stock Python declares `NSBluetoothAlwaysUsageDescription`, so a plain `python tools/ds110_bridge.py` is killed by TCC with SIGABRT the moment it touches CoreBluetooth. The script wraps the interpreter in a signed .app that declares the key and launches it via `open` (so macOS holds the bundle, not your terminal, responsible for the request) - you then get the normal Bluetooth permission prompt. The bundle is built under `venv/` and is disposable
 
+**Raspberry Pi / Linux:** run the script directly (`python3 tools/ds110_bridge.py`) - the .app wrapper above is a macOS-only problem. Needs BlueZ 5.55+ with `bluetoothd` running (Raspberry Pi OS Bookworm ships 5.66) and your user in the `bluetooth` group. The Pi's onboard radio does BT 4.2/5.0 legacy advertising, which is what the ds110 relays, so no extra dongle is needed - but onboard Bluetooth and 2.4 GHz Wi-Fi share one antenna, so a headless Pi on 2.4 GHz Wi-Fi will drop relayed frames. Prefer Ethernet, 5 GHz, or an external BT dongle.
+
 ```bash
 ./venv/bin/python mesh-mapper.py --web-port 5001   # 5000's loopback is taken by another app on this machine
 ./tools/ds110_bridge_macos.sh --list              # debug: print heard ODID ads
