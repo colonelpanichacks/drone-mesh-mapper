@@ -152,7 +152,9 @@ pio run -t upload
 
 ## Offline Maps
 
-The mapper is built to run with no internet at all. Everything the UI needs - Leaflet, MapLibre GL, Socket.IO, the Orbitron font - is vendored under `static/`. Map tiles live in `tiles/` as standard MBTiles files. The server serves them, the browser renders them, and you fly.
+The mapper is built to run with no internet. Everything the UI needs - Leaflet, MapLibre GL, Socket.IO, the Orbitron font - is vendored under `static/` and served off local disk, never a CDN. Map tiles live in `tiles/` as standard MBTiles files. The server serves them, the browser renders them, and you fly.
+
+> **The tiles caveat.** `tiles/` is **empty on a fresh clone**, and the eight built-in basemaps listed below are online sources. So out of the box the interface is offline-capable but the basemap is not: with no connection and no cached `.mbtiles` you get a working map on a blank background - markers, tracks, pilot positions and geofences all draw correctly, because they come from your own detections rather than the basemap. **Cache your area while you still have a connection** and the map is genuinely self-contained in the field. The four ways to populate `tiles/` are below.
 
 ### How it works in 30 seconds
 
@@ -182,7 +184,7 @@ Tiles are stored in MBTiles format (SQLite, one row per `(z, x, y, blob)`). The 
 | **OSM Humanitarian** | Amenities, water, terrain emphasized | tile.openstreetmap.fr | 20 | low volume only |
 | **OpenTopoMap** | Backcountry / contours / trails | tile.opentopomap.org | 17 | low volume only |
 
-The cacher **respects each provider's TOS** - OSM main bulk caching is rejected by convention; use Esri/Carto for big jobs.
+Mind each provider's TOS yourself - **the cacher does not enforce it**. OpenStreetMap's main tile server forbids bulk download, but passing `--source osmStandard` with a wide bbox will still try. Use Esri/Carto for big jobs.
 
 ### Four ways to populate `tiles/`
 
