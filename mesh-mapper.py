@@ -4722,6 +4722,7 @@ HTML_PAGE = '''
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mesh Mapper</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
   <!-- Add Socket.IO client script for real-time updates -->
   <script src="/static/socketio/socket.io.min.js"></script>
   <link rel="stylesheet" href="/static/leaflet/leaflet.css"/>
@@ -4818,7 +4819,10 @@ HTML_PAGE = '''
       background-color: #0a001f;
       font-family: 'Orbitron', monospace;
     }
-    #map { height: 100vh; }
+    /* 100dvh keeps the map sized to the visible viewport on mobile browsers
+       with dynamic toolbars (iOS Safari); browsers without dvh support use
+       the 100vh fallback. */
+    #map { height: 100vh; height: 100dvh; }
     /* Layer control styling (bottom left) reduced by 30% */
     #layerControl {
       position: absolute;
