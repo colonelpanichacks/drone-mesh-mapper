@@ -4688,8 +4688,9 @@ HTML_PAGE = '''
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Mesh Mapper</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
   <!-- Add Socket.IO client script for real-time updates -->
   <script src="/static/socketio/socket.io.min.js"></script>
   <link rel="stylesheet" href="/static/leaflet/leaflet.css"/>
@@ -4786,7 +4787,10 @@ HTML_PAGE = '''
       background-color: #0a001f;
       font-family: 'Orbitron', monospace;
     }
-    #map { height: 100vh; }
+    /* 100dvh keeps the map sized to the visible viewport on mobile browsers
+       with dynamic toolbars (iOS Safari); browsers without dvh support use
+       the 100vh fallback. */
+    #map { height: 100vh; height: 100dvh; }
     /* Layer control styling (bottom left) reduced by 30% */
     #layerControl {
       position: absolute;
@@ -4894,32 +4898,169 @@ HTML_PAGE = '''
             max-height: 24vh !important;
           }
         }
-        /* Phones: panels go edge-to-edge with vertical separation. */
-        @media (max-width: 600px) {
-          #filterBox {
-            width: auto;
-            left: 6px;
-            right: 6px;
-            max-width: none;
-            max-height: 42vh;
+        /* Phones: map-first layout — every panel is a compact pill that expands
+           into a scrollable sheet, nothing overlaps, and the map stays usable.
+             TOP-LEFT   AIR TRAFFIC pill (expands into a capped sheet)
+             TOP-RIGHT  DRONES pill (expands into a full-width sheet)
+             BOTTOM     MAP LAYER main bar (full width)
+             ABOVE IT   SETTINGS pill (left) + GEOFENCING pill (right) */
+        @media (max-width: 700px) {
+          /* --- top row: two pills, side by side --- */
+          #adsbBox {
+            top: 6px !important;
+            left: 6px !important;
+            right: auto !important;
+            width: auto !important;
+            min-width: 0 !important;
+            max-width: 47vw !important;
+            box-sizing: border-box !important;
           }
+          /* Trim the header so the pill shares the top row with DRONES:
+             the live count span and OFF/ON badge hide (the switch still
+             shows state; the expanded sheet has the count). */
+          #adsbBoxStatus,
+          #adsbBoxStateLabel { display: none !important; }
+          #adsbBoxHeader { padding: 10px 8px !important; gap: 6px !important; }
+          #adsbBoxContent {
+            width: auto !important;
+            max-width: calc(100vw - 24px) !important;
+            max-height: 55vh !important;
+            overflow-y: auto !important;
+          }
+          #filterBox {
+            top: 6px !important;
+            right: 6px !important;
+            left: auto !important;
+            width: auto !important;
+            min-width: 0 !important;
+            max-width: 41vw !important;
+            max-height: none !important;
+            overflow: hidden !important;
+            padding: 6px !important;
+            box-sizing: border-box !important;
+          }
+          /* Collapsed drones pill: drop the wordmark + ON badge (the switch
+             already shows the layer state) so the pill stays narrow. */
+          #filterBox.collapsed #filterHeader h3,
+          #filterBox.collapsed #dronesLayerStateLabel { display: none; }
+          #filterBox.collapsed #filterHeader { gap: 8px !important; }
+          #filterBox.collapsed #dronesHeaderCount { max-width: 60px; }
+          /* Expanded drones panel: full-width top sheet with its own scroll.
+             The scroll also stops lower sections (e.g. DRONE EXPORTS) from
+             spilling out of the capped panel onto the map. */
+          #filterBox:not(.collapsed) {
+            left: 6px !important;
+            right: 6px !important;
+            max-width: none !important;
+            max-height: 62vh !important;
+            overflow-y: auto !important;
+          }
+
+          /* --- bottom row: main bar + two pills above it --- */
           #mapLayerFloatBox {
             left: 6px !important;
             right: 6px !important;
+            bottom: 6px !important;
             width: auto !important;
           }
           #mapLayerFloatContent {
             width: auto !important;
             max-width: none !important;
+            max-height: 55vh !important;
+          }
+          /* SETTINGS was centered via inline left:50% + translateX(-50%);
+             reset both or the pill lands mid-screen under the MAP LAYER bar. */
+          #settingsFloatBox {
+            left: 6px !important;
+            right: auto !important;
+            transform: none !important;
+            bottom: 48px !important;
+            width: auto !important;
+            min-width: 0 !important;
+            max-width: 46vw !important;
+          }
+          #settingsFloatContent {
+            width: auto !important;
+            max-width: calc(100vw - 24px) !important;
             max-height: 50vh !important;
           }
-          #adsbBox {
-            max-width: calc(100vw - 20px) !important;
-          }
-          #adsbBoxContent {
+          #geofenceFloatBox {
+            left: auto !important;
+            right: 6px !important;
+            bottom: 48px !important;
             width: auto !important;
-            max-width: calc(100vw - 22px) !important;
+            min-width: 0 !important;
+            max-width: 46vw !important;
           }
+          #geofenceFloatContent {
+            width: auto !important;
+            max-width: calc(100vw - 24px) !important;
+            max-height: 50vh !important;
+          }
+          /* Bigger tap targets on the float header bars */
+          #mapLayerFloatHeader,
+          #settingsFloatHeader,
+          #geofenceFloatHeader { padding: 10px 12px !important; }
+
+          /* Leaflet chrome lives above the bottom pills so it stays reachable */
+          .leaflet-bottom.leaflet-left,
+          .leaflet-bottom.leaflet-right { bottom: 92px !important; }
+
+          /* Slightly larger text + tap targets inside the sheets */
+          #filterBox, #adsbBox, #mapLayerFloatBox,
+          #settingsFloatBox, #geofenceFloatBox { font-size: 14px; }
+          #filterBox button, #adsbBox button, #settingsFloatBox button,
+          #geofenceFloatBox button, #mapLayerFloatBox button { padding: 8px 10px !important; }
+
+          /* ── Full-width sheets: an expanded panel owns the whole row so its
+             header (and its close toggle) can never be covered by another bar.
+             JS adds .open to the box whenever the content is shown. ── */
+          #adsbBox.open {
+            left: 6px !important;
+            right: 6px !important;
+            max-width: none !important;
+          }
+          #adsbBox.open #adsbBoxContent {
+            width: auto !important;
+            max-width: none !important;
+            max-height: 58vh !important;
+          }
+          #settingsFloatBox.open, #geofenceFloatBox.open {
+            left: 6px !important;
+            right: 6px !important;
+            max-width: none !important;
+            bottom: 48px !important;   /* sheet sits above the MAP LAYER bar */
+          }
+          #settingsFloatBox.open #settingsFloatContent,
+          #geofenceFloatBox.open #geofenceFloatContent {
+            width: auto !important;
+            max-width: none !important;
+          }
+          /* The expanded drones sheet keeps its title readable (!important
+             beats the base rule further down this stylesheet) */
+          #filterBox:not(.collapsed) #filterHeader h3 {
+            display: block !important;
+            width: auto;
+            flex: 1;
+            text-align: left;
+          }
+          /* An open sheet must always paint above the collapsed pills of its
+             siblings — otherwise a floating pill covers the sheet's header
+             (title + close toggle) and blocks every tap on it. */
+          #adsbBox.open, #filterBox:not(.collapsed),
+          #settingsFloatBox.open, #geofenceFloatBox.open, #mapLayerFloatBox.open { z-index: 1002 !important; }
+          /* Roomier close toggles — the whole header is tappable, the glyph
+             just needs to be an obvious target */
+          #adsbBoxToggle, #filterToggle, #geofenceFloatToggle,
+          #settingsFloatToggle, #mapLayerFloatToggle { font-size: 18px !important; padding: 2px 6px; }
+
+          /* Respect notch / home-indicator / app-bar insets (WKWebView inside
+             Sky Spy / MeshDetect embeds this page under their own chrome) */
+          #adsbBox, #filterBox { top: calc(6px + env(safe-area-inset-top, 0px)) !important; }
+          #mapLayerFloatBox { bottom: calc(6px + env(safe-area-inset-bottom, 0px)) !important; }
+          #settingsFloatBox, #geofenceFloatBox { bottom: calc(48px + env(safe-area-inset-bottom, 0px)) !important; }
+          .leaflet-bottom.leaflet-left,
+          .leaflet-bottom.leaflet-right { bottom: calc(92px + env(safe-area-inset-bottom, 0px)) !important; }
         }
         /* Inputs/selects/sliders inside the sidebar respect their inline width.
            The legacy 'width: auto !important' rule was causing the staleout slider
@@ -5691,12 +5832,14 @@ HTML_PAGE = '''
        to the left edge of #offlineMappingPanel (which lives inside the Map
        Layer panel). It floats outside the Map Layer panel's right anchor so
        it doesn't push the Map Layer taller — purely horizontal expansion. */
-    /* While the flyout is open, let it escape the box. !important + :has()
-       beat the inline overflow:hidden / overflow-y:auto on these elements;
-       scoped to flyout-open so normal scroll + rounded-corner clipping stay
-       intact when it's closed. */
-    #mapLayerFloatBox:has(#offlineMappingPanel.flyout-open) { overflow: visible !important; }
-    #mapLayerFloatContent:has(#offlineMappingPanel.flyout-open) { overflow: visible !important; }
+    /* While the flyout is open, let it escape the box. The toggle JS adds
+       .flyout-open to #mapLayerFloatBox alongside the panel, so this works
+       even in browsers without :has() (older Chromium on RPI kiosks, pre-121
+       Firefox, pre-15.4 Safari). !important beats the inline overflow:hidden /
+       overflow-y:auto on these elements; scoped to flyout-open so normal
+       scroll + rounded-corner clipping stay intact when it's closed. */
+    #mapLayerFloatBox.flyout-open { overflow: visible !important; }
+    #mapLayerFloatBox.flyout-open #mapLayerFloatContent { overflow: visible !important; }
     #offlineMappingPanel.flyout-open #cachePanel {
       position: absolute;
       right: calc(100% + 8px);
@@ -6764,6 +6907,39 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   // Re-sync the single-line layout now that .collapsed reflects the persisted state
   if (typeof _syncDronesCollapsedLayout === 'function') _syncDronesCollapsedLayout(wasCollapsed);
+  // Phones: start with the big panels collapsed so the map is usable, regardless
+  // of the desktop-persisted state. Deliberately NOT persisted — this only
+  // applies while the viewport is narrow.
+  if (window.matchMedia('(max-width: 700px)').matches) {
+    if (filterBox && !filterBox.classList.contains('collapsed')) {
+      filterBox.classList.add('collapsed');
+      if (filterToggle) filterToggle.textContent = '[+]';
+    }
+    const adsbContent = document.getElementById('adsbBoxContent');
+    if (adsbContent && getComputedStyle(adsbContent).display !== 'none') {
+      adsbContent.style.display = 'none';
+      const adsbT = document.getElementById('adsbBoxToggle');
+      if (adsbT) adsbT.textContent = '[+]';
+      const adsbBox = document.getElementById('adsbBox');
+      if (adsbBox) adsbBox.classList.remove('open');
+    }
+    // Same for the bottom float sheets — a desktop session may have left one
+    // open in localStorage; on a phone that would cover the map on load.
+    const floats = [
+      ['settingsFloatContent', 'settingsFloatToggle'],
+      ['geofenceFloatContent', 'geofenceFloatToggle'],
+      ['mapLayerFloatContent', 'mapLayerFloatToggle'],
+    ];
+    for (const [cid, tid] of floats) {
+      const c = document.getElementById(cid);
+      if (c && c.style.display !== 'none') {
+        c.style.display = 'none';
+        const t = document.getElementById(tid);
+        if (t) t.textContent = '[+]';
+        if (c.parentElement) c.parentElement.classList.remove('open');
+      }
+    }
+  }
   // restore follow-lock on reload
   const storedLock = localStorage.getItem('followLock');
   if (storedLock) {
@@ -6825,23 +7001,39 @@ document.addEventListener('DOMContentLoaded', () => {
       localStorage.setItem('staleoutMinutes', minutes.toString());
     };
   }
-  // Filter box toggle persistence
+  // Filter box toggle persistence — this is the ONE authoritative toggle
+  // handler for the drones panel (kept in sync with the fallback below).
   if (filterToggle && filterBox) {
+    window._filterToggleWired = true;
     filterToggle.addEventListener('click', function() {
       filterBox.classList.toggle('collapsed');
-      filterToggle.textContent = filterBox.classList.contains('collapsed') ? '[+]' : '[-]';
+      const collapsed = filterBox.classList.contains('collapsed');
+      filterToggle.textContent = collapsed ? '[+]' : '[-]';
       // Persist filter collapsed state
-      localStorage.setItem('filterCollapsed', filterBox.classList.contains('collapsed'));
+      localStorage.setItem('filterCollapsed', collapsed);
+      // One sheet at a time on phones — collapse siblings so nothing can
+      // cover (and block) another panel's close control.
+      if (!collapsed && window.matchMedia('(max-width: 700px)').matches) {
+        _collapseMobileSiblings(filterBox);
+      }
     });
   }
 });
-// Fallback collapse handler to ensure filter toggle works
+// Fallback collapse handler — only acts if the DOMContentLoaded handler above
+// didn't run (e.g. this script parsed after DOMContentLoaded fired). When both
+// are wired the primary handler owns the toggle; without this guard two
+// listeners would toggle the class twice per click and the panel would never
+// open. The flag is checked at CLICK time, not registration time.
 document.getElementById("filterToggle").addEventListener("click", function() {
+  if (window._filterToggleWired) return;
   const box = document.getElementById("filterBox");
   const isCollapsed = box.classList.toggle("collapsed");
   this.textContent = isCollapsed ? "[+]" : "[-]";
   localStorage.setItem('filterCollapsed', isCollapsed);
   _syncDronesCollapsedLayout(isCollapsed);
+  if (!isCollapsed && window.matchMedia('(max-width: 700px)').matches) {
+    _collapseMobileSiblings(box);
+  }
 });
 
 // USB lives in the Settings float now; collapse layout is just title + [+]
@@ -7973,18 +8165,22 @@ async function refreshOfflineLayers() {
 }
 
 // ---------- Cache This Area panel ----------
-// Toggles the cachePanel and adds .flyout-open to the parent so the CSS rule
-// horizontal-flies it out to the LEFT of the Map Layer panel (vertical fall-
-// back on mobile). Closing reverts to the static layout.
+// Toggles the cachePanel and adds .flyout-open to the panel AND the Map Layer
+// float box so the CSS rule horizontal-flies it out to the LEFT of the panel
+// (vertical fallback on mobile). The class on the box is what lets the flyout
+// escape the box's overflow clipping without relying on :has() support.
+// Closing reverts to the static layout.
 document.getElementById('cacheToggle').addEventListener('click', (ev) => {
   ev.stopPropagation();
   const p = document.getElementById('cachePanel');
   const a = document.getElementById('cacheToggleArrow');
   const wrap = document.getElementById('offlineMappingPanel');
+  const box = document.getElementById('mapLayerFloatBox');
   const open = p.style.display === 'none';
   p.style.display = open ? 'block' : 'none';
   a.textContent = open ? '−' : '+';
   if (wrap) wrap.classList.toggle('flyout-open', open);
+  if (box) box.classList.toggle('flyout-open', open);
   if (open) { refreshOfflineLayers(); updateCacheEstimate(); }
 });
 // Click outside the flyout to close it (so the user isn't stuck with it open).
@@ -7996,6 +8192,7 @@ document.addEventListener('click', (e) => {
   const mapBox = document.getElementById('mapLayerFloatBox');
   if (mapBox && mapBox.contains(e.target)) return;
   wrap.classList.remove('flyout-open');
+  if (mapBox) mapBox.classList.remove('flyout-open');
   const p = document.getElementById('cachePanel');
   const a = document.getElementById('cacheToggleArrow');
   if (p) p.style.display = 'none';
@@ -10684,9 +10881,15 @@ document.getElementById('adsbBoxHeader').addEventListener('click', (e) => {
   if (e.target.closest('label.switch') || e.target.id === 'adsbBoxEnableToggle') return;
   const content = document.getElementById('adsbBoxContent');
   const toggle = document.getElementById('adsbBoxToggle');
+  const box = document.getElementById('adsbBox');
   const open = content.style.display !== 'none';
+  if (!open && window.matchMedia('(max-width: 700px)').matches) {
+    // One sheet at a time on phones — see _collapseMobileSiblings.
+    _collapseMobileSiblings(box);
+  }
   content.style.display = open ? 'none' : 'block';
   toggle.textContent = open ? '[+]' : '[-]';
+  box.classList.toggle('open', !open);
   localStorage.setItem('adsbBoxCollapsed', open ? '1' : '0');
 });
 if (localStorage.getItem('adsbBoxCollapsed') === '1') {
@@ -11088,21 +11291,73 @@ renderAdsbBoxFilterChips();
   }
 })();
 
-// Wire the float-box toggle behavior + restore collapse state from localStorage
+// Wire the float-box toggle behavior + restore collapse state from localStorage.
+// The box also gets an .open class while its content is shown — the phone CSS
+// turns an .open box into a full-width sheet so no bar can ever cover another
+// panel's header or close toggle.
 function _wireFloat(headerId, contentId, toggleId, storageKey, openSym, closedSym) {
   const h = document.getElementById(headerId);
   const c = document.getElementById(contentId);
   const t = document.getElementById(toggleId);
   if (!h || !c || !t) return;
+  const box = h.parentElement;
+  const setOpen = (open) => {
+    c.style.display = open ? 'block' : 'none';
+    t.textContent = open ? openSym : closedSym;
+    box.classList.toggle('open', open);
+    localStorage.setItem(storageKey, open ? '1' : '0');
+  };
   const wasOpen = localStorage.getItem(storageKey) === '1';
-  c.style.display = wasOpen ? 'block' : 'none';
-  t.textContent = wasOpen ? openSym : closedSym;
+  setOpen(wasOpen);
   h.addEventListener('click', () => {
     const open = c.style.display !== 'none';
-    c.style.display = open ? 'none' : 'block';
-    t.textContent = open ? closedSym : openSym;
-    localStorage.setItem(storageKey, open ? '0' : '1');
+    if (!open && window.matchMedia('(max-width: 700px)').matches) {
+      // One sheet at a time on phones: collapse every sibling panel first so
+      // nothing overlaps (and blocks) another panel's close control.
+      _collapseMobileSiblings(box);
+    }
+    setOpen(!open);
   });
+}
+
+// Collapse every floating panel except `exceptBox`. Shared by all panel
+// toggles so any panel can be closed no matter which other one just opened.
+function _collapseMobileSiblings(exceptBox) {
+  const floats = [
+    ['geofenceFloatContent', 'geofenceFloatToggle', 'geofenceFloatOpen'],
+    ['settingsFloatContent', 'settingsFloatToggle', 'settingsFloatOpen'],
+    ['mapLayerFloatContent', 'mapLayerFloatToggle', 'mapLayerFloatOpen'],
+  ];
+  for (const [cid, tid, key] of floats) {
+    const c = document.getElementById(cid);
+    const t = document.getElementById(tid);
+    const box = c ? c.parentElement : null;
+    if (!c || !t || box === exceptBox) continue;
+    if (c.style.display !== 'none') {
+      c.style.display = 'none';
+      t.textContent = '[+]';
+      box.classList.remove('open');
+      localStorage.setItem(key, '0');
+    }
+  }
+  // AIR TRAFFIC (top-left)
+  const adsbBox = document.getElementById('adsbBox');
+  const adsbContent = document.getElementById('adsbBoxContent');
+  if (adsbBox && adsbContent && adsbBox !== exceptBox && adsbContent.style.display !== 'none') {
+    adsbContent.style.display = 'none';
+    const t = document.getElementById('adsbBoxToggle');
+    if (t) t.textContent = '[+]';
+    adsbBox.classList.remove('open');
+    localStorage.setItem('adsbBoxCollapsed', '1');
+  }
+  // DRONES (top-right)
+  const filterBox = document.getElementById('filterBox');
+  if (filterBox && filterBox !== exceptBox && !filterBox.classList.contains('collapsed')) {
+    filterBox.classList.add('collapsed');
+    const t = document.getElementById('filterToggle');
+    if (t) t.textContent = '[+]';
+    localStorage.setItem('filterCollapsed', 'true');
+  }
 }
 _wireFloat('geofenceFloatHeader', 'geofenceFloatContent', 'geofenceFloatToggle', 'geofenceFloatOpen', '[-]', '[+]');
 _wireFloat('settingsFloatHeader', 'settingsFloatContent', 'settingsFloatToggle', 'settingsFloatOpen', '[-]', '[+]');
@@ -12273,13 +12528,12 @@ function updateLockFollow() {
 }
 setInterval(updateLockFollow, 200);
 
+// Sync the Node Mode toggle with its stored setting whenever the drones panel opens
 document.getElementById("filterToggle").addEventListener("click", function() {
   const box = document.getElementById("filterBox");
-  const isCollapsed = box.classList.toggle("collapsed");
-  this.textContent = isCollapsed ? "[+]" : "[-]";
-  // Sync Node Mode toggle with stored setting when filter opens
+  if (box.classList.contains("collapsed")) return;
   const mainSwitch = document.getElementById('nodeModeMainSwitch');
-  mainSwitch.checked = (localStorage.getItem('nodeMode') === 'true');
+  if (mainSwitch) mainSwitch.checked = (localStorage.getItem('nodeMode') === 'true');
 });
 
 async function restorePaths() {
