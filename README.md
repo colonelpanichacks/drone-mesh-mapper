@@ -556,7 +556,7 @@ MIT - see [LICENSE](LICENSE).
 - **OpenStreetMap**, **Esri**, **CARTO**, **OpenTopoMap** - tile providers
 - **MapLibre GL** + **Leaflet** + **Nominatim** - open mapping stack
 - **ADS-B receivers** - built on the shoulders of [dump1090](https://github.com/MalcolmRobb/dump1090) (Malcolm Robb / mutability), [readsb](https://github.com/wiedehopf/readsb) + [tar1090](https://github.com/wiedehopf/tar1090) (wiedehopf), and [pyModeS](https://github.com/junzis/pyModeS) (junzis) for Mode-S/CPR decode. The Beast TCP path uses pyModeS directly; the JSON path is compatible with all of the above. Network sources: [adsb.lol](https://adsb.lol), [adsb.fi](https://adsb.fi), [airplanes.live](https://airplanes.live), [OpenSky](https://opensky-network.org), [ADSBexchange](https://adsbexchange.com).
-- **PCBway** - top-tier PCB fabrication, fast turnaround, stellar service. Your one-stop for prototyping innovative mesh detection hardware or scaling for production. https://www.pcbway.com/
+
 
 <div align="center"><img src="boards.png" alt="boards" style="width:50%; height:25%;"></div>
 
