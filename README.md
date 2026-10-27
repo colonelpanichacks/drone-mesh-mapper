@@ -546,7 +546,7 @@ Get professional PCBs and complete kits at **[colonelpanic.tech](https://colonel
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE), for this project's own code. It started as a fork of [JimZGChow/wifi-rid-to-mesh](https://github.com/JimZGChow/wifi-rid-to-mesh), which publishes no license; code from it stays under its author's terms. The bundled OpenDroneID files (`opendroneid.c`, `opendroneid.h`, `odid_wifi.h`, `wifi.c`) are Copyright Intel Corporation and stay under the Apache License 2.0, as their headers state.
 
 ## Acknowledgments
 
