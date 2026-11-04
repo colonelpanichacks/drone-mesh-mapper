@@ -77,8 +77,8 @@
 // =============================================================================
 // Pin Definitions
 // =============================================================================
-static const int SERIAL1_TX_PIN = 5;   // GPIO5 -> Heltec RX
-static const int SERIAL1_RX_PIN = 6;   // GPIO6 <- Heltec TX
+static const int SERIAL1_TX_PIN = D4;  // pad D4 (GPIO5) -> Heltec RX
+static const int SERIAL1_RX_PIN = D5;  // pad D5 (GPIO6) <- Heltec TX
 
 // LED on XIAO ESP32S3 (active LOW / inverted logic)
 #define LED_PIN 21

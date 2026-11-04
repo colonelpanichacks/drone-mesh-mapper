@@ -374,7 +374,7 @@
     <div class="step">
       <div class="n">3</div>
       <h3>Wire it to a Heltec V3</h3>
-      <p>All three builds send Remote ID JSON out UART on <b>GPIO5 (TX)</b> / <b>GPIO6 (RX)</b>. Wire that to a Heltec V3 running Meshtastic in serial TEXTMSG mode at 115200. See the <a href="https://github.com/colonelpanichacks/drone-mesh-mapper#hardware-setup">wiring diagram</a>.</p>
+      <p>All three builds send Remote ID JSON out UART on pad <b>D4 (GPIO5) TX</b> / pad <b>D5 (GPIO6) RX</b>, the same pins as the Mesh Detect PCB. Wire that to a Heltec V3 running Meshtastic in serial TEXTMSG mode at 115200. See the <a href="https://github.com/colonelpanichacks/drone-mesh-mapper#hardware-setup">wiring diagram</a>.</p>
     </div>
 
   </div>
@@ -394,7 +394,7 @@
       <dl class="specs">
         <dt>Target</dt><dd class="val">XIAO ESP32-S3</dd>
         <dt>Mode</dt><dd class="val">WiFi + BLE, concurrent</dd>
-        <dt>UART Out</dt><dd class="val">GPIO5 TX / GPIO6 RX @ 115200</dd>
+        <dt>UART Out</dt><dd class="val">D4 (GPIO5) TX / D5 (GPIO6) RX @ 115200</dd>
         <dt>JSON</dt><dd class="val">to USB Serial + Heltec V3</dd>
       </dl>
       <esp-web-install-button id="flashMain" manifest="./manifest-main.json">
@@ -421,8 +421,8 @@
     <pre class="arch"><span class="r">┌─────────────────────────────────────────────────────────────┐
 │                   REMOTE NODE   (field)                     │
 │   XIAO ESP32S3 ──UART──> Heltec V3 (Meshtastic) ──LoRa──>   │
-│   WiFi + BLE drone       GPIO5 TX -> Heltec RX              │
-│   detection              GPIO6 RX <- Heltec TX              │
+│   WiFi + BLE drone       D4 (GPIO5) TX -> Heltec RX         │
+│   detection              D5 (GPIO6) RX <- Heltec TX         │
 │   (Open Drone ID)                                           │
 └─────────────────────────────────────────────────────────────┘</span>
                                 │
@@ -432,8 +432,8 @@
 <span class="h">┌─────────────────────────────────────────────────────────────┐
 │                    HOME NODE   (base)                       │
 │   Heltec V3 (Meshtastic) ──UART──> XIAO ESP32S3 ──USB──>    │
-│   receives mesh data      GPIO6 RX <- Heltec TX  computer   │
-│                           GPIO5 TX -> Heltec RX  running    │
+│   receives mesh data      D5/GPIO6 RX <- Heltec TX  computer│
+│                           D4/GPIO5 TX -> Heltec RX  running │
 │   NO detection.           dedup engine           mesh-mapper│
 │   Just a smart bridge.                                      │
 └─────────────────────────────────────────────────────────────┘</span></pre>
@@ -467,7 +467,7 @@
       <dl class="specs">
         <dt>Target</dt><dd class="val">XIAO ESP32-S3</dd>
         <dt>Role</dt><dd class="val">Detection + mesh sender</dd>
-        <dt>UART</dt><dd class="val">GPIO5 TX / GPIO6 RX @ 115200 → Heltec V3</dd>
+        <dt>UART</dt><dd class="val">D4 (GPIO5) TX / D5 (GPIO6) RX @ 115200 → Heltec V3</dd>
         <dt>Deploy</dt><dd class="val">One per field board (N remotes OK)</dd>
       </dl>
       <esp-web-install-button id="flashRemote" class="magenta" manifest="./manifest-node-remote.json">

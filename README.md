@@ -82,7 +82,7 @@ Pick the variant that matches your board. All build with PlatformIO:
 |---|---|---|
 | `node-mode-dualcore/` | ESP32-S3 dual-core | Remote node + home dedup node (`pio run -e remote` / `-e home`) |
 | `remoteid-mesh-dualcore/` | ESP32-S3 | BLE + WiFi concurrent detection, mesh relay |
-| `remoteid-mesh/` | ESP32-S3 / single-core | Original variant, GPIO6/7 pinout |
+| `remoteid-mesh/` | ESP32-S3 / single-core | Original variant (C3 + S3), D4 TX / D5 RX |
 | `remoteid-c5-5g/` | ESP32-C5 | UNII-3 5GHz WiFi RID (channels 149/153/157/161/165) |
 
 ```bash
@@ -440,15 +440,15 @@ Pushed to connected clients in real time:
 
 ### Wiring for Mesh Integration
 ```
-ESP32 Pin | Heltec V3 Pin   | Notes
-----------|-----------------|------
-TX1 (D4)  | RX 19           | Detection node -> mesh
-RX1 (D5)  | TX 20           | Mesh -> home node
-3.3V      | VCC             |
-GND       | GND             |
+XIAO Pad      | Heltec V3 Pin | Notes
+--------------|---------------|------
+D4 (GPIO5) TX | RX 19         | Detection node -> mesh
+D5 (GPIO6) RX | TX 20         | Mesh -> home node
+3.3V          | VCC           |
+GND           | GND           |
 ```
 
-> **`remoteid-mesh` variant uses GPIO6/7 instead** — check the firmware's `platformio.ini` before wiring.
+> Every firmware here uses pads **D4 TX / D5 RX**, matching the Mesh Detect PCB. The GPIO behind those pads depends on the chip: S3 = GPIO5/6, C3 = GPIO6/7, C5 = GPIO23/24.
 
 ### Heltec V3 Meshtastic Config (one-time)
 ```

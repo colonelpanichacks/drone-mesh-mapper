@@ -12,8 +12,8 @@ Two firmwares for the Seeed XIAO ESP32S3 paired with a Heltec V3 running Meshtas
   ┌─────────────────────────────────────────────────────────────────┐
   │                        REMOTE NODE (field)                      │
   │  XIAO ESP32S3 ──UART──> Heltec V3 (Meshtastic) ──LoRa──>      │
-  │  WiFi + BLE drone       GPIO5 TX -> Heltec RX                  │
-  │  detection               GPIO6 RX <- Heltec TX                 │
+  │  WiFi + BLE drone       D4 (GPIO5) TX -> Heltec RX             │
+  │  detection               D5 (GPIO6) RX <- Heltec TX            │
   │  (Open Drone ID)                                                │
   └─────────────────────────────────────────────────────────────────┘
                                   │
@@ -23,8 +23,8 @@ Two firmwares for the Seeed XIAO ESP32S3 paired with a Heltec V3 running Meshtas
   ┌─────────────────────────────────────────────────────────────────┐
   │                        HOME NODE (base)                         │
   │  Heltec V3 (Meshtastic) ──UART──> XIAO ESP32S3 ──USB──>       │
-  │  receives mesh data       GPIO6 RX <- Heltec TX    computer    │
-  │                           GPIO5 TX -> Heltec RX    running     │
+  │  receives mesh data       D5/GPIO6 RX <- Heltec TX  computer    │
+  │                           D4/GPIO5 TX -> Heltec RX  running     │
   │  NO detection.            dedup engine             mesh-mapper  │
   │  Just a smart bridge.                                           │
   └─────────────────────────────────────────────────────────────────┘
@@ -68,8 +68,8 @@ Remote nodes send detections as fast as they happen with no artificial rate limi
 ```
 XIAO ESP32S3          Heltec V3
 ─────────────         ──────────
-GPIO5 (TX)  ───────>  RX
-GPIO6 (RX)  <───────  TX
+D4 (GPIO5) TX  ───────>  RX
+D5 (GPIO6) RX  <───────  TX
 GND         ────────  GND
 ```
 

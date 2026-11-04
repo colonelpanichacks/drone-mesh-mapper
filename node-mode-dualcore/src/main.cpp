@@ -18,8 +18,8 @@
 #include <esp_timer.h>
 
 // UART pin definitions for Serial1 on esp32s3
-const int SERIAL1_RX_PIN = 6;  // GPIO6
-const int SERIAL1_TX_PIN = 5;  // GPIO5
+const int SERIAL1_RX_PIN = D5;  // Mesh Detect PCB pad D5 (GPIO6 on S3)
+const int SERIAL1_TX_PIN = D4;  // Mesh Detect PCB pad D4 (GPIO5 on S3)
 
 // Structure to hold UAV detection data
 struct uav_data {

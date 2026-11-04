@@ -19,8 +19,8 @@
 #include "odid_wifi.h"
 
 // Custom UART pin definitions for Serial1
-const int SERIAL1_RX_PIN = 7;  // GPIO7
-const int SERIAL1_TX_PIN = 6;  // GPIO6
+const int SERIAL1_RX_PIN = D5;  // Mesh Detect PCB pad D5 <- Heltec TX (GPIO6 on S3, GPIO7 on C3)
+const int SERIAL1_TX_PIN = D4;  // Mesh Detect PCB pad D4 -> Heltec RX (GPIO5 on S3, GPIO6 on C3)
 
 ODID_UAS_Data UAS_data;
 

@@ -6,7 +6,7 @@
  *
  * Output:
  *   USB Serial  — JSON lines for mesh-mapper.py
- *   Serial1 UART (TX=GPIO5, RX=GPIO6) — compact messages for Heltec/Meshtastic relay
+ *   Serial1 UART (TX=pad D4, RX=pad D5) — compact messages for Heltec/Meshtastic relay
  *
  * For ESP32-C5: Dual-band scanning with fast channel hopping across 2.4+5GHz
  * For ESP32-S3: Single-band 2.4GHz scanning (original behavior)
@@ -33,8 +33,8 @@
 // UART Pins — same wiring as remoteid-mesh-dualcore (Heltec LoRa V3)
 // ============================================================================
 
-const int SERIAL1_TX_PIN = 5;   // GPIO5 → Heltec RX
-const int SERIAL1_RX_PIN = 6;   // GPIO6 → Heltec TX
+const int SERIAL1_TX_PIN = D4;  // pad D4 -> Heltec RX (GPIO23 on C5, GPIO5 on S3)
+const int SERIAL1_RX_PIN = D5;  // pad D5 <- Heltec TX (GPIO24 on C5, GPIO6 on S3)
 
 // ============================================================================
 // Board-specific configuration

@@ -17,8 +17,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-const int SERIAL1_RX_PIN = 6;
-const int SERIAL1_TX_PIN = 5;
+const int SERIAL1_RX_PIN = D5;  // Mesh Detect PCB pad D5 <- Heltec TX (GPIO6 on S3)
+const int SERIAL1_TX_PIN = D4;  // Mesh Detect PCB pad D4 -> Heltec RX (GPIO5 on S3)
 
 struct id_data {
   uint8_t  mac[6];
