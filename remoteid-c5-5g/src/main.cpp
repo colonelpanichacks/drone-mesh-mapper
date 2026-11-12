@@ -58,7 +58,7 @@ const int SERIAL1_RX_PIN = D5;  // pad D5 <- Heltec TX (GPIO24 on C5, GPIO6 on S
   #define SINGLE_CORE 0
 #endif
 
-#define FW_VERSION "1.1"
+#define FW_VERSION "1.2"
 
 // ============================================================================
 // Dual-Band Channel Configuration
@@ -644,9 +644,17 @@ void initializeSerial() {
 }
 
 void setup() {
+#if !BOARD_IS_C5
+  // S3 only: on the C5 a clock change here, before USB serial starts, left
+  // the app silent and deaf to USB resets.
   setCpuFrequencyMhz(160);
+#endif
   initializeSerial();
+  // Give the USB host a moment to attach so the boot log is not lost.
+  for (int i = 0; i < 15 && !Serial; i++) delay(100);
+  txFlush();
 
+  txFlush();
   nvs_flash_init();
 
   // Everything the radio callbacks touch must exist BEFORE any radio is
@@ -656,6 +664,8 @@ void setup() {
   printQueue = xQueueCreate(MAX_UAVS * 2, sizeof(id_data));
 
   // WiFi promiscuous mode
+  txPrintln("[boot] wifi start");
+  txFlush();
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
@@ -684,12 +694,15 @@ void setup() {
   txPrintf("WiFi promiscuous mode (fixed ch%d)\n", CHANNEL_2_4GHZ);
 #endif
 
+  txPrintln("[boot] ble start");
+  txFlush();
   // BLE init (NimBLE 2.x)
   NimBLEDevice::init("DroneID");
   pBLEScan = NimBLEDevice::getScan();
   pBLEScan->setScanCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
   txPrintln("BLE scanning initialized (NimBLE)");
+  txFlush();
 
   // FreeRTOS tasks - C5 is single-core, S3 is dual-core
 #if SINGLE_CORE
@@ -704,6 +717,7 @@ void setup() {
 #endif
 
   txPrintln("[+] Scanning for drones...");
+  txFlush();
 }
 
 // ============================================================================
@@ -731,5 +745,8 @@ void loop() {
              (unsigned long)queueDrops, (unsigned long)meshDropped, (unsigned long)txDroppedBytes);
 #endif
   }
+  // Also drain USB from here, so console output never depends on a single
+  // task staying alive (txFlush is mutex-guarded and non-blocking).
+  txFlush();
   delay(100);
 }
