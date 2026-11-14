@@ -1,0 +1,53 @@
+/* Inter + JetBrains Mono: the OUI SPY Recon app's type, vendored locally so the
+   UI works fully offline. Latin subsets in woff2, taken from the app's own font
+   files. Both are under the SIL Open Font License 1.1 (Inter-OFL.txt and
+   JetBrainsMono-OFL.txt next to this file). */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(Inter-Regular.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(Inter-Medium.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url(Inter-SemiBold.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(Inter-Bold.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(JetBrainsMono-Regular.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(JetBrainsMono-Medium.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600 700;
+  font-display: swap;
+  src: url(JetBrainsMono-SemiBold.woff2) format('woff2');
+}

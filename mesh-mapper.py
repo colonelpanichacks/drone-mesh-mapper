@@ -710,7 +710,7 @@ def _cache_worker(job_id):
 # Define emit_serial_status early to avoid NameError in threads
 def emit_serial_status():
     try:
-        socketio.emit('serial_status', serial_connected_status, )
+        socketio.emit('serial_status', combined_connection_status(), )
     except Exception as e:
         logger.debug(f"Error emitting serial status: {e}")
         pass  # Ignore if no clients connected or serialization error
@@ -753,7 +753,7 @@ def emit_faa_cache():
     try:
         # Convert FAA_CACHE to JSON-serializable format
         serializable_cache = {}
-        for key, value in FAA_CACHE.items():
+        for key, value in list(FAA_CACHE.items()):
             # Convert tuple keys to strings
             str_key = str(key) if isinstance(key, tuple) else key
             serializable_cache[str_key] = value
@@ -811,6 +811,10 @@ def load_webhook_url():
 # Global Variables & Files
 # ----------------------
 tracked_pairs = {}
+# basic_id -> tracked_pairs key (mac), to merge the same drone arriving via
+# multiple receive paths (direct node detection vs DroneScout Bridge relay,
+# which reports under a different/synthesized MAC) into one map entry.
+basic_id_index = {}
 detection_history = deque(maxlen=MAX_DETECTION_HISTORY)  # Limit size to prevent memory growth
 
 # Changed: Instead of one selected port, we allow up to three.
@@ -819,6 +823,18 @@ BAUD_RATE = 115200
 staleThreshold = 60  # Global stale threshold in seconds (changed from 300 seconds -> 1 minute)
 # For each port, we track its connection status.
 serial_connected_status = {}  # e.g. {"port1": True, "port2": False, ...}
+# Non-serial receivers reporting over HTTP (e.g. DroneScout Bridge BLE relay
+# via tools/ds110_bridge.py): name -> {"last_seen": ts, "stats": dict}
+receiver_status = {}
+RECEIVER_TIMEOUT_S = 45  # show Disconnected if no heartbeat within this
+
+def combined_connection_status():
+    """Serial port statuses plus HTTP receivers, computed fresh each call."""
+    statuses = dict(serial_connected_status)
+    now = time.time()
+    for name, info in receiver_status.items():
+        statuses[name] = (now - info.get("last_seen", 0)) < RECEIVER_TIMEOUT_S
+    return statuses
 # Mapping to merge fragmented detections: port -> last seen mac
 last_mac_by_port = {}
 
@@ -1426,7 +1442,15 @@ if os.path.exists(FAA_CACHE_FILENAME):
 
 def write_to_faa_cache(mac, remote_id, faa_data):
     key = (mac, remote_id)
+    old = FAA_CACHE.get(key)
     FAA_CACHE[key] = faa_data
+    serial = faa_serial(remote_id)
+    if serial and faa_items(faa_data):
+        FAA_BY_SERIAL[serial] = faa_data    # this serial is known for good
+    # Every detection of a drone saves its answer again: the same answer is
+    # nothing new for the file, so it gets no new row (each frame added one).
+    if old is not None and (old is faa_data or old == faa_data):
+        return
     try:
         file_exists = os.path.isfile(FAA_CACHE_FILENAME)
         with open(FAA_CACHE_FILENAME, "a", newline='') as csvfile:
@@ -1441,6 +1465,325 @@ def write_to_faa_cache(mac, remote_id, faa_data):
             })
     except Exception as e:
         print("Error writing to FAA cache:", e)
+
+
+# ----------------------
+# FAA registry: automatic lookups (SETTINGS > FAA REGISTRY)
+# ----------------------
+# Every drone serial heard is looked up in the FAA's public UAS DOC registry
+# once, in the background: the same lookup as a popup's QUERY FAA button. A
+# record found is saved in faa_cache.csv and indexed by serial, so that serial
+# is never looked up again, under any MAC and across restarts. "Not in the
+# registry" is asked again a day later (it may have been registered since), a
+# lookup that failed tries again in an hour, and while the FAA cannot be
+# reached at all, lookups pause. The switch is on unless it is turned off; it
+# lives in faa_auto.json. update_detection() only calls offer(), which reads
+# memory and puts on a bounded queue: the serial path never waits on the
+# network.
+import queue as _faa_queue
+import re as _faa_re
+
+FAA_AUTO_FILE = os.path.join(BASE_DIR, 'faa_auto.json')
+FAA_RETRY_S = 3600            # a lookup that failed tries again in an hour
+FAA_MISSING_RETRY_S = 86400   # "not in the registry" is asked again a day later
+FAA_DOWN_PAUSE_S = 300        # the FAA out of reach: no lookups for 5 minutes
+FAA_PACE_S = 1.0              # between two lookups, to go easy on the FAA
+FAA_MISSING_KEPT = 2000       # "not in the registry" times kept on disk
+_FAA_HOME_URL = 'https://uasdoc.faa.gov/listdocs'
+_FAA_API_URL = 'https://uasdoc.faa.gov/api/v1/serialNumbers'
+_FAA_SERIAL_RE = _faa_re.compile(r'^[0-9A-Z]{8,20}$')
+
+
+def faa_serial(value):
+    """A Remote ID in the form the FAA registry indexes (8-20 of A-Z 0-9,
+    upper case), or '' when it is not one (a session ID, a UUID, junk)."""
+    s = str(value or '').strip().upper()
+    return s if _FAA_SERIAL_RE.match(s) else ''
+
+
+def faa_items(faa):
+    """The records in an FAA answer ({"data": {"items": [...]}}), or []."""
+    if not isinstance(faa, dict):
+        return []
+    data = faa.get('data')
+    items = data.get('items') if isinstance(data, dict) else None
+    return items if isinstance(items, list) else []
+
+
+# Records found, by serial: what makes a serial known for good. FAA_CACHE is
+# trimmed in memory; this only grows with distinct serials that have a record.
+FAA_BY_SERIAL = {}
+for (_faa_mac, _faa_rid), _faa_rec in list(FAA_CACHE.items()):
+    _faa_s = faa_serial(_faa_rid)
+    if _faa_s and faa_items(_faa_rec):
+        FAA_BY_SERIAL[_faa_s] = _faa_rec
+
+
+class FaaAuto:
+    """The automatic lookup: one worker thread and a bounded queue, at most
+    one lookup per serial out at a time. offer() is all the serial path
+    calls."""
+
+    def __init__(self, path):
+        self._path = path
+        self._lock = threading.Lock()        # held for memory only, never for I/O
+        self._save_lock = threading.Lock()   # one writer of faa_auto.json at a time
+        self._q = _faa_queue.Queue(maxsize=256)
+        self._air = set()        # serials queued or being looked up
+        self._failed = {}        # serial -> when its last lookup failed
+        self._missing = {}       # serial -> when the FAA said it has no record (on disk)
+        self._down_until = 0.0   # the FAA out of reach: no lookups before this
+        self._busy = ''          # the serial being looked up now
+        self._last = None        # the last lookup: serial, ts, result, text
+        self._counts = {'found': 0, 'missing': 0, 'failed': 0}
+        self._session = None     # reused while it works; a fresh cookie after a failure
+        self._thread = None
+        self.enabled = True      # on unless switched off
+        self._load()
+
+    # ---------------------------------------------------------------- settings
+    def _load(self):
+        try:
+            with open(self._path, encoding='utf-8') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            logger.warning(f"FAA lookup: {self._path} unreadable ({e}); the switch stays on")
+            return
+        if not isinstance(data, dict):
+            return
+        if isinstance(data.get('enabled'), bool):
+            self.enabled = data['enabled']
+        missing = data.get('missing')
+        if isinstance(missing, dict):
+            for k, v in missing.items():
+                s = faa_serial(k)
+                if s and isinstance(v, (int, float)) and not isinstance(v, bool):
+                    self._missing[s] = float(v)
+
+    def _save(self):
+        with self._lock:
+            if len(self._missing) > FAA_MISSING_KEPT:
+                for k in sorted(self._missing, key=self._missing.get)[:len(self._missing) - FAA_MISSING_KEPT]:
+                    del self._missing[k]
+            data = {'enabled': self.enabled, 'missing': dict(self._missing)}
+        with self._save_lock:
+            tmp = self._path + '.tmp'
+            try:
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=1, sort_keys=True)
+                os.replace(tmp, self._path)
+            except Exception as e:
+                logger.warning(f"FAA lookup: could not save {self._path}: {e}")
+
+    def set_enabled(self, on):
+        on = bool(on)
+        with self._lock:
+            switched_on = on and not self.enabled
+            self.enabled = on
+            if switched_on:
+                self._failed.clear()     # switched back on: what failed may try now
+                self._down_until = 0.0
+        self._save()
+        if switched_on:
+            # the drones already heard are looked up now, not only when heard again
+            for mac, det in list(tracked_pairs.items()):
+                if isinstance(det, dict):
+                    self.offer(mac, det, attach=False)
+
+    def status(self):
+        now = time.time()
+        with self._lock:
+            return {
+                'enabled': self.enabled,
+                'saved': len(FAA_BY_SERIAL),
+                'queued': len(self._air),
+                'busy': self._busy,
+                'paused_s': int(max(0.0, self._down_until - now)),
+                'last': dict(self._last) if self._last else None,
+                'counts': dict(self._counts),
+                'not_listed': len(self._missing),
+                'now': now,
+            }
+
+    # ---------------------------------------------------------------- serial path
+    def offer(self, mac, det, attach=True):
+        """From update_detection(): a serial with no record yet is queued for
+        a lookup; one found before gets its record put on the detection (the
+        one being built, not yet shared; attach=False leaves a live track as
+        it is). Reads memory only and never blocks."""
+        if not self.enabled or not mac or not isinstance(det, dict) or det.get('_simulated'):
+            return
+        raw = det.get('basic_id')
+        serial = faa_serial(raw)
+        if not serial:
+            return
+        rec = FAA_BY_SERIAL.get(serial)
+        if rec is not None:
+            # known: its own record, whatever a by-MAC fallback put here; the
+            # caller then saves it under this MAC as well (once)
+            if attach and det.get('faa_data') is not rec:
+                det['faa_data'] = rec
+            return
+        now = time.time()
+        with self._lock:
+            if (serial in self._air or now < self._down_until
+                    or now - self._failed.get(serial, 0.0) < FAA_RETRY_S
+                    or now - self._missing.get(serial, 0.0) < FAA_MISSING_RETRY_S):
+                return
+            self._air.add(serial)
+        try:
+            self._q.put_nowait((mac, str(raw).strip(), serial))
+        except _faa_queue.Full:
+            with self._lock:
+                self._air.discard(serial)    # offered again with a later frame
+
+    # ---------------------------------------------------------------- worker
+    def start(self):
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, name='faa-lookup', daemon=True)
+            self._thread.start()
+            logger.info("FAA lookup worker started (%s)" % ('on' if self.enabled else 'switched off'))
+
+    def _run(self):
+        while not SHUTDOWN_EVENT.is_set():
+            try:
+                mac, raw, serial = self._q.get(timeout=1.0)
+            except _faa_queue.Empty:
+                continue
+            asked = False
+            try:
+                asked = self._one(mac, raw, serial)
+            except Exception as e:
+                asked = True
+                logger.warning(f"FAA lookup of {serial} failed: {e}")
+                with self._lock:
+                    now = time.time()
+                    self._failed[serial] = now
+                    self._counts['failed'] += 1
+                    self._last = {'serial': serial, 'ts': now, 'result': 'failed', 'text': str(e)[:160]}
+            finally:
+                with self._lock:
+                    self._air.discard(serial)
+                    self._busy = ''
+            if asked:
+                SHUTDOWN_EVENT.wait(FAA_PACE_S)
+
+    def _one(self, mac, raw, serial):
+        """Look one serial up and keep the answer. True when the FAA was asked."""
+        if serial in FAA_BY_SERIAL:
+            return False     # found meanwhile: QUERY FAA, or the same serial on another MAC
+        with self._lock:
+            if not self.enabled or time.time() < self._down_until:
+                return False     # switched off, or the FAA is out of reach: offered again later
+            self._busy = serial
+        answer, why, down = self._ask(serial)
+        now = time.time()
+        if answer is None:
+            with self._lock:
+                self._failed[serial] = now
+                self._counts['failed'] += 1
+                self._last = {'serial': serial, 'ts': now, 'result': 'failed', 'text': why}
+                if down:
+                    self._down_until = now + FAA_DOWN_PAUSE_S
+            logger.warning(f"FAA lookup of {serial}: {why}; it tries again in an hour")
+            return True
+        items = faa_items(answer)
+        write_to_faa_cache(mac, raw, answer)    # memory + faa_cache.csv (+ the serial index)
+        self._log(mac, raw, answer)
+        # On the map now, not only with the drone's next frame. Only a value is
+        # replaced, never a key added: other threads may be reading this track.
+        # A track without the key gets the record with its next frame.
+        det = tracked_pairs.get(mac)
+        if isinstance(det, dict) and 'faa_data' in det and faa_serial(det.get('basic_id')) == serial:
+            det['faa_data'] = answer
+        with self._lock:
+            self._failed.pop(serial, None)
+            if items:
+                it = items[0] if isinstance(items[0], dict) else {}
+                text = ' '.join(str(it.get(k) or '').strip() for k in ('makeName', 'modelName')).strip()
+                self._missing.pop(serial, None)
+                self._counts['found'] += 1
+                self._last = {'serial': serial, 'ts': now, 'result': 'found', 'text': text or 'record found'}
+            else:
+                self._missing[serial] = now
+                self._counts['missing'] += 1
+                self._last = {'serial': serial, 'ts': now, 'result': 'missing', 'text': 'not in the FAA registry'}
+        if items:
+            logger.info(f"FAA record for {serial} saved: {self._last['text']}")
+        else:
+            logger.info(f"FAA: {serial} is not in the registry; it is asked again in a day")
+        self._save()
+        return True
+
+    def _ask(self, serial):
+        """One registry lookup, asked as QUERY FAA asks it but quietly.
+        Returns (answer, None, False), or (None, why, down) when it failed;
+        down means the FAA could not be reached (lookups pause)."""
+        try:
+            if self._session is None:
+                s = create_retry_session(retries=1, backoff_factor=1)
+                s.get(_FAA_HOME_URL, timeout=20)    # the cookie the API wants
+                self._session = s
+            r = self._session.get(_FAA_API_URL, params={
+                'itemsPerPage': 8,
+                'pageIndex': 0,
+                'orderBy[0]': 'updatedAt',
+                'orderBy[1]': 'DESC',
+                'findBy': 'serialNumber',
+                'serialNumber': serial,
+            }, timeout=20)
+        except requests.exceptions.RequestException as e:
+            self._session = None
+            return None, 'FAA not reachable (%s)' % type(e).__name__, True
+        if r.status_code != 200:
+            self._session = None    # a fresh cookie next time
+            return None, 'FAA answered HTTP %d' % r.status_code, (r.status_code == 429 or r.status_code >= 500)
+        try:
+            answer = r.json()
+        except ValueError:
+            self._session = None
+            return None, 'FAA answer was not JSON', False
+        if not isinstance(answer, dict) or not isinstance(answer.get('data'), dict):
+            return None, 'FAA answer had no data', False
+        return answer, None, False
+
+    def _log(self, mac, raw, answer):
+        """faa_log.csv, as a QUERY FAA lookup logs it."""
+        try:
+            with open(FAA_LOG_FILENAME, 'a', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=['timestamp', 'mac', 'remote_id', 'faa_response'])
+                writer.writerow({
+                    'timestamp': datetime.now().isoformat(),
+                    'mac': mac,
+                    'remote_id': raw,
+                    'faa_response': json.dumps(answer),
+                })
+        except Exception as e:
+            logger.debug(f"FAA log write failed: {e}")
+
+
+faa_auto = FaaAuto(FAA_AUTO_FILE)
+
+
+@app.route('/api/faa_auto', methods=['GET'])
+def api_faa_auto_get():
+    """The automatic FAA lookup: its switch and how it stands."""
+    return jsonify(faa_auto.status())
+
+
+@app.route('/api/faa_auto', methods=['POST'])
+def api_faa_auto_set():
+    """{"enabled": true | false}: the switch, kept in faa_auto.json."""
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('enabled'), bool):
+        return jsonify({'ok': False, 'error': 'send {"enabled": true} or {"enabled": false}'}), 400
+    faa_auto.set_enabled(data['enabled'])
+    st = faa_auto.status()
+    st['ok'] = True
+    return jsonify(st)
+
 
 # ----------------------
 # KML Generation (including FAA data)
@@ -1689,12 +2032,1657 @@ generate_cumulative_kml()
 
 
 # ----------------------
+# TAK connector: drones and their pilots as Cursor-on-Target on a TAK server
+# ----------------------
+# Off until switched on in Settings. One worker thread owns the link. The
+# serial path only calls offer(), which copies a few fields into a bounded
+# queue and returns: it never blocks and never raises.
+# Transports: tcp (a TAK streaming input, with TAK's login when the input has
+# auth="file"), udp (an input or the SA multicast group; no delivery
+# confirmation), tls (a client .p12; the server is checked against the CA in
+# the .p12 or an uploaded truststore).
+# Uids match the OUI-SPY Recon app and the home dashboard
+# (ouispy-drone-<MAC>, ouispy-pilot-<MAC>), so one drone is one track.
+import collections as _tak_collections
+import errno as _tak_errno
+import json as _tak_json
+import os as _tak_os
+import queue as _tak_queue
+import random as _tak_random
+import re as _tak_re
+import select as _tak_select
+import socket as _tak_socket
+import ssl as _tak_ssl
+import subprocess as _tak_subprocess
+import sys as _tak_sys
+import tempfile as _tak_tempfile
+import threading as _tak_threading
+import time as _tak_time
+import uuid as _tak_uuid
+from xml.sax.saxutils import escape as _tak_xesc
+
+
+def _tak_xattr(v):
+    # always double quotes: some CoT readers do not take single-quoted attributes
+    return '"%s"' % _tak_xesc(str(v), {'"': '&quot;', '\n': '&#10;', '\r': '&#13;', '\t': '&#9;'})
+
+try:
+    from cryptography import x509 as _tak_x509
+    from cryptography.hazmat.primitives.serialization import (
+        pkcs12 as _tak_pkcs12, Encoding as _TakEncoding,
+        PrivateFormat as _TakPrivateFormat, NoEncryption as _TakNoEncryption)
+    TAK_HAVE_CRYPTOGRAPHY = True
+except Exception:  # optional: falls back to the openssl command
+    TAK_HAVE_CRYPTOGRAPHY = False
+
+TAK_PROTOCOLS = ('tcp', 'udp', 'tls')
+TAK_DEFAULTS = {
+    'enabled': False,
+    'host': '',
+    'port': 8087,
+    'protocol': 'tcp',
+    'username': '',
+    'password': '',
+    'cert_password': '',
+    'truststore_password': '',
+    'verify': True,
+    'refresh_s': 5,
+    'timeout_s': 120,
+}
+TAK_SECRET_KEYS = ('password', 'cert_password', 'truststore_password')
+# Settings whose change needs a new link (refresh_s / timeout_s do not).
+_TAK_LINK_KEYS = ('enabled', 'host', 'port', 'protocol', 'username', 'password',
+                  'cert_password', 'truststore_password', 'verify')
+
+# The mapper's drone tags (DRONE_TAG_VALUES) as CoT affiliation:
+# known = friend, an identified operator class = neutral, else unknown.
+TAK_TAG_AFFILIATION = {
+    'known': 'f',
+    'civilian': 'n', 'commercial': 'n', 'police': 'n', 'government': 'n', 'military': 'n',
+}
+
+_TAK_CONNECT_TIMEOUT = 8.0
+_TAK_SEND_TIMEOUT = 10.0
+_TAK_RESOLVE_TIMEOUT = 10.0
+_TAK_PROBE_S = 1.5          # wait this long after connecting for a refusal
+_TAK_PING_EVERY = 10.0      # t-x-c-t on streaming links
+_TAK_PONG_WAIT = 15.0       # a server that answers pings, then not this one, is gone
+_TAK_QUEUE_MAX = 1000
+_TAK_TRACKS_MAX = 500
+_TAK_MIN_GAP = 1.0          # at most one update per track per second
+_TAK_STABLE_S = 30.0        # a link up this long resets the backoff
+_TAK_BACKOFF_MAX = 60.0
+_TAK_ERROR_RETRY = 60.0     # problems that need the user retry slowly
+_TAK_CERT_MAX = 256 * 1024
+_TAK_BATCH = 64 * 1024      # bytes per sendall on streams
+_TAK_UDP_GAP = 0.004        # TAK's udp input drops datagrams sent back to back
+_TAK_EVENT_MAX = 2000       # TAK inputs read at most 2048 bytes per message
+_TAK_UNKNOWN = 9999999.0    # CoT "not known" for hae / ce / le
+_TAK_WAKE = object()
+
+_TAK_FIELDS = ('drone_lat', 'drone_long', 'drone_altitude', 'pilot_lat', 'pilot_long',
+               'basic_id', 'rssi', 'last_update', 'heading', 'direction', 'course',
+               'speed', 'speed_horizontal', 'hspeed')
+_TAK_XML_BAD = _tak_re.compile(u'[^\t\n\r\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]')
+_TAK_MAC_BAD = _tak_re.compile(r'[^0-9A-Za-z:._-]')
+_TAK_HOST_OK = _tak_re.compile(r'^[A-Za-z0-9._%:-]+$')
+_TAK_CTRL = _tak_re.compile(r'[\x00-\x1f\x7f]')
+_TAK_PEM_CERT = _tak_re.compile(
+    rb'-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----')
+_TAK_PEM_KEY = _tak_re.compile(
+    rb'-----BEGIN (?:RSA |EC |ENCRYPTED )?PRIVATE KEY-----.+?-----END (?:RSA |EC |ENCRYPTED )?PRIVATE KEY-----',
+    _tak_re.S)
+
+
+class TakFail(Exception):
+    """A link attempt or a certificate failed. kind: 'retrying' (network) or
+    'error' (needs the user). reason: one short sentence for the UI."""
+
+    def __init__(self, kind, reason):
+        Exception.__init__(self, reason)
+        self.kind = kind
+        self.reason = reason
+
+
+def _tak_iso(t):
+    return _tak_time.strftime('%Y-%m-%dT%H:%M:%S', _tak_time.gmtime(t)) + '.%03dZ' % int((t % 1) * 1000)
+
+
+def _tak_clean(s, limit=120):
+    if s is None:
+        return ''
+    return _TAK_XML_BAD.sub('', str(s)).strip()[:limit]
+
+
+def _tak_num(v):
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float('inf'), float('-inf')):
+        return None
+    return f
+
+
+def _tak_pos(lat, lon):
+    """A usable position or None. 0 means "no fix" in the mapper."""
+    lat, lon = _tak_num(lat), _tak_num(lon)
+    if lat is None or lon is None or lat == 0.0 or lon == 0.0:
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return lat, lon
+
+
+def _tak_mac(mac):
+    return _TAK_MAC_BAD.sub('', str(mac or '')).upper()[:64]
+
+
+def _tak_bool(v):
+    if isinstance(v, str):
+        return v.strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(v)
+
+
+def _tak_pem_blocks(rx, data):
+    # each block on its own lines, so blocks can be concatenated
+    return [b.strip() + b'\n' for b in rx.findall(data)]
+
+
+def _tak_looks_p12(data):
+    """DER PFX: SEQUENCE { INTEGER 3, ... }."""
+    try:
+        if len(data) < 8 or data[0] != 0x30:
+            return False
+        i = 1
+        n = data[i]
+        i += 1
+        if n & 0x80:
+            k = n & 0x7f
+            if k == 0 or k > 4:
+                return False
+            i += k
+        return data[i:i + 3] == b'\x02\x01\x03'
+    except Exception:
+        return False
+
+
+def _tak_cot(uid, typ, pos, hae, callsign, remarks, now, start, stale, extra='', how='m-g'):
+    ev = _tak_cot1(uid, typ, pos, hae, callsign, remarks, now, start, stale, extra, how)
+    if len(ev) > _TAK_EVENT_MAX:   # only with pathological names: shorten, never drop
+        ev = _tak_cot1(uid, typ, pos, hae, _tak_clean(callsign, 24), _tak_clean(remarks, 80), now, start, stale, extra, how)
+    return ev
+
+
+def _tak_cot1(uid, typ, pos, hae, callsign, remarks, now, start, stale, extra, how):
+    lat, lon = pos
+    return ('<event version="2.0" uid=%s type=%s how=%s time="%s" start="%s" stale="%s">'
+            '<point lat="%.7f" lon="%.7f" hae="%s" ce="%s" le="%s"/>'
+            '<detail><contact callsign=%s/>%s<remarks>%s</remarks></detail></event>' % (
+                _tak_xattr(uid), _tak_xattr(typ), _tak_xattr(how),
+                _tak_iso(now), _tak_iso(start), _tak_iso(stale),
+                lat, lon, ('%.1f' % hae) if hae is not None else _TAK_UNKNOWN,
+                _TAK_UNKNOWN, _TAK_UNKNOWN,
+                _tak_xattr(_tak_clean(callsign, 64)), extra,
+                _tak_xesc(_tak_clean(remarks, 600)))).encode('utf-8')
+
+
+def _tak_validate(c):
+    """Clean a settings dict. Returns (clean, errors)."""
+    out = dict(TAK_DEFAULTS)
+    errors = []
+    out['enabled'] = _tak_bool(c.get('enabled', False))
+    host = str(c.get('host') or '').strip()
+    if host.startswith('[') and host.endswith(']'):
+        host = host[1:-1]
+    if host and (len(host) > 253 or not _TAK_HOST_OK.match(host)):
+        errors.append('host: use a name like tak.example.org or an IP address')
+    out['host'] = host
+    try:
+        port = int(str(c.get('port', TAK_DEFAULTS['port'])).strip())
+        if not 1 <= port <= 65535:
+            raise ValueError
+        out['port'] = port
+    except (TypeError, ValueError):
+        errors.append('port: a number from 1 to 65535')
+    proto = str(c.get('protocol') or '').strip().lower()
+    if proto not in TAK_PROTOCOLS:
+        errors.append('protocol: tcp, udp or tls')
+    else:
+        out['protocol'] = proto
+    user = str(c.get('username') or '')
+    if len(user) > 128 or _TAK_CTRL.search(user):
+        errors.append('username: up to 128 printable characters')
+    out['username'] = user.strip()
+    for k in TAK_SECRET_KEYS:
+        v = c.get(k)
+        v = '' if v is None else str(v)
+        if len(v) > 256 or '\x00' in v or '\n' in v or '\r' in v:
+            errors.append('%s: up to 256 characters on one line' % k.replace('_', ' '))
+        out[k] = v
+    out['verify'] = _tak_bool(c.get('verify', True))
+    for k, lo, hi in (('refresh_s', 1, 300), ('timeout_s', 30, 3600)):
+        try:
+            v = int(float(str(c.get(k, TAK_DEFAULTS[k])).strip()))
+            if not lo <= v <= hi:
+                raise ValueError
+            out[k] = v
+        except (TypeError, ValueError):
+            errors.append('%s: %d to %d seconds' % (k.replace('_s', '').replace('_', ' '), lo, hi))
+    if out['enabled'] and not out['host']:
+        errors.append('host: needed to switch the TAK connector on')
+    return out, errors
+
+
+# ---------------------------------------------------------------- certificates
+
+def _tak_cert_info(cert):
+    """subject / issuer / expiry of a cryptography certificate."""
+    try:
+        exp = cert.not_valid_after_utc.timestamp()
+    except AttributeError:
+        import calendar
+        exp = calendar.timegm(cert.not_valid_after.timetuple())
+    return {'subject': cert.subject.rfc4514_string(), 'issuer': cert.issuer.rfc4514_string(),
+            'expires': exp, 'expired': exp < _tak_time.time()}
+
+
+def _tak_pem_info(pem):
+    """The same from a PEM string, without cryptography (CPython's own decoder)."""
+    if TAK_HAVE_CRYPTOGRAPHY:
+        try:
+            return _tak_cert_info(_tak_x509.load_pem_x509_certificate(pem.encode()))
+        except Exception:
+            return {}
+    fd, path = _tak_tempfile.mkstemp(suffix='.pem')
+    try:
+        with _tak_os.fdopen(fd, 'w') as f:
+            f.write(pem)
+        d = _tak_ssl._ssl._test_decode_cert(path)
+
+        def name(seq):
+            return ','.join('%s=%s' % kv for rdn in seq for kv in rdn)
+        exp = _tak_ssl.cert_time_to_seconds(d['notAfter'])
+        return {'subject': name(d.get('subject', ())), 'issuer': name(d.get('issuer', ())),
+                'expires': exp, 'expired': exp < _tak_time.time()}
+    except Exception:
+        return {}
+    finally:
+        try:
+            _tak_os.unlink(path)
+        except OSError:
+            pass
+
+
+def _tak_openssl_p12(data, password, cert_dir, want_key):
+    """Read a .p12 with the openssl command (no cryptography package).
+    Returns (key_pem bytes or b'', leaf cert PEM bytes or b'', [other cert PEM bytes]).
+    The password goes through a 0600 temp file, never the command line."""
+    fd, p12 = _tak_tempfile.mkstemp(suffix='.p12', dir=cert_dir)
+    with _tak_os.fdopen(fd, 'wb') as f:
+        f.write(data)
+    pwf = None
+    if password:
+        fd, pwf = _tak_tempfile.mkstemp(suffix='.pw', dir=cert_dir)
+        with _tak_os.fdopen(fd, 'w') as f:
+            f.write(password)
+    passin = ('file:' + pwf) if pwf else 'pass:'
+    try:
+        def run(extra):
+            last = None
+            for legacy in ([], ['-legacy']):
+                try:
+                    r = _tak_subprocess.run(['openssl', 'pkcs12', '-in', p12, '-passin', passin] + legacy + extra,
+                                            capture_output=True, timeout=20)
+                except FileNotFoundError:
+                    raise TakFail('error', 'reading a .p12 needs the cryptography package (pip install cryptography) or the openssl command')
+                except _tak_subprocess.TimeoutExpired:
+                    raise TakFail('error', 'openssl took too long to read the .p12')
+                if r.returncode == 0:
+                    return r.stdout
+                last = r.stderr.decode('utf-8', 'replace').lower()
+            if 'mac verify' in last or 'password' in last or 'decrypt' in last:
+                raise TakFail('error', 'the .p12 password is wrong')
+            raise TakFail('error', 'that file is not a .p12 certificate bundle')
+        if want_key:
+            leaf = run(['-nodes', '-clcerts'])
+            cas = run(['-nokeys', '-cacerts'])
+            keys = _tak_pem_blocks(_TAK_PEM_KEY, leaf)
+            certs = _tak_pem_blocks(_TAK_PEM_CERT, leaf)
+            return (keys[0] if keys else b''), (certs[0] if certs else b''), _tak_pem_blocks(_TAK_PEM_CERT, cas)
+        return b'', b'', _tak_pem_blocks(_TAK_PEM_CERT, run(['-nokeys']))
+    finally:
+        for p in (p12, pwf):
+            if p:
+                try:
+                    _tak_os.unlink(p)
+                except OSError:
+                    pass
+
+
+def tak_read_client_p12(data, password, cert_dir):
+    """A client .p12 -> dict(key=PEM, cert=PEM, chain=[PEM], cas=[PEM str], info=...).
+    Raises TakFail('error', reason)."""
+    if not _tak_looks_p12(data):
+        raise TakFail('error', 'that file is not a .p12 certificate bundle')
+    pw = (password or '').encode('utf-8')
+    if TAK_HAVE_CRYPTOGRAPHY and not _tak_os.environ.get('TAK_FORCE_OPENSSL'):
+        key = cert = None
+        extra = []
+        last = None
+        for p in ([pw] if pw else [None, b'']):
+            try:
+                key, cert, extra = _tak_pkcs12.load_key_and_certificates(data, p)
+                last = None
+                break
+            except Exception as e:
+                last = e
+        if last is not None:
+            raise TakFail('error', 'the .p12 password is wrong' if pw else 'the .p12 needs its password')
+        if key is None or cert is None:
+            raise TakFail('error', 'the .p12 has no private key and certificate (is it a truststore?)')
+        key_pem = key.private_bytes(_TakEncoding.PEM, _TakPrivateFormat.PKCS8, _TakNoEncryption())
+        cert_pem = cert.public_bytes(_TakEncoding.PEM)
+        chain = [c.public_bytes(_TakEncoding.PEM) for c in (extra or [])]
+        info = _tak_cert_info(cert)
+        info['ca'] = [_tak_cert_info(c)['subject'] for c in (extra or [])]
+    else:
+        key_pem, cert_pem, chain = _tak_openssl_p12(data, password, cert_dir, True)
+        if not key_pem or not cert_pem:
+            raise TakFail('error', 'the .p12 has no private key and certificate (is it a truststore?)')
+        info = _tak_pem_info(cert_pem.decode())
+        info['ca'] = [_tak_pem_info(c.decode()).get('subject', '?') for c in chain]
+    return {'key': key_pem, 'cert': cert_pem, 'chain': chain,
+            'cas': [c.decode() for c in chain], 'info': info}
+
+
+def tak_read_truststore(data, password, cert_dir):
+    """A truststore (.p12 of CA certs, or PEM / DER certificates) -> (kind, [PEM str], [subjects])."""
+    if b'-----BEGIN CERTIFICATE-----' in data:
+        pems = [p.decode() for p in _tak_pem_blocks(_TAK_PEM_CERT, data)]
+        kind = 'pem'
+    elif _tak_looks_p12(data):
+        kind = 'p12'
+        pw = (password or '').encode('utf-8')
+        if TAK_HAVE_CRYPTOGRAPHY and not _tak_os.environ.get('TAK_FORCE_OPENSSL'):
+            ks = None
+            last = None
+            for p in ([pw] if pw else [None, b'']):
+                try:
+                    ks = _tak_pkcs12.load_pkcs12(data, p)
+                    last = None
+                    break
+                except Exception as e:
+                    last = e
+            if last is not None or ks is None:
+                raise TakFail('error', 'the truststore password is wrong' if pw else 'the truststore needs its password')
+            certs = [c.certificate for c in ks.additional_certs]
+            if ks.cert is not None:
+                certs.insert(0, ks.cert.certificate)
+            pems = [c.public_bytes(_TakEncoding.PEM).decode() for c in certs]
+        else:
+            try:
+                pems = [p.decode() for p in _tak_openssl_p12(data, password, cert_dir, False)[2]]
+            except TakFail as f:
+                raise TakFail('error', f.reason.replace('.p12 password', 'truststore password'))
+    elif data[:1] == b'\x30':
+        kind = 'pem'
+        try:
+            pems = [_tak_ssl.DER_cert_to_PEM_cert(data)]
+        except Exception:
+            pems = []
+    else:
+        raise TakFail('error', 'that file is not a certificate (.p12, .pem or .crt)')
+    good = []
+    subjects = []
+    for p in pems:
+        try:
+            _tak_ssl.PEM_cert_to_DER_cert(p)
+        except Exception:
+            continue
+        good.append(p)
+        subjects.append(_tak_pem_info(p).get('subject', '?'))
+    if not good:
+        raise TakFail('error', 'the truststore holds no certificate')
+    return kind, good, subjects
+
+
+# ---------------------------------------------------------------- connector
+
+class _TakTrack(object):
+    __slots__ = ('mac', 'src_mac', 'd', 'heard', 'sent_at', 'sig', 'ever_sent')
+
+    def __init__(self, mac, src_mac):
+        self.mac = mac
+        self.src_mac = src_mac
+        self.d = {}
+        self.heard = 0.0
+        self.sent_at = 0.0
+        self.sig = None
+        self.ever_sent = False
+
+
+class TakConnector(object):
+    """Drones and pilots as CoT on a TAK server. See the block comment above."""
+
+    def __init__(self, config_path, cert_dir, snapshot_fn=None, meta_fn=None, logger=None):
+        self.config_path = config_path
+        self.cert_dir = cert_dir
+        self.snapshot_fn = snapshot_fn
+        self.meta_fn = meta_fn
+        self.log = logger
+        self._q = _tak_queue.Queue(maxsize=_TAK_QUEUE_MAX)
+        self._dropped = 0
+        self._cfg_lock = _tak_threading.Lock()
+        self._st_lock = _tak_threading.Lock()
+        self._cfg = dict(TAK_DEFAULTS)
+        self._extra = {'client_uid': '', 'cert_name': '', 'truststore_name': ''}
+        self._gen = 0
+        self._enabled = False
+        self._thread = None
+        self._stopping = False
+        # worker-only state
+        self._sock = None
+        self._link_gen = -1
+        self._link = {}
+        self._attempt = 0
+        self._next_try = 0.0
+        self._up_since = 0.0
+        self._last_rx = 0.0
+        self._last_ping = 0.0
+        self._ping_wait = None      # when the oldest unanswered ping went out
+        self._ping_ok = False
+        self._rx_tail = b''
+        self._good = set()      # (protocol, host, port) that have worked since start
+        self._cur = None
+        self._tracks = _tak_collections.OrderedDict()
+        self._dirty = set()
+        self._last_scan = 0.0
+        self._last_expire = 0.0
+        self._ctx_key = None
+        self._ctx = None
+        self._ctx_meta = None
+        self._cert_cache = {}
+        self._st = {'state': 'off', 'reason': '', 'since': _tak_time.time(), 'next_retry': None,
+                    'attempt': 0, 'protocol': '', 'host': '', 'port': 0, 'tls': None,
+                    'login': False, 'ping': False, 'note': '', 'sent': 0, 'last_sent': None,
+                    'connected_since': None, 'last_error': '', 'last_error_at': None, 'tracks': 0}
+        try:
+            _tak_os.makedirs(cert_dir, mode=0o700, exist_ok=True)
+            _tak_os.chmod(cert_dir, 0o700)
+        except OSError as e:
+            self._logw('TAK: cannot prepare %s: %s' % (cert_dir, e))
+        self._load()
+
+    # ------------------------------------------------------------ logging
+    def _logw(self, msg):
+        if self.log:
+            try:
+                self.log.warning(msg)
+            except Exception:
+                pass
+
+    def _logi(self, msg):
+        if self.log:
+            try:
+                self.log.info(msg)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------ settings
+    def _load(self):
+        raw = {}
+        if _tak_os.path.exists(self.config_path):
+            try:
+                with open(self.config_path) as f:
+                    raw = _tak_json.load(f)
+                if not isinstance(raw, dict):
+                    raise ValueError('not an object')
+            except Exception as e:
+                self._logw('TAK: %s is unreadable (%s); starting with the connector off' % (self.config_path, e))
+                raw = {}
+        clean, errors = _tak_validate(dict(TAK_DEFAULTS, **{k: v for k, v in raw.items() if k in TAK_DEFAULTS}))
+        if errors:
+            self._logw('TAK: saved settings have problems (%s); the connector stays off' % '; '.join(errors))
+            clean['enabled'] = False
+        for k in self._extra:
+            v = raw.get(k)
+            if isinstance(v, str) and len(v) < 300:
+                self._extra[k] = v
+        if not self._extra['client_uid']:
+            self._extra['client_uid'] = 'mesh-mapper-' + _tak_uuid.uuid4().hex[:12]
+        with self._cfg_lock:
+            self._cfg = clean
+            self._enabled = clean['enabled']
+            if _tak_os.path.exists(self.config_path):
+                self._save_locked()   # normalized, and 0600 again
+
+    def _save_locked(self):
+        data = dict(self._cfg)
+        data.update(self._extra)
+        tmp = self.config_path + '.tmp'
+        try:
+            fd = _tak_os.open(tmp, _tak_os.O_WRONLY | _tak_os.O_CREAT | _tak_os.O_TRUNC, 0o600)
+            with _tak_os.fdopen(fd, 'w') as f:
+                _tak_json.dump(data, f, indent=2)
+                f.flush()
+                _tak_os.fsync(f.fileno())
+            try:
+                _tak_os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            _tak_os.replace(tmp, self.config_path)
+            return True
+        except Exception as e:
+            self._logw('TAK: could not save %s: %s' % (self.config_path, e))
+            return False
+
+    def configure(self, updates):
+        """Merge and save settings. Keys left out keep their value; a secret
+        sent as '' is cleared. Returns (ok, errors)."""
+        if not isinstance(updates, dict):
+            return False, ['settings must be a JSON object']
+        with self._cfg_lock:
+            merged = dict(self._cfg)
+            for k, v in updates.items():
+                if k in TAK_DEFAULTS:
+                    merged[k] = v
+            clean, errors = _tak_validate(merged)
+            if errors:
+                return False, errors
+            relink = any(clean[k] != self._cfg.get(k) for k in _TAK_LINK_KEYS)
+            self._cfg = clean
+            self._enabled = clean['enabled']
+            if relink:
+                self._gen += 1
+            saved = self._save_locked()
+        self._kick()
+        if not saved:
+            return False, ['the settings could not be saved to disk (see the log)']
+        return True, []
+
+    def config(self):
+        with self._cfg_lock:
+            return dict(self._cfg)
+
+    def public_config(self):
+        """Settings without secrets, plus what the stored certificates are."""
+        with self._cfg_lock:
+            c = dict(self._cfg)
+            names = dict(self._extra)
+        out = {k: v for k, v in c.items() if k not in TAK_SECRET_KEYS}
+        out['has_password'] = bool(c['password'])
+        out['has_cert_password'] = bool(c['cert_password'])
+        out['has_truststore_password'] = bool(c['truststore_password'])
+        out['client_uid'] = names['client_uid']
+        out['cert'] = self._cert_summary('client', c, names['cert_name'])
+        out['truststore'] = self._cert_summary('truststore', c, names['truststore_name'])
+        out['cryptography'] = TAK_HAVE_CRYPTOGRAPHY
+        return out
+
+    # ------------------------------------------------------------ certificate files
+    def _path(self, kind):
+        if kind == 'client':
+            return _tak_os.path.join(self.cert_dir, 'client.p12')
+        for ext in ('p12', 'pem'):
+            p = _tak_os.path.join(self.cert_dir, 'truststore.' + ext)
+            if _tak_os.path.exists(p):
+                return p
+        return _tak_os.path.join(self.cert_dir, 'truststore.p12')
+
+    def _sig(self, kind):
+        p = self._path(kind)
+        try:
+            st = _tak_os.stat(p)
+            return (p, st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def _read(self, kind):
+        with open(self._path(kind), 'rb') as f:
+            return f.read()
+
+    def _cert_summary(self, kind, c, name):
+        sig = self._sig(kind)
+        if sig is None:
+            return None
+        pw = c['cert_password'] if kind == 'client' else c['truststore_password']
+        key = (sig, pw)
+        hit = self._cert_cache.get(kind)
+        if hit and hit[0] == key:
+            return hit[1]
+        out = {'present': True, 'filename': name or _tak_os.path.basename(sig[0])}
+        try:
+            data = self._read(kind)
+            if kind == 'client':
+                r = tak_read_client_p12(data, pw, self.cert_dir)
+                out.update(r['info'])
+                out['has_ca'] = bool(r['cas'])
+            else:
+                kind2, pems, subjects = tak_read_truststore(data, pw, self.cert_dir)
+                out['format'] = kind2
+                out['ca'] = subjects
+            out['ok'] = True
+        except TakFail as f:
+            out['ok'] = False
+            out['problem'] = f.reason
+        except Exception as e:
+            out['ok'] = False
+            out['problem'] = 'could not read it: %s' % e
+        self._cert_cache[kind] = (key, out)
+        return out
+
+    def _write_file(self, path, data):
+        tmp = path + '.tmp'
+        fd = _tak_os.open(tmp, _tak_os.O_WRONLY | _tak_os.O_CREAT | _tak_os.O_TRUNC, 0o600)
+        with _tak_os.fdopen(fd, 'wb') as f:
+            f.write(data)
+            f.flush()
+            _tak_os.fsync(f.fileno())
+        _tak_os.chmod(tmp, 0o600)
+        _tak_os.replace(tmp, path)
+
+    def set_cert(self, kind, filename, data, password):
+        """Store a client .p12 (kind 'client') or a truststore (kind 'truststore')
+        after loading it for real. Returns (ok, info or reason)."""
+        if kind not in ('client', 'truststore'):
+            return False, 'kind must be client or truststore'
+        if not data:
+            return False, 'the file is empty'
+        if len(data) > _TAK_CERT_MAX:
+            return False, 'the file is too big for a certificate (%d KB max)' % (_TAK_CERT_MAX // 1024)
+        password = '' if password is None else str(password)
+        if len(password) > 256 or '\n' in password or '\r' in password or '\x00' in password:
+            return False, 'the password must be one line of up to 256 characters'
+        name = _tak_clean(_tak_os.path.basename(str(filename or '')), 120)
+        try:
+            if kind == 'client':
+                info = tak_read_client_p12(data, password, self.cert_dir)['info']
+                if info.get('expired'):
+                    pass  # stored anyway; the status names it when the server refuses it
+                path = self._path('client')
+                self._write_file(path, data)
+            else:
+                fmt, pems, subjects = tak_read_truststore(data, password, self.cert_dir)
+                info = {'format': fmt, 'ca': subjects}
+                for ext in ('p12', 'pem'):
+                    p = _tak_os.path.join(self.cert_dir, 'truststore.' + ext)
+                    if _tak_os.path.exists(p):
+                        _tak_os.unlink(p)
+                # PEM / DER are stored as PEM text
+                path = _tak_os.path.join(self.cert_dir, 'truststore.' + fmt)
+                self._write_file(path, data if fmt == 'p12' else ''.join(pems).encode())
+        except TakFail as f:
+            return False, f.reason
+        except Exception as e:
+            return False, 'could not store it: %s' % e
+        with self._cfg_lock:
+            if kind == 'client':
+                self._cfg['cert_password'] = password
+                self._extra['cert_name'] = name
+            else:
+                self._cfg['truststore_password'] = password
+                self._extra['truststore_name'] = name
+            self._gen += 1
+            self._cert_cache.pop(kind, None)
+            self._save_locked()
+        self._kick()
+        return True, info
+
+    def delete_cert(self, kind):
+        if kind not in ('client', 'truststore'):
+            return False
+        names = ['client.p12'] if kind == 'client' else ['truststore.p12', 'truststore.pem']
+        for n in names:
+            p = _tak_os.path.join(self.cert_dir, n)
+            if _tak_os.path.exists(p):
+                try:
+                    _tak_os.unlink(p)
+                except OSError:
+                    pass
+        with self._cfg_lock:
+            if kind == 'client':
+                self._cfg['cert_password'] = ''
+                self._extra['cert_name'] = ''
+            else:
+                self._cfg['truststore_password'] = ''
+                self._extra['truststore_name'] = ''
+            self._gen += 1
+            self._cert_cache.pop(kind, None)
+            self._save_locked()
+        self._kick()
+        return True
+
+    # ------------------------------------------------------------ the serial path
+    def offer(self, detection):
+        """Hand a detection to the connector. Never blocks, never raises."""
+        try:
+            if not self._enabled:
+                return
+            item = self._extract(detection)
+            if item is None:
+                return
+            try:
+                self._q.put_nowait(item)
+            except _tak_queue.Full:
+                try:
+                    self._q.get_nowait()   # the oldest goes
+                except _tak_queue.Empty:
+                    pass
+                self._dropped += 1
+                try:
+                    self._q.put_nowait(item)
+                except _tak_queue.Full:
+                    self._dropped += 1
+        except Exception:
+            pass
+
+    @staticmethod
+    def _extract(det):
+        if not isinstance(det, dict):
+            return None
+        mac = det.get('mac')
+        if not mac:
+            return None
+        item = {'mac': str(mac)[:64]}
+        for k in _TAK_FIELDS:
+            v = det.get(k)
+            if isinstance(v, (str, int, float)) and not isinstance(v, bool):
+                item[k] = v if not isinstance(v, str) else v[:80]
+        if det.get('_simulated'):
+            item['sim'] = 1
+        faa = det.get('faa_data')
+        if isinstance(faa, dict):
+            try:
+                it = ((faa.get('data') or {}).get('items') or [None])[0]
+                if isinstance(it, dict):
+                    for src, dst in (('makeName', 'faa_make'), ('modelName', 'faa_model')):
+                        v = it.get(src)
+                        if isinstance(v, str) and v.strip():
+                            item[dst] = v[:60]
+            except Exception:
+                pass
+        return item
+
+    def _kick(self):
+        try:
+            self._q.put_nowait(_TAK_WAKE)
+        except _tak_queue.Full:
+            pass   # the worker is busy with the queue anyway
+
+    # ------------------------------------------------------------ status
+    def _set(self, **kw):
+        with self._st_lock:
+            if 'state' in kw and kw['state'] != self._st.get('state'):
+                self._st['since'] = _tak_time.time()
+            self._st.update(kw)
+
+    def status(self):
+        with self._st_lock:
+            s = dict(self._st)
+            if isinstance(s.get('tls'), dict):
+                s['tls'] = dict(s['tls'])
+        s['queued'] = self._q.qsize()
+        s['dropped'] = self._dropped
+        s['enabled'] = self._enabled
+        s['now'] = _tak_time.time()
+        return s
+
+    # ------------------------------------------------------------ worker
+    def start(self):
+        if self._thread is None:
+            self._thread = _tak_threading.Thread(target=self._run, name='tak-connector', daemon=True)
+            self._thread.start()
+        return self
+
+    def stop(self):
+        self._stopping = True
+        self._kick()
+
+    def _run(self):
+        while not self._stopping:
+            try:
+                self._step()
+            except Exception as e:   # the thread must never die
+                self._logw('TAK worker: %r' % (e,))
+                self._drop('retrying', 'internal error: %s' % e)
+                _tak_time.sleep(1.0)
+        self._close()
+
+    def _cfg_now(self):
+        with self._cfg_lock:
+            return dict(self._cfg), self._gen, dict(self._extra)
+
+    def _step(self):
+        cfg, gen, extra = self._cfg_now()
+        if not cfg['enabled']:
+            if self._sock is not None:
+                self._close()
+            self._tracks.clear()
+            self._dirty.clear()
+            self._drain_queue(keep=False)
+            self._attempt = 0
+            self._next_try = 0.0
+            self._link_gen = gen
+            self._set(state='off', reason='', next_retry=None, attempt=0, tls=None,
+                      connected_since=None, tracks=0, note='')
+            self._wait(2.0)
+            return
+        if gen != self._link_gen:
+            if self._sock is not None:
+                self._close()
+            self._link_gen = gen
+            self._attempt = 0
+            self._next_try = 0.0
+        self._drain_queue(keep=True)
+        now = _tak_time.time()
+        if self._sock is None:
+            self._expire(now, False, cfg)
+            if now < self._next_try:
+                self._wait(min(1.0, self._next_try - now))
+                return
+            self._connect(cfg, extra)
+            return
+        if not self._service_rx():
+            return
+        self._expire(now, True, cfg)
+        if self._sock is None:
+            return
+        self._send_due(cfg, now)
+        if self._sock is None:
+            return
+        self._maybe_ping(extra, now)
+        self._wait(0.25)
+
+    def _wait(self, t):
+        if t <= 0:
+            return
+        try:
+            item = self._q.get(timeout=t)
+        except _tak_queue.Empty:
+            return
+        if item is not _TAK_WAKE:
+            self._take(item)
+
+    def _drain_queue(self, keep):
+        for _ in range(5000):
+            try:
+                item = self._q.get_nowait()
+            except _tak_queue.Empty:
+                return
+            if keep and item is not _TAK_WAKE:
+                self._take(item)
+
+    def _take(self, item):
+        mac = _tak_mac(item.get('mac'))
+        if not mac:
+            return
+        t = self._tracks.get(mac)
+        if t is None:
+            while len(self._tracks) >= _TAK_TRACKS_MAX:
+                self._tracks.popitem(last=False)   # least recently heard
+            t = _TakTrack(mac, item.get('mac'))
+            self._tracks[mac] = t
+        else:
+            self._tracks.move_to_end(mac)
+        now = _tak_time.time()
+        heard = min(_tak_num(item.get('last_update')) or now, now)
+        if heard < t.heard:
+            return   # an older copy of what we have
+        # coordinate-less frames keep the last position (as the mapper does)
+        merged = dict(t.d)
+        merged.update(item)
+        for k in ('drone_lat', 'drone_long', 'pilot_lat', 'pilot_long'):
+            if not _tak_num(item.get(k)) and _tak_num(t.d.get(k)):
+                merged[k] = t.d[k]
+        t.d = merged
+        t.heard = heard
+        sig = (merged.get('drone_lat'), merged.get('drone_long'), merged.get('drone_altitude'),
+               merged.get('pilot_lat'), merged.get('pilot_long'), merged.get('basic_id'),
+               merged.get('faa_make'), merged.get('faa_model'))
+        if sig != t.sig:
+            t.sig = sig
+            self._dirty.add(mac)
+
+    def _seed(self):
+        """On a new link: what the mapper already tracks goes out at once."""
+        if self.snapshot_fn is not None:
+            dets = []
+            for _ in range(3):
+                try:
+                    dets = list(self.snapshot_fn() or [])
+                    break
+                except RuntimeError:   # mutated while copying
+                    continue
+                except Exception as e:
+                    self._logw('TAK snapshot: %r' % (e,))
+                    break
+            for d in dets:
+                item = self._extract(d)
+                if item is not None:
+                    self._take(item)
+        for t in self._tracks.values():
+            t.sent_at = 0.0
+            self._dirty.add(t.mac)
+
+    def _meta(self, t):
+        if self.meta_fn is None:
+            return '', ''
+        try:
+            alias, tag = self.meta_fn(t.src_mac)
+            return (alias or ''), (tag or '')
+        except Exception:
+            return '', ''
+
+    def _events(self, t, now, cfg, final=False):
+        d = t.d
+        alias, tag = self._meta(t)
+        bid = _tak_clean(d.get('basic_id'), 48)
+        label = _tak_clean(alias, 48) or bid or t.mac
+        if d.get('sim'):
+            label = 'SIM ' + label
+        tag = _tak_clean(tag, 24).lower()
+        affil = TAK_TAG_AFFILIATION.get(tag, 'u')
+        dtype = 'a-%s-A-M-H-Q' % affil
+        ptype = 'a-%s-G' % affil
+        duid = 'ouispy-drone-' + t.mac
+        puid = 'ouispy-pilot-' + t.mac
+        start = min(t.heard, now)
+        stale = now if final else max(now + 1.0, t.heard + cfg['timeout_s'])
+        tagword = ('tag ' + tag) if tag and tag != 'unknown' else ''
+        out = []
+        dpos = _tak_pos(d.get('drone_lat'), d.get('drone_long'))
+        if dpos:
+            hae = _tak_num(d.get('drone_altitude'))
+            if hae is not None and (hae == 0.0 or hae < -900 or hae > 30000):
+                hae = None   # ODID -1000 = unknown; 0 = not set
+            course = None
+            for k in ('heading', 'direction', 'course'):
+                course = _tak_num(d.get(k))
+                if course is not None:
+                    break
+            speed = None
+            for k in ('speed', 'speed_horizontal', 'hspeed'):
+                speed = _tak_num(d.get(k))
+                if speed is not None:
+                    break
+            track = ''
+            if course is not None and 0.0 <= course <= 360.0:
+                track = '<track course="%.1f"%s/>' % (course, (' speed="%.1f"' % speed) if speed is not None and 0 <= speed < 400 else '')
+            rssi = _tak_num(d.get('rssi'))
+            faa = ' '.join(x for x in (_tak_clean(d.get('faa_make'), 40), _tak_clean(d.get('faa_model'), 40)) if x)
+            remarks = '  '.join(x for x in (
+                ('Remote ID ' + bid) if bid else '',
+                'MAC ' + t.mac,
+                ('%d dBm' % rssi) if rssi is not None else '',
+                ('FAA ' + faa) if faa else '',
+                tagword,
+                'SIMULATED' if d.get('sim') else '',
+                'mesh-mapper') if x)
+            out.append(_tak_cot(duid, dtype, dpos, hae, 'UAS ' + label, remarks, now, start, stale, track))
+        ppos = _tak_pos(d.get('pilot_lat'), d.get('pilot_long'))
+        if ppos:
+            remarks = '  '.join(x for x in (
+                'operator of UAS ' + label,
+                ('Remote ID ' + bid) if bid else '',
+                tagword,
+                'SIMULATED' if d.get('sim') else '',
+                'mesh-mapper') if x)
+            link = '<link uid=%s type=%s relation="p-p"/>' % (_tak_xattr(duid), _tak_xattr(dtype))
+            out.append(_tak_cot(puid, ptype, ppos, None, 'PILOT ' + label, remarks, now, start, stale, link))
+        return out
+
+    def _expire(self, now, connected, cfg):
+        if now - self._last_expire < 1.0:
+            return
+        self._last_expire = now
+        timeout = cfg['timeout_s']
+        gone = [m for m, t in self._tracks.items() if now - t.heard > timeout]
+        finals = []
+        for m in gone:
+            t = self._tracks.pop(m)
+            self._dirty.discard(m)
+            if connected and t.ever_sent:
+                finals.extend(self._events(t, now, cfg, final=True))
+        if finals:
+            self._send(finals)
+        self._set(tracks=len(self._tracks))
+
+    def _send_due(self, cfg, now):
+        due = []
+        scan = now - self._last_scan >= 0.5
+        if scan:
+            self._last_scan = now
+            macs = list(self._tracks.keys())
+        else:
+            macs = list(self._dirty)
+        for m in macs:
+            t = self._tracks.get(m)
+            if t is None:
+                self._dirty.discard(m)
+                continue
+            if now - t.heard > cfg['timeout_s']:
+                continue   # expires on the next pass; never flash an old track
+            if m in self._dirty:
+                if now - t.sent_at < _TAK_MIN_GAP:
+                    continue
+            elif now - t.sent_at < cfg['refresh_s']:
+                continue
+            ev = self._events(t, now, cfg)
+            self._dirty.discard(m)
+            t.sent_at = now
+            if ev:
+                t.ever_sent = True
+                due.extend(ev)
+        if due:
+            self._send(due)
+
+    # ------------------------------------------------------------ link
+    def _close(self):
+        s, self._sock = self._sock, None
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def _drop(self, kind, reason):
+        """The link failed: close it and schedule the next attempt."""
+        now = _tak_time.time()
+        if self._sock is not None and self._up_since and now - self._up_since >= _TAK_STABLE_S:
+            self._attempt = 0
+        self._close()
+        if kind == 'error':
+            delay = _TAK_ERROR_RETRY
+        else:
+            delay = min(_TAK_BACKOFF_MAX, 2.0 ** max(0, self._attempt - 1))
+        delay *= _tak_random.uniform(0.8, 1.2)
+        self._next_try = now + delay
+        self._set(state=kind, reason=reason, next_retry=self._next_try, connected_since=None,
+                  last_error=reason, last_error_at=now, tls=None, ping=False, note='')
+        if kind == 'error':
+            self._logw('TAK: %s' % reason)
+        else:
+            self._logi('TAK: %s (next try in %.0f s)' % (reason, delay))
+
+    def _connect(self, cfg, extra):
+        self._attempt += 1
+        proto, host, port = cfg['protocol'], cfg['host'], cfg['port']
+        self._cur = (proto, host, port)
+        self._set(state='connecting', reason='', attempt=self._attempt, next_retry=None,
+                  protocol=proto, host=host, port=port, tls=None, login=bool(cfg['username']),
+                  ping=False, note='')
+        try:
+            sock, link = self._open(cfg, extra)
+        except TakFail as f:
+            if f.reason == 'settings changed':
+                self._next_try = 0.0
+                return
+            self._drop(f.kind, f.reason)
+            return
+        except Exception as e:
+            self._drop('retrying', 'could not connect: %s' % e)
+            return
+        now = _tak_time.time()
+        self._good.add(self._cur)
+        self._sock = sock
+        self._link = link
+        self._up_since = now
+        self._last_rx = now
+        self._last_ping = now if link.get('pinged') else 0.0
+        self._ping_ok = bool(link.get('pong'))
+        self._ping_wait = None
+        self._rx_tail = b''
+        note = ''
+        if proto == 'udp':
+            note = 'UDP has no delivery confirmation'
+        elif cfg['protocol'] == 'tls' and not cfg['verify']:
+            note = 'server certificate not checked'
+        self._set(state='connected', reason='', next_retry=None, connected_since=now,
+                  tls=link.get('tls'), ping=self._ping_ok, note=note)
+        self._logi('TAK: connected to %s:%d over %s' % (host, port, proto.upper()))
+        self._seed()
+
+    def _resolve(self, host, port, udp):
+        box = {}
+
+        def work():
+            try:
+                box['r'] = _tak_socket.getaddrinfo(host, port, 0, _tak_socket.SOCK_DGRAM if udp else _tak_socket.SOCK_STREAM)
+            except Exception as e:
+                box['e'] = e
+        th = _tak_threading.Thread(target=work, name='tak-resolve', daemon=True)
+        th.start()
+        end = _tak_time.time() + _TAK_RESOLVE_TIMEOUT
+        while th.is_alive() and _tak_time.time() < end:
+            th.join(0.25)
+            self._abort_if_changed()
+        if th.is_alive():
+            raise TakFail('retrying', 'looking up %s took too long' % host)
+        if 'e' in box:
+            raise TakFail('retrying', 'host not found: %s' % host)
+        return box.get('r') or []
+
+    @staticmethod
+    def _tune(sock):
+        S = _tak_socket
+        try:
+            sock.setsockopt(S.SOL_SOCKET, S.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
+        opts = [('TCP_KEEPIDLE', 10), ('TCP_KEEPALIVE', 10), ('TCP_KEEPINTVL', 5), ('TCP_KEEPCNT', 3),
+                ('TCP_USER_TIMEOUT', 30000), ('TCP_NODELAY', 1)]
+        for name, val in opts:
+            opt = getattr(S, name, None)
+            if opt is None:
+                continue
+            try:
+                sock.setsockopt(S.IPPROTO_TCP, opt, val)
+            except OSError:
+                pass
+        if _tak_sys.platform == 'darwin':
+            try:   # TCP_RXT_CONNDROPTIME: give up on unacknowledged data after 30 s
+                sock.setsockopt(S.IPPROTO_TCP, getattr(S, 'TCP_RXT_CONNDROPTIME', 0x80), 30)
+            except OSError:
+                pass
+
+    def _open(self, cfg, extra):
+        proto, host, port = cfg['protocol'], cfg['host'], cfg['port']
+        ctx = None
+        if proto == 'tls':
+            ctx = self._tls_context(cfg)
+        addrs = self._resolve(host, port, proto == 'udp')
+        if not addrs:
+            raise TakFail('retrying', 'host not found: %s' % host)
+        if proto == 'udp':
+            return self._open_udp(addrs, host, port, extra), {}
+        sock = None
+        last = None
+        for af, st, pr, _cn, sa in addrs:
+            s = None
+            try:
+                s = _tak_socket.socket(af, st, pr)
+                self._tune(s)
+                self._connect_abortable(s, sa)
+                sock = s
+                break
+            except TakFail:
+                if s is not None:
+                    s.close()
+                raise
+            except Exception as e:
+                last = e
+                if s is not None:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+        if sock is None:
+            raise self._classify(last, host, port, 'connect')
+        link = {}
+        try:
+            if proto == 'tls':
+                sni = None if self._is_ip(host) else host
+                try:
+                    tls = ctx.wrap_socket(sock, server_hostname=sni, do_handshake_on_connect=False)
+                    tls.settimeout(_TAK_CONNECT_TIMEOUT)
+                    tls.do_handshake()
+                except Exception as e:
+                    raise self._classify(e, host, port, 'handshake')
+                sock = tls
+                link['tls'] = self._tls_info(tls, cfg)
+            sock.settimeout(_TAK_SEND_TIMEOUT)
+            if cfg['username']:
+                login = '<auth><cot username=%s password=%s uid=%s/></auth>' % (
+                    _tak_xattr(cfg['username']), _tak_xattr(cfg['password']), _tak_xattr(extra['client_uid']))
+                sock.sendall(login.encode('utf-8'))
+            # A ping makes a refusing server show it now: TAK closes an
+            # auth="file" input on any message without a good login, and on
+            # TLS it answers t-x-c-t with t-x-c-t-r.
+            sock.sendall(self._ping_bytes(extra))
+            link['pinged'] = True
+            link['pong'] = self._probe(sock, cfg, proto)
+        except TakFail:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            raise
+        except Exception as e:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            raise self._classify(e, host, port, 'probe')
+        return sock, link
+
+    def _abort_if_changed(self):
+        with self._cfg_lock:
+            changed = self._gen != self._link_gen or not self._cfg['enabled']
+        if changed or self._stopping:
+            raise TakFail('retrying', 'settings changed')
+
+    def _connect_abortable(self, s, sa):
+        # a settings change during a slow connect takes effect at once
+        s.setblocking(False)
+        err = s.connect_ex(sa)
+        if err not in (0, _tak_errno.EINPROGRESS, _tak_errno.EWOULDBLOCK, getattr(_tak_errno, 'WSAEWOULDBLOCK', -1)):
+            raise OSError(err, _tak_os.strerror(err))
+        end = _tak_time.time() + _TAK_CONNECT_TIMEOUT
+        while err != 0:
+            left = end - _tak_time.time()
+            if left <= 0:
+                raise _tak_socket.timeout('timed out')
+            _r, w, x = _tak_select.select([], [s], [s], min(0.25, left))
+            if w or x:
+                err = s.getsockopt(_tak_socket.SOL_SOCKET, _tak_socket.SO_ERROR)
+                if err:
+                    raise OSError(err, _tak_os.strerror(err))
+                break
+            self._abort_if_changed()
+        s.settimeout(_TAK_CONNECT_TIMEOUT)
+
+    def _open_udp(self, addrs, host, port, extra):
+        af, st, pr, _cn, sa = addrs[0]
+        s = _tak_socket.socket(af, _tak_socket.SOCK_DGRAM)
+        try:
+            ip = sa[0]
+            multicast = af == _tak_socket.AF_INET and ip.split('.')[0].isdigit() and 224 <= int(ip.split('.')[0]) <= 239
+            if multicast:
+                s.setsockopt(_tak_socket.IPPROTO_IP, _tak_socket.IP_MULTICAST_TTL, 1)   # stays on this LAN
+            s.connect(sa)
+            s.setblocking(False)
+            if not multicast:
+                # a closed port answers with ICMP, which shows up as ECONNREFUSED
+                s.send(self._ping_bytes(extra))
+                end = _tak_time.time() + 0.3
+                while _tak_time.time() < end:
+                    try:
+                        s.recv(2048)
+                    except (BlockingIOError, InterruptedError):
+                        pass
+                    _tak_time.sleep(0.03)
+        except ConnectionRefusedError:
+            s.close()
+            raise TakFail('retrying', 'nothing is listening on UDP %s:%s (port unreachable)' % (host, port))
+        except Exception as e:
+            s.close()
+            raise self._classify(e, host, port, 'connect')
+        return s
+
+    @staticmethod
+    def _is_ip(host):
+        for fam in (_tak_socket.AF_INET, _tak_socket.AF_INET6):
+            try:
+                _tak_socket.inet_pton(fam, host)
+                return True
+            except (OSError, ValueError):
+                pass
+        return False
+
+    def _ping_bytes(self, extra):
+        now = _tak_time.time()
+        return ('<event version="2.0" uid=%s type="t-x-c-t" how="h-g-i-g-o" time="%s" start="%s" stale="%s">'
+                '<point lat="0.0" lon="0.0" hae="0.0" ce="%s" le="%s"/><detail/></event>' % (
+                    _tak_xattr(extra['client_uid'] + '-ping'), _tak_iso(now), _tak_iso(now), _tak_iso(now + 20),
+                    _TAK_UNKNOWN, _TAK_UNKNOWN)).encode('utf-8')
+
+    def _probe(self, sock, cfg, proto):
+        """Right after connecting: a refusal shows up as EOF or a TLS alert.
+        Returns True when the server answered our ping."""
+        end = _tak_time.time() + _TAK_PROBE_S
+        got = b''
+        while True:
+            left = end - _tak_time.time()
+            if left <= 0:
+                break
+            ready = getattr(sock, 'pending', lambda: 0)() > 0
+            if not ready:
+                r, _w, _x = _tak_select.select([sock], [], [], min(0.1, left))
+                ready = bool(r)
+            if not ready:
+                continue
+            sock.setblocking(False)
+            try:
+                data = sock.recv(65536)
+            except (_tak_ssl.SSLWantReadError, BlockingIOError):
+                continue
+            except (_tak_ssl.SSLEOFError, _tak_ssl.SSLZeroReturnError, ConnectionResetError, BrokenPipeError):
+                raise self._closed_early(cfg, proto)
+            except Exception as e:
+                raise self._classify(e, cfg['host'], cfg['port'], 'probe')
+            finally:
+                sock.settimeout(_TAK_SEND_TIMEOUT)
+            if not data:
+                raise self._closed_early(cfg, proto)
+            got += data
+            if b't-x-c-t-r' in got:
+                return True
+            if len(got) > 65536:
+                got = got[-64:]
+        return b't-x-c-t-r' in got
+
+    def _known_good(self):
+        # a server that has worked before and now cuts us off is most likely
+        # restarting (a port forwarder accepts, then drops, while it boots)
+        return self._cur in self._good
+
+    def _closed_early(self, cfg, proto):
+        if self._known_good():
+            return TakFail('retrying', 'the server closed the link right after connecting (restarting?)'
+                           + (' or check the username and password' if cfg['username'] else ''))
+        if cfg['username']:
+            return TakFail('error', 'the server closed the link right after login: check the username and password')
+        if proto == 'tls':
+            return TakFail('error', 'the server closed the link after the TLS handshake: it did not accept our certificate, or it wants a username and password')
+        return TakFail('error', 'the server closed the link at once: this port wants a username and password, or it is a TLS port')
+
+    def _tls_context(self, cfg):
+        key = (cfg['verify'], cfg['cert_password'], cfg['truststore_password'],
+               self._sig('client'), self._sig('truststore'))
+        if self._ctx is not None and self._ctx_key == key:
+            return self._ctx
+        if self._sig('client') is None:
+            raise TakFail('error', 'no client certificate: upload the .p12 from the TAK server')
+        client = tak_read_client_p12(self._read('client'), cfg['cert_password'], self.cert_dir)
+        ctx = _tak_ssl.SSLContext(_tak_ssl.PROTOCOL_TLS_CLIENT)
+        try:
+            ctx.minimum_version = _tak_ssl.TLSVersion.TLSv1_2
+        except Exception:
+            pass
+        ctx.check_hostname = False   # TAK server certs are CN=takserver, not the host name
+        cas = list(client['cas'])
+        if self._sig('truststore') is not None:
+            _k, pems, _s = tak_read_truststore(self._read('truststore'), cfg['truststore_password'], self.cert_dir)
+            cas.extend(pems)
+        if cfg['verify']:
+            if not cas:
+                raise TakFail('error', 'nothing to check the server against: the .p12 carries no CA, so upload the server truststore or turn off the server check')
+            ctx.verify_mode = _tak_ssl.CERT_REQUIRED
+            ctx.verify_flags |= getattr(_tak_ssl, 'VERIFY_X509_PARTIAL_CHAIN', 0)
+            try:
+                ctx.load_verify_locations(cadata='\n'.join(c.strip() for c in cas) + '\n')
+            except Exception as e:
+                raise TakFail('error', 'the CA certificates could not be loaded: %s' % e)
+        else:
+            ctx.verify_mode = _tak_ssl.CERT_NONE
+        fd, path = _tak_tempfile.mkstemp(prefix='.tak-', suffix='.pem', dir=self.cert_dir)
+        try:
+            with _tak_os.fdopen(fd, 'wb') as f:
+                f.write(b'\n'.join(b.strip() for b in [client['key'], client['cert']] + list(client['chain'])) + b'\n')
+            ctx.load_cert_chain(path)
+        except Exception as e:
+            raise TakFail('error', 'the client certificate could not be used: %s' % e)
+        finally:
+            try:
+                _tak_os.unlink(path)
+            except OSError:
+                pass
+        self._ctx, self._ctx_key = ctx, key
+        self._ctx_meta = client['info']
+        return ctx
+
+    def _tls_info(self, tls, cfg):
+        info = {'version': tls.version(), 'cipher': (tls.cipher() or ('',))[0],
+                'verified': bool(cfg['verify']), 'client': '', 'client_expires': None, 'peer': ''}
+        meta = self._ctx_meta or {}
+        info['client'] = meta.get('subject', '')
+        info['client_expires'] = meta.get('expires')
+        try:
+            der = tls.getpeercert(binary_form=True)
+            if der:
+                info['peer'] = _tak_pem_info(_tak_ssl.DER_cert_to_PEM_cert(der)).get('subject', '')
+        except Exception:
+            pass
+        return info
+
+    def _classify(self, e, host, port, phase):
+        hp = '%s:%s' % (host, port)
+        if isinstance(e, TakFail):
+            return e
+        if isinstance(e, _tak_ssl.SSLCertVerificationError):
+            msg = getattr(e, 'verify_message', '') or 'verify failed'
+            return TakFail('error', 'the server certificate is not signed by a CA we trust (%s)' % msg)
+        if isinstance(e, _tak_ssl.SSLError):
+            r = (getattr(e, 'reason', '') or str(e)).upper()
+            if any(k in r for k in ('UNKNOWN_CA', 'BAD_CERTIFICATE', 'CERTIFICATE_REQUIRED', 'CERTIFICATE_UNKNOWN',
+                                    'CERTIFICATE_EXPIRED', 'CERTIFICATE_REVOKED', 'ACCESS_DENIED', 'UNSUPPORTED_CERTIFICATE')):
+                exp = (self._ctx_meta or {}).get('expired')
+                return TakFail('error', 'the server did not accept our certificate' + (' (it has expired)' if exp else ''))
+            if 'INTERNAL_ERROR' in r and phase in ('handshake', 'probe'):
+                # TAK (Java) answers a client certificate it cannot verify with internal_error
+                return TakFail('error', 'the server did not accept our certificate (TLS alert: internal error)')
+            if 'WRONG_VERSION_NUMBER' in r or 'UNKNOWN_PROTOCOL' in r or 'RECORD_LAYER' in r or 'PACKET_LENGTH' in r:
+                return TakFail('error', '%s does not speak TLS: is it the TCP port?' % hp)
+            if isinstance(e, _tak_ssl.SSLEOFError) or 'EOF' in r:
+                if phase == 'handshake' and self._known_good():
+                    return TakFail('retrying', 'the TLS handshake was cut off (the server may be restarting)')
+                if phase == 'handshake':
+                    return TakFail('error', 'the server closed the link during the TLS handshake: is %s a TLS port, and does it accept our certificate?' % hp)
+                return TakFail('retrying', 'the server closed the link')
+            return TakFail('error', 'TLS failed: %s' % (getattr(e, 'reason', None) or e))
+        if isinstance(e, (_tak_socket.timeout, TimeoutError)):
+            if phase == 'connect':
+                return TakFail('retrying', 'timed out connecting to %s' % hp)
+            if phase == 'handshake':
+                return TakFail('retrying', 'timed out in the TLS handshake with %s' % hp)
+            return TakFail('retrying', 'the server stopped answering')
+        if isinstance(e, ConnectionRefusedError):
+            return TakFail('retrying', 'connection refused by %s' % hp)
+        if isinstance(e, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            if phase == 'handshake' and self._known_good():
+                return TakFail('retrying', 'the TLS handshake was cut off (the server may be restarting)')
+            if phase == 'handshake':
+                return TakFail('error', 'the server dropped the TLS handshake: is %s a TLS port, and does it accept our certificate?' % hp)
+            return TakFail('retrying', 'the server dropped the link')
+        if isinstance(e, OSError):
+            no = e.errno
+            if no == _tak_errno.EHOSTUNREACH:
+                return TakFail('retrying', 'no route to %s' % host)
+            if no == _tak_errno.ENETUNREACH:
+                return TakFail('retrying', 'the network is unreachable')
+            if no == getattr(_tak_errno, 'EHOSTDOWN', -1):
+                return TakFail('retrying', '%s is down' % host)
+            if no in (getattr(_tak_errno, 'EADDRNOTAVAIL', -1),):
+                return TakFail('error', 'cannot reach %s from here' % hp)
+            return TakFail('retrying', '%s: %s' % (hp, e.strerror or e))
+        return TakFail('retrying', 'could not connect to %s: %s' % (hp, e))
+
+    def _service_rx(self):
+        """Drain what the server sends; notice EOF, alerts and silence.
+        Returns False when the link was dropped."""
+        sock = self._sock
+        now = _tak_time.time()
+        udp = sock.type == _tak_socket.SOCK_DGRAM
+        for _ in range(64):
+            ready = getattr(sock, 'pending', lambda: 0)() > 0
+            if not ready:
+                try:
+                    r, _w, _x = _tak_select.select([sock], [], [], 0)
+                except (OSError, ValueError) as e:
+                    self._drop('retrying', 'the link failed: %s' % e)
+                    return False
+                ready = bool(r)
+            if not ready:
+                break
+            if not udp:
+                sock.setblocking(False)
+            try:
+                data = sock.recv(65536)
+            except (_tak_ssl.SSLWantReadError, BlockingIOError, InterruptedError):
+                break
+            except ConnectionRefusedError:
+                cfg = self._st
+                self._drop('retrying', 'nothing is listening on UDP %s:%s (port unreachable)' % (cfg.get('host'), cfg.get('port')))
+                return False
+            except Exception as e:
+                f = self._classify(e, self._st.get('host'), self._st.get('port'), 'rx')
+                self._drop(f.kind, f.reason if f.kind == 'error' else 'lost the link: ' + f.reason)
+                return False
+            finally:
+                if not udp and self._sock is not None:
+                    try:
+                        sock.settimeout(_TAK_SEND_TIMEOUT)
+                    except Exception:
+                        pass
+            if not data:
+                if udp:
+                    break
+                self._drop('retrying', 'the server closed the link')
+                return False
+            self._last_rx = now
+            self._ping_wait = None   # the server is there
+            hay = self._rx_tail + data
+            if b't-x-c-t-r' in hay and not self._ping_ok:
+                self._ping_ok = True
+                self._set(ping=True)
+            self._rx_tail = data[-16:]
+        if not udp and self._ping_ok and self._ping_wait is not None and now - self._ping_wait > _TAK_PONG_WAIT:
+            self._drop('retrying', 'no answer from the server for %d s' % (now - self._ping_wait))
+            return False
+        return True
+
+    def _maybe_ping(self, extra, now):
+        if self._sock is None or self._sock.type == _tak_socket.SOCK_DGRAM:
+            return
+        # TAK's publish-only tcp input never answers; stcp and tls do, and
+        # only a server that has answered is held to the silence limit.
+        if now - self._last_ping >= _TAK_PING_EVERY:
+            self._last_ping = now
+            if self._ping_wait is None:
+                self._ping_wait = now
+            self._send([self._ping_bytes(extra)], count=False)
+
+    def _send(self, events, count=True):
+        sock = self._sock
+        if sock is None or not events:
+            return False
+        try:
+            if sock.type == _tak_socket.SOCK_DGRAM:
+                for i, e in enumerate(events):
+                    if i:
+                        _tak_time.sleep(_TAK_UDP_GAP)
+                    try:
+                        sock.send(e)
+                    except (BlockingIOError, InterruptedError):
+                        pass   # buffer full: this one is lost, UDP may lose any
+            else:
+                buf = []
+                size = 0
+                for e in events:
+                    buf.append(e)
+                    size += len(e)
+                    if size >= _TAK_BATCH:
+                        sock.sendall(b''.join(buf))
+                        buf, size = [], 0
+                if buf:
+                    sock.sendall(b''.join(buf))
+        except ConnectionRefusedError:
+            if sock.type == _tak_socket.SOCK_DGRAM:
+                self._drop('retrying', 'nothing is listening on UDP %s:%s (port unreachable)' % (self._st.get('host'), self._st.get('port')))
+            else:
+                self._drop('retrying', 'the server refused the link')
+            return False
+        except Exception as e:
+            f = self._classify(e, self._st.get('host'), self._st.get('port'), 'send')
+            self._drop(f.kind, f.reason if f.kind == 'error' else 'lost the link: ' + f.reason)
+            return False
+        if count:
+            with self._st_lock:
+                self._st['sent'] = self._st.get('sent', 0) + len(events)
+                self._st['last_sent'] = _tak_time.time()
+        return True
+
+
+# ----------------------
+# TAK connector: settings, certificates, status
+# ----------------------
+TAK_CONFIG_FILE = os.path.join(BASE_DIR, 'tak_config.json')
+TAK_CERT_DIR = os.path.join(BASE_DIR, 'tak_certs')
+
+
+def _tak_meta(mac):
+    """(alias, tag) of a drone. ALIASES is keyed by the MAC as the UI sent it,
+    DRONE_TAGS by the lowercase MAC."""
+    m = str(mac or '')
+    alias = ALIASES.get(m) or ALIASES.get(m.lower()) or ALIASES.get(m.upper()) or ''
+    return alias, DRONE_TAGS.get(m.lower(), '')
+
+
+tak_connector = TakConnector(TAK_CONFIG_FILE, TAK_CERT_DIR,
+                             snapshot_fn=lambda: list(tracked_pairs.values()),
+                             meta_fn=_tak_meta, logger=logger)
+
+
+@app.route('/api/tak', methods=['GET'])
+def api_tak_get():
+    """The connector's settings (no secrets) and its live status."""
+    return jsonify({'config': tak_connector.public_config(), 'status': tak_connector.status()})
+
+
+@app.route('/api/tak', methods=['POST'])
+def api_tak_set():
+    """Change settings. Keys left out keep their value; a password key sent
+    as '' clears it; an unknown key is ignored."""
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'ok': False, 'errors': ['send the settings as a JSON object']}), 400
+    ok, errors = tak_connector.configure(data)
+    return jsonify({'ok': ok, 'errors': errors, 'config': tak_connector.public_config(),
+                    'status': tak_connector.status()}), (200 if ok else 400)
+
+
+@app.route('/api/tak/cert', methods=['POST'])
+def api_tak_cert_upload():
+    """multipart: file, kind=client|truststore, password (left out: the saved one)."""
+    kind = (request.form.get('kind') or 'client').strip().lower()
+    f = request.files.get('file')
+    if f is None:
+        return jsonify({'ok': False, 'error': 'no file in the upload'}), 400
+    data = f.read(_TAK_CERT_MAX + 1)   # set_cert refuses anything bigger
+    password = request.form.get('password')
+    if password is None:
+        saved = tak_connector.config()
+        password = saved['cert_password'] if kind == 'client' else (saved['truststore_password'] or saved['cert_password'])
+    ok, info = tak_connector.set_cert(kind, f.filename, data, password)
+    if not ok:
+        return jsonify({'ok': False, 'error': info}), 400
+    return jsonify({'ok': True, 'info': info, 'config': tak_connector.public_config(),
+                    'status': tak_connector.status()})
+
+
+@app.route('/api/tak/cert/<kind>', methods=['DELETE'])
+def api_tak_cert_delete(kind):
+    if not tak_connector.delete_cert(kind):
+        return jsonify({'ok': False, 'error': 'kind must be client or truststore'}), 400
+    return jsonify({'ok': True, 'config': tak_connector.public_config(), 'status': tak_connector.status()})
+
+
+# ----------------------
 # Detection Update & CSV Logging
 # ----------------------
 def update_detection(detection):
     mac = detection.get("mac")
     if not mac:
         return
+    # Drop DroneScout Bridge idle self-advertisements (placeholder relay with
+    # zeroed GPS) — they are not drones. Seen as "DroneScout Bridge" (raw BLE)
+    # and "DroneScoutBridge" (node firmware strips the space).
+    bid = detection.get("basic_id")
+    if bid and bid.replace(" ", "").lower() == "dronescoutbridge":
+        return
+    # Dedup across receive paths: if this basic_id is already tracked under a
+    # different MAC (e.g. direct node detection vs DroneScout Bridge relay),
+    # fold this detection into the existing entry instead of creating a dupe.
+    if bid:
+        owner = basic_id_index.get(bid)
+        if owner and owner != mac and owner in tracked_pairs:
+            logger.info(f"Merging {mac} into existing track {owner} (same basic_id {bid})")
+            detection["mac"] = mac = owner
+        else:
+            basic_id_index[bid] = mac
     prev = tracked_pairs.get(mac)
 
     # Retrieve new drone coordinates from the detection
@@ -1723,19 +3711,35 @@ def update_detection(detection):
                     detection["faa_data"] = FAA_CACHE[key]
             # Fallback: any cached FAA data for this mac (regardless of basic_id)
             if "faa_data" not in detection:
-                for (c_mac, _), faa_data in FAA_CACHE.items():
+                for (c_mac, _), faa_data in list(FAA_CACHE.items()):
                     if c_mac == mac:
                         detection["faa_data"] = faa_data
                         break
             # Fallback: last known FAA data in tracked_pairs
             if "faa_data" not in detection and mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
                 detection["faa_data"] = tracked_pairs[mac]["faa_data"]
+            # A serial with no FAA record yet is looked up in the background; one
+            # found before gets its record here, with no lookup
+            faa_auto.offer(mac, detection)
             # Always cache FAA data by MAC and current basic_id for future lookups
             if "faa_data" in detection:
                 write_to_faa_cache(mac, detection.get("basic_id", ""), detection["faa_data"])
         
+        # Merge instead of stomp: coord-less re-reports (DroneScout Bridge
+        # BasicID-only relay posts arrive at 1Hz) must not wipe coordinates the
+        # node already established - that created "no GPS, never expires"
+        # zombies and made every subsequent real frame look like a fresh
+        # detection.
+        prev_det = tracked_pairs.get(mac)
+        if prev_det:
+            for k in ('drone_lat', 'drone_long', 'drone_altitude',
+                      'pilot_lat', 'pilot_long'):
+                if not detection.get(k) and prev_det.get(k):
+                    detection[k] = prev_det[k]
+
         # Forward this no-GPS detection to the client
         tracked_pairs[mac] = detection
+        tak_connector.offer(detection)   # never blocks: a bounded queue
         detection_history.append(detection.copy())
         
         # Backend webhook logic for all detections (GPS and no-GPS) - enabled
@@ -1820,18 +3824,22 @@ def update_detection(detection):
                 detection["faa_data"] = FAA_CACHE[key]
         # Fallback: any cached FAA data for this mac
         if "faa_data" not in detection:
-            for (c_mac, _), faa_data in FAA_CACHE.items():
+            for (c_mac, _), faa_data in list(FAA_CACHE.items()):
                 if c_mac == mac:
                     detection["faa_data"] = faa_data
                     break
         # Fallback: last known FAA data in tracked_pairs
         if "faa_data" not in detection and mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
             detection["faa_data"] = tracked_pairs[mac]["faa_data"]
+        # A serial with no FAA record yet is looked up in the background; one
+        # found before gets its record here, with no lookup
+        faa_auto.offer(mac, detection)
         # Always cache FAA data by MAC and current basic_id for fallback
         if "faa_data" in detection:
             write_to_faa_cache(mac, detection.get("basic_id", ""), detection["faa_data"])
 
     tracked_pairs[mac] = detection
+    tak_connector.offer(detection)   # never blocks: a bounded queue
 
     # Geofence transition check — emits enter/exit alerts via socket + webhook
     try:
@@ -1895,12 +3903,13 @@ def update_detection(detection):
     generate_cumulative_kml_throttled()
     generate_kml_throttled()
     
-    # Emit real-time updates via WebSocket (if available in this context)
+    # Emit real-time updates via WebSocket (if available in this context).
+    # The cumulative log and the FAA cache are not sent per detection: they grow
+    # with the history (the log is the whole CSV, re-read) and the page does not
+    # use them; the broadcaster sends both on connect and every 30 s.
     try:
         emit_detections()
         emit_paths()
-        emit_cumulative_log()
-        emit_faa_cache()
     except NameError:
         # Emit functions not available in this thread context
         pass
@@ -1982,7 +3991,13 @@ def should_trigger_webhook_earliest(detection, mac):
     # Update tracking state
     if should_trigger:
         backend_seen_drones.add(mac)
-    backend_previous_active[mac] = active_now
+    # Only GPS-bearing frames may change the active state: a coord-less frame
+    # computes active_now=False and would reset was_active, making the next
+    # real frame re-fire the detection alert on every cycle (bridge relay
+    # flap). Keep the last GPS-derived state; age-out still happens naturally
+    # because active_now tests last_update freshness.
+    if valid_drone:
+        backend_previous_active[mac] = active_now
     
     # Clean up no-GPS alerts when transmission stops
     if not has_recent_transmission:
@@ -3568,6 +5583,7 @@ def _simulate_drone_flight(mac: str, center_lat: float, center_lon: float,
         }
         try:
             tracked_pairs[mac] = det
+            tak_connector.offer(det)   # goes to TAK marked SIM
             try:
                 check_drone_against_fences(mac, d_lat, d_lon)
             except Exception:
@@ -4195,7 +6211,7 @@ def api_query_faa():
     faa_result = query_remote_id(session, remote_id)
     # Fallback: if FAA API query failed or returned no records, try cached FAA data by MAC
     if not faa_result or not faa_result.get("data", {}).get("items"):
-        for (c_mac, _), cached_data in FAA_CACHE.items():
+        for (c_mac, _), cached_data in list(FAA_CACHE.items()):
             if c_mac == mac:
                 faa_result = cached_data
                 break
@@ -4239,10 +6255,10 @@ def api_get_faa(identifier):
         if det.get('basic_id') == identifier and 'faa_data' in det:
             return jsonify({'status': 'ok', 'faa_data': det['faa_data']})
     # Fallback: search cached FAA data by remote_id first, then by MAC
-    for (c_mac, c_rid), faa_data in     FAA_CACHE.items():
+    for (c_mac, c_rid), faa_data in list(FAA_CACHE.items()):
         if c_rid == identifier:
             return jsonify({'status': 'ok', 'faa_data': faa_data})
-    for (c_mac, c_rid), faa_data in FAA_CACHE.items():
+    for (c_mac, c_rid), faa_data in list(FAA_CACHE.items()):
         if c_mac == identifier:
             return jsonify({'status': 'ok', 'faa_data': faa_data})
     return jsonify({'status': 'error', 'message': 'No FAA data found for this identifier'}), 404
@@ -4261,152 +6277,171 @@ PORT_SELECTION_PAGE = '''
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Select USB Serial Ports</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
   <link href="/static/fonts/orbitron.css" rel="stylesheet">
+  <link href="/static/fonts/inter-jetbrainsmono.css" rel="stylesheet">
   <style>
-    /* Highlight non-GPS drones in inactive list */
-    #inactivePlaceholder .drone-item.no-gps {
-      border: 2px solid lightblue !important;
-      background-color: transparent !important;
-      color: inherit !important;
+    /* First-run setup in the OUI SPY RECON look: the same tokens as the map */
+    :root {
+      --bg: #07090c; --panel: #0e1116; --panel2: #151a21; --line: #1a2028; --line2: #262e39; --line3: #343d4a;
+      --text: #e8edf3; --soft: #b4c0ce; --muted: #7d8999; --faint: #55606f;
+      --accent: #2ee6d6; --sky: #5cc8ff; --violet: #a78bfa; --hot: #ff3da8; --green: #3dff9a;
+      --silk: #8c939c; --silk-line: #2a3038; --silk-mark: #59616b;
+      --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color-scheme: dark;
     }
-    .leaflet-tile {
-      border: none !important;
-      box-shadow: none !important;
-      background-color: transparent !important;
-      image-rendering: auto;
-      will-change: transform;
-    }
-    .leaflet-container {
-      background-color: black !important;
-    }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
     body {
-      margin: 0;
-      padding: 0;
-      font-family: 'Orbitron', monospace;
-      background-color: #0a001f;
-      color: #0ff;
-      text-shadow: 0 0 8px #0ff, 0 0 16px #f0f;
+      font: 400 14px/1.45 var(--sans);
+      -webkit-font-smoothing: antialiased;
       text-align: center;
-      zoom: 1.15;
+      padding: 18px 16px 28px;
     }
-    pre { font-size: 16px; margin: 10px auto; }
-    form {
-      display: inline-block;
-      text-align: center;
-    }
-    li { list-style: none; margin: 10px 0; }
-    select {
-      background-color: #333;
-      color: lime;
-      border: none;
-      padding: 3px;
-      margin-bottom: 5px;
-      box-shadow: 0 0 4px #0ff;
-    }
-    label { font-size: 18px; }
-    button[type="submit"] {
-      display: block;
-      margin: 1em auto 5px auto;
-      padding: 5px;
-      border: 1px solid lime;
-      background-color: #333;
-      color: lime;
-      font-family: 'Orbitron', monospace;
-      cursor: pointer;
-      outline: none;
-      border-radius: 10px;
-      box-shadow: 0 0 8px #f0f, 0 0 16px #0ff;
-    }
-    pre.logo-art {
-      display: inline-block;
-      margin: 0 auto;
-      margin-bottom: 10px;
-    }
+    pre { margin: 0 auto; }
     pre.ascii-art {
-      margin: 0;
-      padding: 5px;
-      background: linear-gradient(to right, blue, purple, pink, lime, green);
+      display: block;
+      max-width: 100%;
+      overflow: hidden;
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 11px;
+      /* the 91-column logo always fits the screen (a phone shrinks it) */
+      font-size: min(11px, calc((100vw - 34px) / 56));
+      line-height: 1.15;
+      background: linear-gradient(to right, var(--accent), var(--sky), var(--violet), var(--hot));
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
-      font-family: monospace;
-      font-size: 90%;
+      opacity: 0.9;
     }
-    h1 {
-      font-size: 18px;
-      font-family: 'Orbitron', monospace;
-      margin: 1em 0 4px 0;
+    pre.logo-art { display: inline-block; margin: 6px auto 14px; }
+    .setup { max-width: 560px; margin: 0 auto; text-align: left; }
+    .setup-head { text-align: center; margin-bottom: 18px; }
+    .eyebrow, legend, label.field, .field-label {
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--silk);
     }
-    /* Rounded toggle switch styling */
-    .switch {
-      position: relative; display: inline-block; width: 40px; height: 20px;
+    h1 { margin: 6px 0 6px; font: 600 22px/1.2 var(--sans); letter-spacing: -0.02em; color: var(--text); }
+    .note { font: 400 12.5px/1.45 var(--sans); color: var(--muted); }
+    form { display: block; text-align: left; }
+    fieldset {
+      position: relative;
+      margin: 0 0 14px;
+      padding: 12px 14px 14px;
+      border: 1px solid var(--silk-line);
+      border-radius: 3px;
+      background: rgba(14, 17, 22, 0.6);
     }
-    .switch input {
-      opacity: 0; width: 0; height: 0;
+    legend { padding: 0 8px; margin-left: -4px; }
+    fieldset .note { margin: 0 0 10px; }
+    label.field { display: block; margin: 10px 0 5px; }
+    select, input[type="text"], input[type="number"] {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+      background-color: var(--panel2);
+      color: var(--text);
+      border: 1px solid var(--line2);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: 400 13px/1.3 var(--sans);
+      outline: none;
+      caret-color: var(--accent);
     }
-    .switch .slider {
-      position: absolute;
-      cursor: pointer;
-      top: 0; left: 0; right: 0; bottom: 0;
-      background-color: #555;
-      transition: .4s;
-      border-radius: 20px;
+    select:focus, input[type="text"]:focus, input[type="number"]:focus { border-color: var(--accent); }
+    input::placeholder { color: var(--faint); }
+    select {
+      -webkit-appearance: none;
+      appearance: none;
+      padding-right: 30px;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238c939c' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 11px center;
     }
-    .switch .slider:before {
-      position: absolute;
-      content: "";
-      height: 16px; width: 16px;
-      left: 2px; top: 2px;
-      background-color: lime;
-      border: 1px solid #9B30FF;
-      transition: .4s;
-      border-radius: 50%;
+    select option { background: var(--panel); color: var(--text); }
+    .check { display: flex; align-items: center; gap: 9px; font: 400 13px/1.35 var(--sans); color: var(--soft); cursor: pointer; }
+    input[type="checkbox"] {
+      -webkit-appearance: none; appearance: none; width: 15px; height: 15px; margin: 0; flex: 0 0 auto;
+      border: 1px solid var(--line3); border-radius: 2px; background: var(--bg);
+      display: inline-grid; place-content: center; cursor: pointer;
     }
-    .switch input:checked + .slider {
-      background-color: lime;
+    input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+    input[type="checkbox"]:checked::after {
+      content: ""; width: 7px; height: 4px; border-left: 2px solid var(--bg); border-bottom: 2px solid var(--bg);
+      transform: translateY(-1px) rotate(-45deg);
     }
-    .switch input:checked + .slider:before {
-      transform: translateX(20px);
+    .seg { display: flex; margin-top: 5px; border: 1px solid var(--silk-line); border-radius: 3px; overflow: hidden; background: rgba(7, 9, 12, 0.72); }
+    .seg label {
+      flex: 1; text-align: center; padding: 9px 6px; cursor: pointer;
+      font: 600 10.5px/1.1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--silk);
+      border-bottom: 2px solid transparent;
+      transition: color .12s, background .12s, border-color .12s;
     }
+    .seg label + label { border-left: 1px solid var(--silk-line); }
+    .seg label:hover { color: var(--soft); }
+    .seg label.on { color: var(--accent); background: rgba(46, 230, 214, 0.08); border-bottom-color: var(--accent); }
+    .row { display: flex; gap: 8px; }
+    .row > div { min-width: 0; }
+    .actions { display: flex; gap: 8px; margin: 18px 0 8px; }
+    .actions a, .actions button {
+      display: flex; align-items: center; justify-content: center;
+      padding: 11px 12px; border-radius: 3px; cursor: pointer; text-decoration: none;
+      font: 600 13px/1.2 var(--sans); letter-spacing: 0.02em;
+      transition: background .12s, border-color .12s, color .12s;
+    }
+    .actions a { flex: 1; color: var(--soft); border: 1px solid var(--silk-line); background: rgba(7, 9, 12, 0.6); }
+    .actions a:hover { color: var(--text); border-color: var(--line3); }
+    .actions button { flex: 2; color: #04110f; background: var(--accent); border: 1px solid var(--accent); }
+    .actions button:hover { background: #5cf0e3; border-color: #5cf0e3; }
+    .bottom-art { margin-top: 22px; }
   </style>
 </head>
 <body>
   <pre class="ascii-art logo-art">{{ logo_ascii }}</pre>
-  <h1>SETUP · Mesh Mapper</h1>
-  <div style="max-width:560px; margin:0 auto; text-align:left; padding:0 16px;">
-    <p style="font-size:13px; color:#88ddff; text-align:center;">All settings save to disk and are mirrored in the in-UI Settings panel. Skip any section and configure later.</p>
+  <div class="setup">
+    <div class="setup-head">
+      <div class="eyebrow">First run</div>
+      <h1>SETUP · Mesh Mapper</h1>
+      <div class="note">All settings save to disk and are mirrored in the in-UI Settings panel. Skip any section and configure later.</div>
+    </div>
 
-    <form method="POST" action="/select_ports" style="display:block; text-align:left;">
+    <form method="POST" action="/select_ports">
       <!-- ============ USB · DRONE RECEIVERS ============ -->
-      <fieldset style="border:1px solid lime; padding:8px 12px; margin-bottom:14px; border-radius:6px;">
-        <legend style="color:#aaffaa; padding:0 6px; font-size:14px;">USB · DRONE RECEIVERS</legend>
-        <div style="font-size:12px; color:#779977; margin-bottom:6px;">ESP32 boards forwarding Remote-ID detections over serial. Up to 3.</div>
-        <label style="font-size:14px;">Port 1:</label><br>
-        <select id="port1" name="port1" style="width:100%;"><option value="">--None--</option>{% for port in ports %}<option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>{% endfor %}</select><br>
-        <label style="font-size:14px;">Port 2:</label><br>
-        <select id="port2" name="port2" style="width:100%;"><option value="">--None--</option>{% for port in ports %}<option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>{% endfor %}</select><br>
-        <label style="font-size:14px;">Port 3:</label><br>
-        <select id="port3" name="port3" style="width:100%;"><option value="">--None--</option>{% for port in ports %}<option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>{% endfor %}</select>
+      <fieldset>
+        <legend>USB · Drone receivers</legend>
+        <div class="note">ESP32 boards forwarding Remote ID detections over serial. Up to 3.</div>
+        <label class="field" for="port1">Port 1</label>
+        <select id="port1" name="port1"><option value="">--None--</option>{% for port in ports %}<option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>{% endfor %}</select>
+        <label class="field" for="port2">Port 2</label>
+        <select id="port2" name="port2"><option value="">--None--</option>{% for port in ports %}<option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>{% endfor %}</select>
+        <label class="field" for="port3">Port 3</label>
+        <select id="port3" name="port3"><option value="">--None--</option>{% for port in ports %}<option value="{{ port.device }}">{{ port.device }} - {{ port.description }}</option>{% endfor %}</select>
       </fieldset>
 
       <!-- ============ ADS-B · AIR TRAFFIC ============ -->
-      <fieldset style="border:1px solid #00aaff; padding:8px 12px; margin-bottom:14px; border-radius:6px;">
-        <legend style="color:#aaccff; padding:0 6px; font-size:14px;">ADS-B · AIR TRAFFIC</legend>
-        <div style="font-size:12px; color:#5588aa; margin-bottom:6px;">Network feed or local SDR (HackRF / RTL-SDR / AirSpy via dump1090, readsb, or Beast).</div>
-        <label style="display:flex; align-items:center; gap:8px; font-size:14px; color:#aaccff;">
+      <fieldset>
+        <legend>ADS-B · Air traffic</legend>
+        <div class="note">Network feed or local SDR (HackRF / RTL-SDR / AirSpy via dump1090, readsb, or Beast).</div>
+        <label class="check">
           <input type="checkbox" name="adsb_enabled" id="adsbEnabledChk" value="1">
           <span>Enable ADS-B layer at startup</span>
         </label>
-        <div style="margin-top:8px;">
-          <label style="font-size:13px; color:#88aaff;">Mode:</label>
-          <div style="display:flex; gap:0; margin-top:4px; border:1px solid #00aaff; border-radius:3px; overflow:hidden;">
-            <label style="flex:1; text-align:center; padding:5px; cursor:pointer; background:#001a2a;"><input type="radio" name="adsb_mode" value="online" checked style="display:none;" onchange="onAdsbModeChange()"><span id="modeLabelOnline">⌒ ONLINE</span></label>
-            <label style="flex:1; text-align:center; padding:5px; cursor:pointer; background:#001a2a; border-left:1px solid #00aaff;"><input type="radio" name="adsb_mode" value="local" style="display:none;" onchange="onAdsbModeChange()"><span id="modeLabelLocal">⎘ LOCAL SDR</span></label>
+        <div style="margin-top:10px;">
+          <span class="field-label">Mode</span>
+          <div class="seg">
+            <label class="on"><input type="radio" name="adsb_mode" value="online" checked style="display:none;" onchange="onAdsbModeChange()"><span id="modeLabelOnline">ONLINE</span></label>
+            <label><input type="radio" name="adsb_mode" value="local" style="display:none;" onchange="onAdsbModeChange()"><span id="modeLabelLocal">LOCAL SDR</span></label>
           </div>
         </div>
-        <div id="setupOnlineFields" style="margin-top:8px;">
-          <label style="font-size:13px; color:#88aaff;">Network source:</label>
-          <select name="adsb_online_source" id="setupOnlineSource" style="width:100%;">
+        <div id="setupOnlineFields">
+          <label class="field" for="setupOnlineSource">Network source</label>
+          <select name="adsb_online_source" id="setupOnlineSource">
             <option value="adsblol">adsb.lol (free, no key)</option>
             <option value="adsbfi">adsb.fi (free, no key)</option>
             <option value="airplaneslive">airplanes.live (free, no key)</option>
@@ -4414,25 +6449,25 @@ PORT_SELECTION_PAGE = '''
             <option value="adsbexchange">ADS-B Exchange (RapidAPI key)</option>
           </select>
         </div>
-        <div id="setupLocalFields" style="display:none; margin-top:8px;">
-          <label style="font-size:13px; color:#88aaff;">Local mode:</label>
-          <select name="adsb_local_mode" id="setupLocalMode" style="width:100%;" onchange="onSetupLocalModeChange()">
+        <div id="setupLocalFields" style="display:none;">
+          <label class="field" for="setupLocalMode">Local mode</label>
+          <select name="adsb_local_mode" id="setupLocalMode" onchange="onSetupLocalModeChange()">
             <option value="dump1090">dump1090 / readsb / tar1090 / PiAware (HTTP JSON)</option>
             <option value="beast">Beast TCP raw feed (pyModeS)</option>
           </select>
-          <div id="setupDump1090Fields" style="margin-top:6px;">
-            <label style="font-size:13px; color:#88aaff;">JSON URL:</label>
-            <input type="text" name="adsb_dump1090_url" id="setupDump1090Url" value="http://localhost:8080/data/aircraft.json" style="width:100%; background:#222; color:#aaeeff; border:1px solid #00aaff; padding:3px;">
+          <div id="setupDump1090Fields">
+            <label class="field" for="setupDump1090Url">JSON URL</label>
+            <input type="text" name="adsb_dump1090_url" id="setupDump1090Url" value="http://localhost:8080/data/aircraft.json" style="font-family:var(--mono); font-size:12.5px;">
           </div>
-          <div id="setupBeastFields" style="display:none; margin-top:6px;">
-            <div style="display:flex; gap:6px;">
+          <div id="setupBeastFields" style="display:none;">
+            <div class="row">
               <div style="flex:2;">
-                <label style="font-size:13px; color:#88aaff;">Host:</label>
-                <input type="text" name="adsb_beast_host" id="setupBeastHost" value="localhost" style="width:100%; box-sizing:border-box; background:#222; color:#aaeeff; border:1px solid #00aaff; padding:3px;">
+                <label class="field" for="setupBeastHost">Host</label>
+                <input type="text" name="adsb_beast_host" id="setupBeastHost" value="localhost" style="font-family:var(--mono); font-size:12.5px;">
               </div>
               <div style="flex:1;">
-                <label style="font-size:13px; color:#88aaff;">Port:</label>
-                <input type="number" name="adsb_beast_port" id="setupBeastPort" value="30005" min="1" max="65535" style="width:100%; box-sizing:border-box; background:#222; color:#aaeeff; border:1px solid #00aaff; padding:3px;">
+                <label class="field" for="setupBeastPort">Port</label>
+                <input type="number" name="adsb_beast_port" id="setupBeastPort" value="30005" min="1" max="65535" style="font-family:var(--mono); font-size:12.5px;">
               </div>
             </div>
           </div>
@@ -4440,11 +6475,11 @@ PORT_SELECTION_PAGE = '''
       </fieldset>
 
       <!-- ============ MAP LAYER ============ -->
-      <fieldset style="border:1px solid #aaffaa; padding:8px 12px; margin-bottom:14px; border-radius:6px;">
-        <legend style="color:#aaffaa; padding:0 6px; font-size:14px;">MAP LAYER</legend>
-        <div style="font-size:12px; color:#779977; margin-bottom:6px;">Default basemap on next page load. Offline-cached layers appear here once you've saved any.</div>
-        <label style="font-size:13px;">Default basemap:</label>
-        <select name="default_basemap" id="setupDefaultBasemap" style="width:100%;">
+      <fieldset>
+        <legend>Map layer</legend>
+        <div class="note">Default basemap on next page load. Offline-cached layers appear here once you've saved any.</div>
+        <label class="field" for="setupDefaultBasemap">Default basemap</label>
+        <select name="default_basemap" id="setupDefaultBasemap">
           <option value="esriWorldImagery">Esri World Imagery (satellite)</option>
           <option value="osmStandard">OSM Standard</option>
           <option value="osmHumanitarian">OSM Humanitarian</option>
@@ -4457,19 +6492,19 @@ PORT_SELECTION_PAGE = '''
       </fieldset>
 
       <!-- ============ WEBHOOK ============ -->
-      <fieldset style="border:1px solid #ff66ff; padding:8px 12px; margin-bottom:14px; border-radius:6px;">
-        <legend style="color:#ff99ff; padding:0 6px; font-size:14px;">WEBHOOK · ALERTS</legend>
-        <div style="font-size:12px; color:#aa77aa; margin-bottom:6px;">Optional. Drone detections + geofence alerts POST to this URL.</div>
-        <input type="text" name="webhook_url" id="webhookUrl" placeholder="https://example.com/webhook" style="width:100%; background:#222; color:#ff99ff; border:1px solid #ff66ff; padding:4px;">
+      <fieldset>
+        <legend>Webhook · Alerts</legend>
+        <div class="note">Optional. Drone detections + geofence alerts POST to this URL.</div>
+        <input type="text" name="webhook_url" id="webhookUrl" placeholder="https://example.com/webhook" style="font-family:var(--mono); font-size:12.5px;">
       </fieldset>
 
-      <div style="display:flex; gap:8px; margin-top:14px; margin-bottom:8px;">
-        <a href="/" style="flex:1; text-align:center; padding:10px; border:1px solid #888; color:#888; background:#222; text-decoration:none; border-radius:6px; font-family:'Orbitron', monospace;">SKIP — TO MAP</a>
-        <button type="submit" id="beginMapping" style="flex:2; padding:10px; border:1px solid lime; background:#333; color:lime; font-family:'Orbitron',monospace; font-size:1.05em; cursor:pointer; border-radius:6px; box-shadow:0 0 8px #f0f, 0 0 16px #0ff;">SAVE &amp; BEGIN MAPPING</button>
+      <div class="actions">
+        <a href="/">SKIP — TO MAP</a>
+        <button type="submit" id="beginMapping">SAVE &amp; BEGIN MAPPING</button>
       </div>
     </form>
   </div>
-  <pre class="ascii-art">{{ bottom_ascii }}</pre>
+  <pre class="ascii-art bottom-art">{{ bottom_ascii }}</pre>
   <script>
     function refreshPortOptions() {
       fetch('/api/ports')
@@ -4507,11 +6542,9 @@ PORT_SELECTION_PAGE = '''
       const m = document.querySelector('input[name="adsb_mode"]:checked').value;
       document.getElementById('setupOnlineFields').style.display = (m === 'online') ? 'block' : 'none';
       document.getElementById('setupLocalFields').style.display  = (m === 'local')  ? 'block' : 'none';
-      // Highlight selected mode pill
-      document.getElementById('modeLabelOnline').style.color = (m === 'online') ? '#fff' : '#aaeeff';
-      document.getElementById('modeLabelLocal').style.color  = (m === 'local')  ? '#fff' : '#aaeeff';
-      document.getElementById('modeLabelOnline').parentElement.style.background = (m === 'online') ? '#003355' : '#001a2a';
-      document.getElementById('modeLabelLocal').parentElement.style.background  = (m === 'local')  ? '#003355' : '#001a2a';
+      // Light the chosen mode
+      document.getElementById('modeLabelOnline').parentElement.classList.toggle('on', m === 'online');
+      document.getElementById('modeLabelLocal').parentElement.classList.toggle('on', m === 'local');
     }
     function onSetupLocalModeChange() {
       const m = document.getElementById('setupLocalMode').value;
@@ -4695,6 +6728,8 @@ HTML_PAGE = '''
   <script src="/static/socketio/socket.io.min.js"></script>
   <link rel="stylesheet" href="/static/leaflet/leaflet.css"/>
   <link href="/static/fonts/orbitron.css" rel="stylesheet">
+  <!-- Inter + JetBrains Mono, the phone app's type, served locally like Orbitron -->
+  <link href="/static/fonts/inter-jetbrainsmono.css" rel="stylesheet">
   <script src="/static/leaflet/leaflet.js"></script>
   <!-- MapLibre GL + Leaflet plugin: lets us render OpenMapTiles vector layers as a Leaflet layer -->
   <link rel="stylesheet" href="/static/maplibre/maplibre-gl.css"/>
@@ -4704,12 +6739,76 @@ HTML_PAGE = '''
   <link rel="stylesheet" href="/static/leaflet-draw/leaflet.draw.css"/>
   <script src="/static/leaflet-draw/leaflet.draw.js"></script>
   <style>
-    /* Hide tile seams on all map layers + buttery-smooth scaling between
-       zoom steps. Bilinear interpolation (the browser default) keeps tiles
-       sharp at native zoom and lerps cleanly during animated zoom; the older
-       `crisp-edges` rule chunked into nearest-neighbor pixels and looked
-       cheap during fractional zoom. */
+    /* ==========================================================================
+       Mesh Mapper in the OUI SPY RECON look (the phone app's theme, on the web).
+       A dark instrument panel: quiet surfaces and hairlines carry the layout;
+       neon is kept for what it means (live, alert, signal, a drone's own color),
+       never for chrome. Inter for words, JetBrains Mono for MACs, IDs, numbers
+       and the printed labels. Both fonts are served from /static/fonts.
+       ========================================================================== */
+    :root {
+      /* ground and surfaces */
+      --bg: #07090c;
+      --panel: #0e1116;
+      --panel2: #151a21;
+      --line: #1a2028;
+      --line2: #262e39;
+      --line3: #343d4a;
+      /* text */
+      --text: #e8edf3;
+      --soft: #b4c0ce;
+      --muted: #7d8999;
+      --faint: #55606f;
+      /* the accent and the meaning colors */
+      --accent: #2ee6d6;
+      --cyan: #38d5ff;
+      --sky: #5cc8ff;
+      --blue: #4da3ff;
+      --bt: #2f7dff;
+      --green: #3dff9a;
+      --lime: #a6f04a;
+      --amber: #ffb547;
+      --orange: #ff9447;
+      --red: #ff4d5e;
+      --hot: #ff3da8;
+      --pink: #ff8ad0;
+      --violet: #a78bfa;
+      --purple: #c4b5fd;
+      /* silkscreen: printed labels, hairlines and the corner marks */
+      --silk: #8c939c;
+      --silk-line: #2a3038;
+      --silk-mark: #59616b;
+      --glass: rgba(9, 11, 15, 0.93);
+      --r: 3px;
+      --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color-scheme: dark;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    ::selection { background: rgba(46, 230, 214, 0.28); color: var(--text); }
+    /* 100dvh keeps the map sized to the visible viewport on mobile browsers
+       with dynamic toolbars (iOS Safari); others use the 100vh fallback. */
+    #map { height: 100vh; height: 100dvh; }
+
+    /* ---- the map ------------------------------------------------------------ */
+    /* No tile seams; bilinear scaling between zoom steps; GPU-composited panes
+       so pan and zoom stay on the compositor thread. */
+    .leaflet-container {
+      background: var(--bg) !important;
+      font-family: var(--sans);
+    }
     .leaflet-tile {
+      display: block;
+      margin: 0;
+      padding: 0;
       border: none !important;
       box-shadow: none !important;
       background-color: transparent !important;
@@ -4717,8 +6816,6 @@ HTML_PAGE = '''
       will-change: transform;
       backface-visibility: hidden;
     }
-    /* GPU-composited panes — keeps pan/zoom on the compositor thread instead
-       of triggering full layout/paint passes. */
     .leaflet-pane,
     .leaflet-tile-container,
     .leaflet-marker-pane,
@@ -4726,588 +6823,636 @@ HTML_PAGE = '''
     .leaflet-overlay-pane {
       will-change: transform;
     }
-    .leaflet-container {
-      background-color: black !important;
+    /* The droneCircle / pilotCircle panes draw on a canvas that spans the whole
+       map above the marker pane; they are decorative, so clicks pass through to
+       the plane and drone markers underneath. */
+    .leaflet-pane.leaflet-droneCircle-pane,
+    .leaflet-pane.leaflet-pilotCircle-pane,
+    .leaflet-droneCircle-pane canvas,
+    .leaflet-pilotCircle-pane canvas {
+      pointer-events: none !important;
     }
-    /* ───── Header toggle ovals (Drones panel ON/OFF, ADS-B panel ON/OFF) ─────
-       Modern iOS-style: thin outlined oval, accent fill when ON, muted when
-       OFF. Each panel sets its own accent via a CSS variable so the drone
-       toggle reads lime and the ADS-B toggle reads cyan. */
+    /* Aircraft markers: the whole 32x32 box is the hit target, pointer cursor
+       everywhere, and the SVG can never be dragged. */
+    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon,
+    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon *,
+    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon svg,
+    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon svg * {
+      pointer-events: auto !important;
+      cursor: pointer !important;
+    }
+    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon svg {
+      -webkit-user-drag: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* Zoom: a printed strip of two keys */
+    .leaflet-control-zoom.leaflet-bar {
+      border: 1px solid var(--silk-line) !important;
+      border-radius: var(--r) !important;
+      background: var(--glass) !important;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5) !important;
+      overflow: hidden;
+    }
+    .leaflet-control-zoom.leaflet-bar a {
+      width: 32px !important;
+      height: 32px !important;
+      line-height: 32px !important;
+      padding: 0;
+      text-align: center;
+      background: transparent !important;
+      color: var(--soft) !important;
+      border: 0 !important;
+      border-radius: 0 !important;
+      font: 400 17px/32px var(--mono) !important;
+      user-select: none;
+      caret-color: transparent;
+      outline: none;
+      cursor: pointer;
+      transition: background .12s, color .12s;
+    }
+    .leaflet-control-zoom.leaflet-bar a:first-child { border-bottom: 1px solid var(--silk-line) !important; }
+    .leaflet-control-zoom.leaflet-bar a:hover { background: rgba(46, 230, 214, 0.08) !important; color: var(--accent) !important; }
+    .leaflet-control-zoom.leaflet-bar a:active { background: rgba(46, 230, 214, 0.16) !important; }
+    .leaflet-control-zoom.leaflet-bar a.leaflet-disabled { color: var(--faint) !important; cursor: not-allowed; }
+    .leaflet-control-zoom.leaflet-bar a:focus { outline: none; caret-color: transparent; }
+
+    /* ---- the floating panels: board outlines with silkscreen corner marks --- */
+    #adsbBox, #filterBox, #geofenceFloatBox, #settingsFloatBox, #mapLayerFloatBox {
+      position: absolute;
+      z-index: 1000;
+      box-sizing: border-box;
+      --m: var(--silk-mark);
+      background:
+        linear-gradient(var(--m), var(--m)) left top / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left top / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right top / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right top / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left bottom / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left bottom / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right bottom / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right bottom / 1px 8px no-repeat border-box,
+        var(--glass);
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    #adsbBox { top: 10px; left: 10px; width: 300px; overflow: visible; }
+    #filterBox { top: 10px; right: 10px; width: 300px; max-width: calc(100vw - 20px); overflow: visible; }
+    #geofenceFloatBox { bottom: 10px; left: 54px; width: fit-content; overflow: hidden; }
+    #settingsFloatBox { bottom: 10px; left: 50%; transform: translateX(-50%); width: fit-content; overflow: hidden; }
+    #mapLayerFloatBox { bottom: 10px; right: 10px; width: fit-content; overflow: hidden; }
+    /* An open panel's outline and marks lift a step */
+    #adsbBox.open, #filterBox:not(.collapsed), #geofenceFloatBox.open, #settingsFloatBox.open, #mapLayerFloatBox.open {
+      --m: #6b747f;
+      border-color: #313843;
+    }
+
+    /* Header bars: printed title, a rule out to the readout, then the controls */
+    #adsbBoxHeader, #filterHeader, #geofenceFloatHeader, #settingsFloatHeader, #mapLayerFloatHeader {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      padding: 0 10px 0 12px;
+      box-sizing: border-box;
+      cursor: pointer;
+      white-space: nowrap;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #adsbBoxHeader h3, #filterHeader h3, #geofenceFloatHeader h3, #settingsFloatHeader h3, #mapLayerFloatHeader h3 {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+      margin: 0;
+      font: 600 11px/1 var(--mono);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--silk);
+      transition: color .12s;
+    }
+    #adsbBoxHeader:hover h3, #filterHeader:hover h3, #geofenceFloatHeader:hover h3,
+    #settingsFloatHeader:hover h3, #mapLayerFloatHeader:hover h3 { color: var(--soft); }
+    .mm-ico { width: 15px; height: 15px; flex: 0 0 auto; display: block; }
+    .mm-short { display: none; }
+    /* The readout: a hairline running out to the value, like NODES ---- 3 of 4 */
+    #adsbBoxStatus, #dronesHeaderCount, #geofenceFloatStatus, #settingsFloatStatus, #mapLayerFloatStatus {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      font: 500 11.5px/1 var(--mono);
+      letter-spacing: 0.02em;
+      color: var(--muted);
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    #adsbBoxStatus::before, #dronesHeaderCount::before, #geofenceFloatStatus::before,
+    #settingsFloatStatus::before, #mapLayerFloatStatus::before {
+      content: "";
+      flex: 1 1 auto;
+      min-width: 10px;
+      height: 1px;
+      background: var(--silk-line);
+    }
+    #adsbBoxStatus { color: var(--sky); font-weight: 600; }
+    #mapLayerFloatStatus .mm-ml-mode::before { content: "· "; color: var(--faint); }
+    #mapLayerFloatStatus .mm-ml-name { overflow: hidden; text-overflow: ellipsis; }
+    /* an open panel always paints above the collapsed pills around it */
+    #adsbBox.open, #filterBox:not(.collapsed), #settingsFloatBox.open, #geofenceFloatBox.open, #mapLayerFloatBox.open { z-index: 1001; }
+    @media (min-width: 701px) and (max-width: 1199px) {
+      #mapLayerFloatBox:not(.open) .mm-ml-name { display: none; }
+      #mapLayerFloatBox:not(.open) .mm-ml-mode::before { content: none; }
+    }
+    /* ON / OFF printed tags beside the layer switches */
+    /* The switches print their own ON / OFF now, so these tags stay in the
+       DOM for the JS that sets them but are not shown */
+    #adsbBoxStateLabel, #dronesLayerStateLabel { display: none !important; }
+    #adsbBoxStateLabel, #dronesLayerStateLabel {
+      flex: 0 0 auto;
+      padding: 3px 6px;
+      border: 1px solid rgba(255, 77, 94, 0.55);
+      border-radius: 2px;
+      font: 600 9.5px/1 var(--mono);
+      letter-spacing: 0.1em;
+      color: var(--red);
+      background: rgba(255, 77, 94, 0.08);
+    }
+    /* the drones layer starts on */
+    #dronesLayerStateLabel { color: var(--accent); border-color: rgba(46, 230, 214, 0.55); background: rgba(46, 230, 214, 0.08); }
+    /* Fold keys: a small printed + / - key */
+    #adsbBoxToggle, #filterToggle, #geofenceFloatToggle, #settingsFloatToggle, #mapLayerFloatToggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 22px;
+      height: 22px;
+      box-sizing: border-box;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      background: rgba(7, 9, 12, 0.6);
+      font: 500 14px/1 var(--mono);
+      color: var(--silk);
+      cursor: pointer;
+      user-select: none;
+      caret-color: transparent;
+      outline: none;
+      transition: color .12s, border-color .12s, background .12s;
+    }
+    #adsbBoxHeader:hover #adsbBoxToggle, #filterHeader:hover #filterToggle,
+    #geofenceFloatHeader:hover #geofenceFloatToggle, #settingsFloatHeader:hover #settingsFloatToggle,
+    #mapLayerFloatHeader:hover #mapLayerFloatToggle {
+      color: var(--accent);
+      border-color: rgba(46, 230, 214, 0.5);
+      background: rgba(46, 230, 214, 0.06);
+    }
+    /* Content areas: hairline between header and body */
+    #adsbBoxContent { width: 300px; box-sizing: border-box; border-top: 1px solid var(--silk-line); padding: 2px 0 6px; }
+    #geofenceFloatContent { padding: 12px; width: 330px; max-height: 60vh; overflow-y: auto; box-sizing: border-box; border-bottom: 1px solid var(--silk-line); }
+    #settingsFloatContent { padding: 12px; width: 360px; max-height: 64vh; overflow-y: auto; box-sizing: border-box; border-bottom: 1px solid var(--silk-line); }
+    #mapLayerFloatContent { padding: 12px; width: 380px; max-width: calc(100vw - 20px); max-height: calc(100vh - 380px); min-height: 0; overflow-y: auto; box-sizing: border-box; border-bottom: 1px solid var(--silk-line); }
+
+    /* ---- shared building blocks --------------------------------------------- */
+    /* Printed label: the small uppercase mono caption */
+    .mm-label {
+      display: block;
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--silk);
+    }
+    /* Section head: label with a rule running out to the right */
+    .mm-sec {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 8px;
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--silk);
+      white-space: nowrap;
+    }
+    .mm-sec::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--silk-line); min-width: 8px; }
+    .mm-sec > span { display: inline-flex; align-items: center; }
+    .mm-sec > .mm-sec-end { order: 2; color: var(--muted); letter-spacing: 0.04em; text-transform: none; font-weight: 500; }
+    .mm-sec .mm-ico { width: 13px; height: 13px; }
+    /* One caret for every sub-section (closed / open), always on the left */
+    #activeArrow, #inactiveArrow, #webhooksArrow, #takArrow, #geofenceAlertArrow, #cacheToggleArrow, #adsbBoxSettingsCaret {
+      display: inline-flex;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 10px;
+      font: 600 11px/1 var(--mono);
+      letter-spacing: 0;
+      color: var(--silk);
+    }
+    /* A settings section after the first: a hairline and air above it */
+    .mm-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--silk-line); }
+    .mm-section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+    .mm-block + .mm-block { margin-top: 14px; }
+    .mm-pad { padding: 10px 12px; }
+    .mm-pad + .mm-pad { border-top: 1px solid var(--silk-line); }
+    .mm-note {
+      font: 400 11.5px/1.45 var(--sans);
+      color: var(--muted);
+      letter-spacing: 0;
+      text-transform: none;
+    }
+    .mm-note code, .mm-code { font-family: var(--mono); font-size: 0.95em; color: var(--soft); }
+    .mm-row { display: flex; gap: 6px; align-items: center; }
+    .mm-row > * { min-width: 0; }
+    .mm-grow { flex: 1 1 0; }
+    .mm-rule { height: 1px; background: var(--silk-line); margin: 10px 0; border: 0; }
+    .mm-center { text-align: center; }
+    .mm-mono { font-family: var(--mono); }
+    .mm-status { margin-top: 6px; font: 500 11.5px/1.4 var(--sans); color: var(--muted); text-align: center; min-height: 1.2em; }
+    .mm-status:empty { display: none; }
+    /* A sub-card inside a panel */
+    .mm-card {
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      background: rgba(7, 9, 12, 0.55);
+      padding: 10px;
+      box-sizing: border-box;
+    }
+    /* Key / value rows: the key printed in silk */
+    .mm-kv { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 3px 0; }
+    .mm-kv > .k {
+      flex: 0 0 auto;
+      font: 500 10px/1.5 var(--mono);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--silk);
+    }
+    .mm-kv > .v {
+      min-width: 0;
+      text-align: right;
+      word-break: break-word;
+      color: var(--text);
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    .mm-kv > .v.mono { font: 500 12px/1.4 var(--mono); }
+    /* A status LED; live ones get a soft halo */
+    .mm-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--c, var(--muted));
+      flex: 0 0 auto;
+      vertical-align: middle;
+    }
+    .mm-dot.live { box-shadow: 0 0 8px 1px color-mix(in srgb, var(--c, var(--green)) 55%, transparent); }
+    /* A small label in a printed box, in its own color */
+    .mm-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 6px;
+      border: 1px solid var(--c, var(--silk));
+      border-color: color-mix(in srgb, var(--c, var(--silk)) 55%, transparent);
+      border-radius: 2px;
+      color: var(--c, var(--silk));
+      font: 600 9.5px/1.2 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    /* Filter chip: a printed box, lit in its color when on */
+    .mm-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 7px;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      background: rgba(7, 9, 12, 0.72);
+      color: var(--silk);
+      font: 600 10px/1.15 var(--mono);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      transition: background .12s, border-color .12s, color .12s;
+    }
+    .mm-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--c, var(--silk)); opacity: 0.45; }
+    .mm-chip:hover { color: var(--soft); border-color: var(--line3); }
+    .mm-chip.on {
+      color: var(--c, var(--accent));
+      border-color: var(--c, var(--accent));
+      border-color: color-mix(in srgb, var(--c, var(--accent)) 75%, transparent);
+      background: color-mix(in srgb, var(--c, var(--accent)) 10%, transparent);
+    }
+    .mm-chip.on::before { opacity: 1; }
+    .mm-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+    /* Segmented control: printed cells, the chosen one lit with a rule under it */
+    .mm-seg {
+      display: flex;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      background: rgba(7, 9, 12, 0.72);
+      overflow: hidden;
+    }
+    .mm-seg > button, .mm-seg > label {
+      flex: 1 1 0;
+      min-width: 0;
+      margin: 0 !important;
+      padding: 8px 6px !important;
+      border: 0 !important;
+      border-radius: 0 !important;
+      border-bottom: 2px solid transparent !important;
+      background: transparent !important;
+      color: var(--silk) !important;
+      font: 600 10.5px/1.1 var(--mono) !important;
+      letter-spacing: 0.08em !important;
+      text-transform: uppercase;
+      text-align: center;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      white-space: nowrap;
+      transition: color .12s, background .12s, border-color .12s;
+    }
+    .mm-seg > * + * { border-left: 1px solid var(--silk-line) !important; }
+    .mm-seg > button:hover, .mm-seg > label:hover { color: var(--soft) !important; }
+    .mm-seg > .on {
+      color: var(--accent) !important;
+      background: rgba(46, 230, 214, 0.08) !important;
+      border-bottom-color: var(--accent) !important;
+    }
+    /* Separate rule: a browser without :has() drops only this one */
+    .mm-seg > label:has(input:checked) {
+      color: var(--accent) !important;
+      background: rgba(46, 230, 214, 0.08) !important;
+      border-bottom-color: var(--accent) !important;
+    }
+    .mm-seg .mm-ico { width: 14px; height: 14px; }
+    .mm-seg input[type="radio"] { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; pointer-events: none; }
+
+    /* ---- controls ------------------------------------------------------------ */
+    /* Buttons: a printed outline; meaning colors only where an action has one */
+    button {
+      font: 600 12px/1.2 var(--sans);
+      letter-spacing: 0.02em;
+      color: var(--soft);
+      background: rgba(7, 9, 12, 0.6);
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      padding: 7px 10px;
+      margin: 0;
+      cursor: pointer;
+      text-shadow: none;
+      box-shadow: none;
+      transition: color .12s, background .12s, border-color .12s, opacity .12s;
+    }
+    button:hover { color: var(--text); border-color: var(--line3); background: rgba(255, 255, 255, 0.03); }
+    button:active { background: rgba(255, 255, 255, 0.06); }
+    button:disabled { opacity: 0.45; cursor: default; }
+    button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+    button.mm-accent, a.mm-accent { color: var(--accent); background: rgba(46, 230, 214, 0.08); border-color: rgba(46, 230, 214, 0.5); }
+    button.mm-accent:hover, a.mm-accent:hover { background: rgba(46, 230, 214, 0.14); border-color: var(--accent); color: var(--accent); }
+    button.mm-primary { color: #04110f; background: var(--accent); border-color: var(--accent); }
+    button.mm-primary:hover { color: #04110f; background: #5cf0e3; border-color: #5cf0e3; }
+    button.mm-danger { color: var(--red); background: rgba(255, 77, 94, 0.08); border-color: rgba(255, 77, 94, 0.5); }
+    button.mm-danger:hover { color: var(--red); background: rgba(255, 77, 94, 0.14); border-color: var(--red); }
+    button.mm-warn { color: var(--amber); background: rgba(255, 181, 71, 0.08); border-color: rgba(255, 181, 71, 0.5); }
+    button.mm-warn:hover { color: var(--amber); background: rgba(255, 181, 71, 0.14); border-color: var(--amber); }
+    button.mm-info { color: var(--sky); background: rgba(92, 200, 255, 0.08); border-color: rgba(92, 200, 255, 0.5); }
+    button.mm-info:hover { color: var(--sky); background: rgba(92, 200, 255, 0.14); border-color: var(--sky); }
+    button.mm-hot { color: var(--hot); background: rgba(255, 61, 168, 0.08); border-color: rgba(255, 61, 168, 0.5); }
+    button.mm-hot:hover { color: var(--hot); background: rgba(255, 61, 168, 0.14); border-color: var(--hot); }
+    button.mm-violet { color: var(--violet); background: rgba(167, 139, 250, 0.08); border-color: rgba(167, 139, 250, 0.5); }
+    button.mm-violet:hover { color: var(--violet); background: rgba(167, 139, 250, 0.14); border-color: var(--violet); }
+    button.mm-on { color: #04110f !important; background: var(--accent) !important; border-color: var(--accent) !important; }
+    button.mm-block, .mm-block-btn { width: 100%; }
+    button .mm-ico { width: 14px; height: 14px; }
+    .mm-btn-ico { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+    a.mm-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 7px 10px;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      color: var(--soft);
+      text-decoration: none;
+      font: 600 12px/1.2 var(--sans);
+      transition: color .12s, border-color .12s, background .12s;
+    }
+    a.mm-link:hover { color: var(--accent); border-color: rgba(46, 230, 214, 0.5); background: rgba(46, 230, 214, 0.06); }
+
+    /* Text fields and selects: a filled field, lit in the accent when focused */
+    input[type="text"], input[type="number"], input[type="password"], input[type="search"],
+    input[type="url"], input[type="email"], select, textarea {
+      box-sizing: border-box;
+      background-color: var(--panel2);
+      color: var(--text);
+      border: 1px solid var(--line2);
+      border-radius: 6px;
+      padding: 7px 9px;
+      font: 400 13px/1.3 var(--sans);
+      letter-spacing: 0;
+      text-transform: none;
+      outline: none;
+      box-shadow: none;
+      text-shadow: none;
+      caret-color: var(--accent);
+      transition: border-color .12s, background-color .12s;
+    }
+    input[type="text"]:hover, input[type="number"]:hover, input[type="password"]:hover,
+    input[type="search"]:hover, input[type="url"]:hover, select:hover, textarea:hover { border-color: var(--line3); }
+    input[type="text"]:focus, input[type="number"]:focus, input[type="password"]:focus,
+    input[type="search"]:focus, input[type="url"]:focus, input[type="email"]:focus, select:focus, textarea:focus {
+      border-color: var(--accent);
+      background-color: #171d25;
+    }
+    input::placeholder, textarea::placeholder { color: var(--faint); opacity: 1; }
+    input.mm-mono, select.mm-mono, .mm-mono input { font-family: var(--mono); font-size: 12px; }
+    select {
+      -webkit-appearance: none;
+      appearance: none;
+      padding-right: 28px;
+      cursor: pointer;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238c939c' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      text-overflow: ellipsis;
+    }
+    select option, select optgroup { background: var(--panel); color: var(--text); font-family: var(--sans); font-style: normal; }
+    select optgroup { color: var(--silk); }
+    input[type="number"] { font-variant-numeric: tabular-nums; }
+    input[type="file"] {
+      width: 100%;
+      box-sizing: border-box;
+      font: 400 12px/1.3 var(--sans);
+      color: var(--muted);
+      padding: 0;
+      background: transparent;
+      border: 0;
+    }
+    input[type="file"]::file-selector-button {
+      margin-right: 10px;
+      padding: 7px 10px;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      background: rgba(7, 9, 12, 0.6);
+      color: var(--soft);
+      font: 600 12px/1.2 var(--sans);
+      cursor: pointer;
+    }
+    input[type="file"]::file-selector-button:hover { color: var(--text); border-color: var(--line3); }
+    input[type="color"] {
+      width: 28px;
+      height: 24px;
+      padding: 0;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      background: transparent;
+      cursor: pointer;
+    }
+    /* Field label: printed caption over its control */
+    label.mm-field { display: block; }
+    label.mm-field > .mm-label, .mm-field-label { margin-bottom: 5px; }
+    label.mm-field > input, label.mm-field > select { display: block; width: 100%; }
+    .mm-field + .mm-field, .mm-field + .mm-row, .mm-row + .mm-field { margin-top: 8px; }
+
+    /* Checkboxes: a small square that fills with the accent */
+    input[type="checkbox"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      flex: 0 0 auto;
+      border: 1px solid var(--line3);
+      border-radius: 2px;
+      background: var(--bg);
+      display: inline-grid;
+      place-content: center;
+      cursor: pointer;
+      vertical-align: middle;
+      transition: background .1s, border-color .1s;
+    }
+    input[type="checkbox"]:hover { border-color: var(--muted); }
+    input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+    input[type="checkbox"]:checked::after {
+      content: "";
+      width: 7px;
+      height: 4px;
+      border-left: 2px solid var(--bg);
+      border-bottom: 2px solid var(--bg);
+      transform: translateY(-1px) rotate(-45deg);
+    }
+    input[type="radio"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      flex: 0 0 auto;
+      border: 1px solid var(--line3);
+      border-radius: 50%;
+      background: var(--bg);
+      display: inline-grid;
+      place-content: center;
+      cursor: pointer;
+      vertical-align: middle;
+    }
+    input[type="radio"]:checked { border-color: var(--accent); }
+    input[type="radio"]:checked::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    label.mm-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font: 400 12.5px/1.35 var(--sans);
+      color: var(--soft);
+      cursor: pointer;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    /* Switches: a neon power switch. OFF glows red, ON is lit solid in the
+       accent: a switch's state always reads at a glance, never dull grey. */
     .switch {
       position: relative;
       display: inline-block;
       vertical-align: middle;
-      width: 40px;
-      height: 20px;
-      --switch-accent: #88ff99;       /* default — drone lime */
-      --switch-outline: rgba(255, 255, 255, 0.18);
+      flex: 0 0 auto;
+      width: 52px;
+      height: 24px;
+      margin: 0;
     }
-    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch > input[type="checkbox"] { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; border: 0; }
+    .switch > input[type="checkbox"]::after { content: none; }
     .slider {
       position: absolute;
-      cursor: pointer;
       inset: 0;
-      background: rgba(255, 255, 255, 0.06);
-      border: 1.5px solid var(--switch-outline);
-      transition: background .2s, border-color .2s;
-      border-radius: 20px;
+      cursor: pointer;
+      background: rgba(255, 77, 94, 0.14);
+      border: 1px solid rgba(255, 77, 94, 0.75);
+      border-radius: 999px;
+      box-shadow: inset 0 0 6px rgba(255, 77, 94, 0.2);
+      transition: background .16s, border-color .16s, box-shadow .16s;
     }
     .slider:before {
       position: absolute;
       content: "";
-      height: 14px;
-      width: 14px;
-      left: 2px;
+      width: 16px;
+      height: 16px;
+      left: 3px;
       top: 50%;
-      background-color: #ffffff;
-      border: 0;
-      transition: transform .2s, background-color .2s;
       border-radius: 50%;
+      background: var(--red);
+      box-shadow: 0 0 8px rgba(255, 77, 94, 0.8);
       transform: translateY(-50%);
-      box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+      transition: transform .16s, background-color .16s, box-shadow .16s;
     }
-    .switch input:checked + .slider {
-      background: var(--switch-accent);
-      border-color: var(--switch-accent);
-    }
-    .switch input:checked + .slider:before {
-      transform: translateX(20px) translateY(-50%);
-      background-color: #fff;
-    }
-    /* Per-panel accent overrides — applied by panel scope so the same .switch
-       class shows lime in the drones panel and cyan in the AIR TRAFFIC panel. */
-    #adsbBox .switch          { --switch-accent: #88c8ff; --switch-outline: rgba(136, 200, 255, 0.35); }
-    #filterBox .switch        { --switch-accent: #88ff99; --switch-outline: rgba(136, 255, 153, 0.35); }
-    #geofenceFloatBox .switch { --switch-accent: #ff7a99; --switch-outline: rgba(255, 122, 153, 0.35); }
-    #settingsFloatBox .switch { --switch-accent: #88ff99; --switch-outline: rgba(136, 255, 153, 0.35); }
-    #mapLayerFloatBox .switch { --switch-accent: #88ff99; --switch-outline: rgba(136, 255, 153, 0.35); }
-    body, html {
-      margin: 0;
-      padding: 0;
-      background-color: #0a001f;
-      font-family: 'Orbitron', monospace;
-    }
-    /* 100dvh keeps the map sized to the visible viewport on mobile browsers
-       with dynamic toolbars (iOS Safari); browsers without dvh support use
-       the 100vh fallback. */
-    #map { height: 100vh; height: 100dvh; }
-    /* Layer control styling (bottom left) reduced by 30% */
-    #layerControl {
+    /* the state is printed in the track: OFF beside the thumb, ON when lit */
+    .slider:after {
+      content: "OFF";
       position: absolute;
-      bottom: 10px;
-      left: 10px;
-      background: rgba(0,0,0,0.8);
-      padding: 3.5px; /* reduced from 5px */
-      border: 0.7px solid lime; /* reduced border thickness */
-      border-radius: 7px; /* reduced from 10px */
-      color: #FF00FF;
-      font-family: monospace;
-      font-size: 0.7em; /* scale font by 70% */
-      z-index: 1000;
+      top: 50%;
+      right: 7px;
+      transform: translateY(-50%);
+      font: 700 9px/1 var(--mono);
+      letter-spacing: 0.06em;
+      color: var(--red);
+      pointer-events: none;
     }
-    /* Basemap label always neon pink */
-    #layerControl > label {
-      color: #FF00FF;
+    .switch > input:checked + .slider {
+      background: var(--accent);
+      border-color: var(--accent);
+      box-shadow: 0 0 12px rgba(46, 230, 214, 0.45);
     }
-    #layerControl select,
-    #layerControl select option {
-      background-color: #333;
-      color: lime;
-      border: none;
-      padding: 2.1px;
-      font-size: 0.7em;
-    }
-    
-        #filterBox {
-          position: absolute;
-          top: 10px;
-          right: 10px;
-          background: rgba(0,0,0,0.8);
-          padding: 8px;
-          width: 280px;
-          max-width: calc(100vw - 20px);
-          border: 1px solid lime;
-          border-radius: 10px;
-          color: lime;
-          font-family: monospace;
-          /* No outer scroll — content sizes to fit. Active/Inactive lists
-             have their own compact caps so the whole panel stays short. */
-          overflow: visible;
-          z-index: 1000;
-        }
-        /* Active / Inactive drone lists — bounded so the whole panel always
-           fits without an outer scroll. Overflow stays internal to each list. */
-        #activePlaceholder, #inactivePlaceholder {
-          max-height: 28vh !important;
-          min-height: 90px !important;
-          flex: 0 0 auto;
-          box-sizing: border-box;
-        }
-        /* Filter content is a vertical flex stack so each section reserves
-           its own space and they never visually overlap. */
-        #filterContent {
-          display: flex;
-          flex-direction: column;
-          gap: 0;
-        }
-        /* Each child of filterContent stays in place — no negative margins
-           or absolute positioning leaking into siblings. */
-        #filterContent > * { flex: 0 0 auto; }
-        /* Settings/Exports outer wrapper inside the drones panel */
-        #filterContent > div[style*="margin:8px 8px 0 8px"][style*="border:1px solid lime"] {
-          margin: 8px 0 0 0 !important;
-          flex: 0 0 auto;
-        }
-        /* Narrow viewport / tablet portrait — kicks in well before phones to
-           avoid the "panel hangs over the edge" look on iPad / split-window. */
-        @media (max-width: 900px) {
-          #filterBox {
-            width: 240px;
-            max-width: calc(100vw - 20px);
-            top: 8px;
-            right: 8px;
-            padding: 6px;
-          }
-          #adsbBox {
-            top: 8px !important;
-            left: 8px !important;
-            max-width: calc(100vw - 16px) !important;
-          }
-          #adsbBoxContent {
-            width: 240px !important;
-            max-width: calc(100vw - 20px) !important;
-          }
-          #mapLayerFloatBox {
-            right: 8px !important;
-            bottom: 8px !important;
-          }
-          #mapLayerFloatContent {
-            width: auto !important;
-            max-width: calc(100vw - 16px) !important;
-            max-height: 40vh !important;
-          }
-          #geofenceFloatBox {
-            left: 8px !important;
-            bottom: 8px !important;
-          }
-          #geofenceFloatContent, #settingsFloatContent {
-            width: auto !important;
-            max-width: calc(100vw - 20px) !important;
-          }
-          #activePlaceholder, #inactivePlaceholder {
-            max-height: 24vh !important;
-          }
-        }
-        /* Phones: map-first layout — every panel is a compact pill that expands
-           into a scrollable sheet, nothing overlaps, and the map stays usable.
-             TOP-LEFT   AIR TRAFFIC pill (expands into a capped sheet)
-             TOP-RIGHT  DRONES pill (expands into a full-width sheet)
-             BOTTOM     MAP LAYER main bar (full width)
-             ABOVE IT   SETTINGS pill (left) + GEOFENCING pill (right) */
-        @media (max-width: 700px) {
-          /* --- top row: two pills, side by side --- */
-          #adsbBox {
-            top: 6px !important;
-            left: 6px !important;
-            right: auto !important;
-            width: auto !important;
-            min-width: 0 !important;
-            max-width: 47vw !important;
-            box-sizing: border-box !important;
-          }
-          /* Trim the header so the pill shares the top row with DRONES:
-             the live count span and OFF/ON badge hide (the switch still
-             shows state; the expanded sheet has the count). */
-          #adsbBoxStatus,
-          #adsbBoxStateLabel { display: none !important; }
-          #adsbBoxHeader { padding: 10px 8px !important; gap: 6px !important; }
-          #adsbBoxContent {
-            width: auto !important;
-            max-width: calc(100vw - 24px) !important;
-            max-height: 55vh !important;
-            overflow-y: auto !important;
-          }
-          #filterBox {
-            top: 6px !important;
-            right: 6px !important;
-            left: auto !important;
-            width: auto !important;
-            min-width: 0 !important;
-            max-width: 41vw !important;
-            max-height: none !important;
-            overflow: hidden !important;
-            padding: 6px !important;
-            box-sizing: border-box !important;
-          }
-          /* Collapsed drones pill: drop the wordmark + ON badge (the switch
-             already shows the layer state) so the pill stays narrow. */
-          #filterBox.collapsed #filterHeader h3,
-          #filterBox.collapsed #dronesLayerStateLabel { display: none; }
-          #filterBox.collapsed #filterHeader { gap: 8px !important; }
-          #filterBox.collapsed #dronesHeaderCount { max-width: 60px; }
-          /* Expanded drones panel: full-width top sheet with its own scroll.
-             The scroll also stops lower sections (e.g. DRONE EXPORTS) from
-             spilling out of the capped panel onto the map. */
-          #filterBox:not(.collapsed) {
-            left: 6px !important;
-            right: 6px !important;
-            max-width: none !important;
-            max-height: 62vh !important;
-            overflow-y: auto !important;
-          }
-
-          /* --- bottom row: main bar + two pills above it --- */
-          #mapLayerFloatBox {
-            left: 6px !important;
-            right: 6px !important;
-            bottom: 6px !important;
-            width: auto !important;
-          }
-          #mapLayerFloatContent {
-            width: auto !important;
-            max-width: none !important;
-            max-height: 55vh !important;
-          }
-          /* SETTINGS was centered via inline left:50% + translateX(-50%);
-             reset both or the pill lands mid-screen under the MAP LAYER bar. */
-          #settingsFloatBox {
-            left: 6px !important;
-            right: auto !important;
-            transform: none !important;
-            bottom: 48px !important;
-            width: auto !important;
-            min-width: 0 !important;
-            max-width: 46vw !important;
-          }
-          #settingsFloatContent {
-            width: auto !important;
-            max-width: calc(100vw - 24px) !important;
-            max-height: 50vh !important;
-          }
-          #geofenceFloatBox {
-            left: auto !important;
-            right: 6px !important;
-            bottom: 48px !important;
-            width: auto !important;
-            min-width: 0 !important;
-            max-width: 46vw !important;
-          }
-          #geofenceFloatContent {
-            width: auto !important;
-            max-width: calc(100vw - 24px) !important;
-            max-height: 50vh !important;
-          }
-          /* Bigger tap targets on the float header bars */
-          #mapLayerFloatHeader,
-          #settingsFloatHeader,
-          #geofenceFloatHeader { padding: 10px 12px !important; }
-
-          /* Leaflet chrome lives above the bottom pills so it stays reachable */
-          .leaflet-bottom.leaflet-left,
-          .leaflet-bottom.leaflet-right { bottom: 92px !important; }
-
-          /* Slightly larger text + tap targets inside the sheets */
-          #filterBox, #adsbBox, #mapLayerFloatBox,
-          #settingsFloatBox, #geofenceFloatBox { font-size: 14px; }
-          #filterBox button, #adsbBox button, #settingsFloatBox button,
-          #geofenceFloatBox button, #mapLayerFloatBox button { padding: 8px 10px !important; }
-
-          /* ── Full-width sheets: an expanded panel owns the whole row so its
-             header (and its close toggle) can never be covered by another bar.
-             JS adds .open to the box whenever the content is shown. ── */
-          #adsbBox.open {
-            left: 6px !important;
-            right: 6px !important;
-            max-width: none !important;
-          }
-          #adsbBox.open #adsbBoxContent {
-            width: auto !important;
-            max-width: none !important;
-            max-height: 58vh !important;
-          }
-          #settingsFloatBox.open, #geofenceFloatBox.open {
-            left: 6px !important;
-            right: 6px !important;
-            max-width: none !important;
-            bottom: 48px !important;   /* sheet sits above the MAP LAYER bar */
-          }
-          #settingsFloatBox.open #settingsFloatContent,
-          #geofenceFloatBox.open #geofenceFloatContent {
-            width: auto !important;
-            max-width: none !important;
-          }
-          /* The expanded drones sheet keeps its title readable (!important
-             beats the base rule further down this stylesheet) */
-          #filterBox:not(.collapsed) #filterHeader h3 {
-            display: block !important;
-            width: auto;
-            flex: 1;
-            text-align: left;
-          }
-          /* An open sheet must always paint above the collapsed pills of its
-             siblings — otherwise a floating pill covers the sheet's header
-             (title + close toggle) and blocks every tap on it. */
-          #adsbBox.open, #filterBox:not(.collapsed),
-          #settingsFloatBox.open, #geofenceFloatBox.open, #mapLayerFloatBox.open { z-index: 1002 !important; }
-          /* Roomier close toggles — the whole header is tappable, the glyph
-             just needs to be an obvious target */
-          #adsbBoxToggle, #filterToggle, #geofenceFloatToggle,
-          #settingsFloatToggle, #mapLayerFloatToggle { font-size: 18px !important; padding: 2px 6px; }
-
-          /* Respect notch / home-indicator / app-bar insets (WKWebView inside
-             Sky Spy / MeshDetect embeds this page under their own chrome) */
-          #adsbBox, #filterBox { top: calc(6px + env(safe-area-inset-top, 0px)) !important; }
-          #mapLayerFloatBox { bottom: calc(6px + env(safe-area-inset-bottom, 0px)) !important; }
-          #settingsFloatBox, #geofenceFloatBox { bottom: calc(48px + env(safe-area-inset-bottom, 0px)) !important; }
-          .leaflet-bottom.leaflet-left,
-          .leaflet-bottom.leaflet-right { bottom: calc(92px + env(safe-area-inset-bottom, 0px)) !important; }
-        }
-        /* Inputs/selects/sliders inside the sidebar respect their inline width.
-           The legacy 'width: auto !important' rule was causing the staleout slider
-           to stop 3/5 of the way and breaking every full-width control. */
-        #filterBox input[type="range"] {
-          width: 100%;
-          box-sizing: border-box;
-          margin: 0;
-        }
-    #filterBox.collapsed #filterContent {
-      display: none;
-    }
-    /* When the right sidebar is collapsed, hide every direct child of #filterBox
-       except the header and anything explicitly marked .alwaysVisible (USB status). */
-    #filterBox.collapsed > *:not(#filterHeader):not(.alwaysVisible) {
-      display: none;
-    }
-    /* Tighten header when collapsed */
-    #filterBox.collapsed {
-      padding: 6px 14px;
-      width: auto;
-      min-width: 0;
-    }
-    /* When collapsed: title + USB pill + [+] toggle all on the SAME row.
-       The USB element gets pulled into #filterHeader at runtime to make this work. */
-    #filterBox.collapsed #filterHeader {
-      padding: 0;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      width: 100%;
-      white-space: nowrap;
-    }
-    #filterBox.collapsed #filterHeader h3 {
-      display: inline-block;
-      flex: none;
-      width: auto;
-      margin: 0;
-      color: #FF00FF;
-      font-size: 0.95em;
-    }
-    #filterBox.collapsed #filterHeader .alwaysVisible {
-      /* USB pill compact + sandwiched between title and [+] */
-      margin: 0;
-      padding: 2px 8px !important;
-      max-width: none;
-      flex: 0 0 auto;
-    }
-    #filterBox.collapsed #filterHeader #filterToggle {
-      margin-left: auto;       /* push the [+] to the far right edge */
-    }
-    #filterBox:not(.collapsed) #filterHeader h3 {
-      display: none;
-    }
-    #filterHeader {
-      display: flex;
-      align-items: center;
-      gap: 10px;            /* breathing room between count/ON badge/toggle/[-] */
-    }
-    #filterBox:not(.collapsed) #filterHeader {
-      justify-content: flex-end;
-      gap: 10px;
-      padding-right: 2px;
-    }
-    #filterHeader h3 {
-      flex: none;
-      text-align: center;
-      margin: 0;
-      font-size: 1em;
-      display: block;
-      width: 100%;
-      color: #FF00FF;
-    }
-    
-    /* USB status styling - now integrated in filter window */
-    #serialStatus div { margin-bottom: 2px; }
-    #serialStatus div:last-child { margin-bottom: 0; }
-    
-    .usb-name { color: #FF00FF; } /* Neon pink for device names */
-    .drone-item {
-      display: inline-block;
-      border: 1px solid;
-      margin: 2px;
-      padding: 3px;
-      cursor: pointer;
-    }
-    .drone-item.no-gps {
-      position: relative;
-      border: 1px solid deepskyblue !important;
-    }
-    /* #activePlaceholder .drone-item.no-gps:hover::after {
-      content: "no gps lock";
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      transform: translateX(-50%);
-      background-color: black;
-      color: #FF00FF;
-      padding: 4px 6px;
-      border: 1px solid #FF00FF;
-      border-radius: 2px;
-      white-space: nowrap;
-      font-family: monospace;
-      font-size: 0.75em;
-      z-index: 2000;
-    } */
-    /* Highlight recently seen drones (but not no-GPS drones) */
-    .drone-item.recent:not(.no-gps) {
-      box-shadow: 0 0 0 1px lime;
-    }
-    .placeholder {
-      border: 1px solid rgba(136, 255, 153, 0.18);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.02);
-      /* Roomier caps so several drone tags fit side-by-side without an
-         immediate inner scroll. Still bounded so the whole panel doesn't
-         overflow the viewport. */
-      min-height: 90px;
-      max-height: 28vh;
-      margin-top: 4px;
-      margin-bottom: 4px;
-      padding: 8px;
-      overflow-y: auto;
-      overflow-x: hidden;
-      box-sizing: border-box;
-      transition: border-color .15s, background .15s;
-      flex: 0 0 auto;
-      display: flex;
-      flex-wrap: wrap;
-      align-content: flex-start;
-      gap: 4px;
-    }
-    /* Preserve the centered "none" placeholder when a list is empty. */
-    .placeholder:empty { display: block; }
-    /* Inside the active/inactive boxes, let `gap` handle spacing. */
-    .placeholder .drone-item { margin: 0; }
-    .placeholder:hover {
-      border-color: rgba(136, 255, 153, 0.32);
-    }
-    .placeholder:empty::before {
-      content: 'none';
-      display: block;
-      text-align: center;
-      color: rgba(255, 255, 255, 0.18);
-      font-size: 0.78em;
-      letter-spacing: 1px;
-      padding: 14px 0;
-      font-style: italic;
-    }
-    .selected { background-color: rgba(255,255,255,0.2); }
-    .leaflet-popup > .leaflet-popup-content-wrapper { background-color: black; color: lime; font-family: monospace; border: 2px solid lime; border-radius: 10px;
-      width: 220px !important;
-      max-width: 220px;
-      zoom: 1.15;
-    }
-    .leaflet-popup-content {
-      font-size: 0.75em;
-      line-height: 1.2em;
-      white-space: normal;
-    }
-    .leaflet-popup-tip { background: lime; }
-    /* ───────── ADS-B aircraft popup — clean dark card, no neon border ───────── */
-    .leaflet-popup.adsb-popup > .leaflet-popup-content-wrapper {
-      background: linear-gradient(180deg, #11161c 0%, #0a0d12 100%) !important;
-      color: #dde6ee !important;
-      border: 1px solid rgba(136, 200, 255, 0.25) !important;
-      border-radius: 8px !important;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6),
-                  0 0 0 1px rgba(0, 0, 0, 0.4) inset,
-                  0 0 12px rgba(136, 200, 255, 0.08) !important;
-      width: auto !important;
-      max-width: 280px !important;
-      zoom: 1 !important;
-    }
-    .leaflet-popup.adsb-popup .leaflet-popup-content {
-      font-size: 13px !important;
-      line-height: 1.4 !important;
-      margin: 12px 14px !important;
-    }
-    .leaflet-popup.adsb-popup .leaflet-popup-tip {
-      background: #11161c !important;
-      border: 1px solid rgba(136, 200, 255, 0.25) !important;
-    }
-    .leaflet-popup.adsb-popup .leaflet-popup-close-button {
-      color: #6b7a8a !important;
-      font-size: 18px !important;
-      padding: 4px 6px !important;
-      transition: color 0.15s;
-    }
-    .leaflet-popup.adsb-popup .leaflet-popup-close-button:hover {
-      color: #88c8ff !important;
-    }
-    .leaflet-popup.adsb-popup button:hover {
-      filter: brightness(1.15);
-    }
-    /* ───── DRONE popup — same card vocabulary, lime accent ───── */
-    .leaflet-popup.drone-popup > .leaflet-popup-content-wrapper {
-      background: linear-gradient(180deg, #11161c 0%, #0a0d12 100%) !important;
-      color: #dde6ee !important;
-      border: 1px solid rgba(136, 255, 153, 0.28) !important;
-      border-radius: 8px !important;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6),
-                  0 0 0 1px rgba(0, 0, 0, 0.4) inset,
-                  0 0 12px rgba(136, 255, 153, 0.08) !important;
-      width: auto !important;
-      max-width: 300px !important;
-      zoom: 1 !important;
-    }
-    .leaflet-popup.drone-popup .leaflet-popup-content {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      font-size: 13px !important;
-      line-height: 1.4 !important;
-      margin: 12px 14px !important;
-      color: #dde6ee !important;
-    }
-    .leaflet-popup.drone-popup .leaflet-popup-tip {
-      background: #11161c !important;
-      border: 1px solid rgba(136, 255, 153, 0.28) !important;
-    }
-    .leaflet-popup.drone-popup .leaflet-popup-close-button {
-      color: #6b7a8a !important;
-      font-size: 18px !important;
-      padding: 4px 6px !important;
-      transition: color 0.15s;
-    }
-    .leaflet-popup.drone-popup .leaflet-popup-close-button:hover {
-      color: #88ff99 !important;
-    }
-    .leaflet-popup.drone-popup button:hover {
-      filter: brightness(1.15);
-    }
-    .leaflet-popup.drone-popup a:hover {
-      background: rgba(136, 255, 153, 0.08);
-    }
-    /* ───── Pure-CSS popup toggles — animate from input:checked, no JS re-render needed ─────
-       The popup re-render is suppressed while the popup is open (so live snapshot
-       updates don't wipe DOM the user is interacting with). That meant inline-style
-       toggles couldn't update their thumb position on click. These rules use sibling
-       selectors so the track tints + knob slides purely from the checkbox state. */
+    .switch > input:checked + .slider:before { transform: translate(28px, -50%); background: var(--bg); box-shadow: none; }
+    .switch > input:checked + .slider:after { content: "ON"; right: auto; left: 9px; color: #04110f; }
+    .switch > input:focus-visible + .slider { outline: 1px solid var(--text); outline-offset: 2px; }
+    /* The same switch inside popups (pure CSS: animates from input:checked) */
     .pop-toggle {
       position: relative;
       display: inline-block;
-      width: 34px;
-      height: 18px;
+      width: 52px;
+      height: 24px;
       flex-shrink: 0;
     }
-    .pop-toggle input {
+    .pop-toggle input[type="checkbox"] {
       opacity: 0;
       width: 100%;
       height: 100%;
@@ -5316,545 +7461,375 @@ HTML_PAGE = '''
       position: absolute;
       inset: 0;
       z-index: 2;
+      border: 0;
     }
+    .pop-toggle input[type="checkbox"]::after { content: none; }
     .pop-toggle .pop-track {
       position: absolute;
       inset: 0;
-      background: #2a2f36;
-      border-radius: 18px;
-      transition: background .18s ease;
+      background: rgba(255, 77, 94, 0.14);
+      border: 1px solid rgba(255, 77, 94, 0.75);
+      border-radius: 999px;
+      box-shadow: inset 0 0 6px rgba(255, 77, 94, 0.2);
+      transition: background .16s ease, border-color .16s ease, box-shadow .16s ease;
       pointer-events: none;
     }
     .pop-toggle .pop-knob {
       position: absolute;
-      top: 2px; left: 2px;
-      width: 14px; height: 14px;
-      background: #fff;
+      top: 4px;
+      left: 4px;
+      width: 16px;
+      height: 16px;
+      background: var(--red);
+      box-shadow: 0 0 8px rgba(255, 77, 94, 0.8);
       border-radius: 50%;
-      transition: left .18s ease, transform .18s ease;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+      transition: left .16s ease, background .16s ease, box-shadow .16s ease;
       pointer-events: none;
     }
-    /* Cyan accent (aircraft popup) */
-    .leaflet-popup.adsb-popup .pop-toggle input:checked ~ .pop-track { background: #88c8ff; }
-    .leaflet-popup.adsb-popup .pop-toggle input:checked ~ .pop-knob  { left: 18px; }
-    /* Lime accent (drone popup) */
-    .leaflet-popup.drone-popup .pop-toggle input:checked ~ .pop-track { background: #88ff99; }
-    .leaflet-popup.drone-popup .pop-toggle input:checked ~ .pop-knob  { left: 18px; }
-    /* Hover affordance */
-    .pop-toggle:hover .pop-track { filter: brightness(1.2); }
-    /* ───── Thin custom scrollbars on every floating panel ─────
-       Replaces the default Win95-looking chunky bar with a 4px translucent
-       track that only ghosts in when actively scrolling/hovered. */
-    #adsbAircraftList,
-    #adsbBoxContent,
-    #geofenceFloatContent,
-    #settingsFloatContent,
-    #mapLayerFloatContent,
-    #filterContent {
-      scrollbar-width: thin;
-      scrollbar-color: rgba(255,255,255,0.18) transparent;
+    .pop-toggle .pop-track::after {
+      content: "OFF";
+      position: absolute;
+      top: 50%;
+      right: 7px;
+      transform: translateY(-50%);
+      font: 700 9px/1 var(--mono);
+      letter-spacing: 0.06em;
+      color: var(--red);
     }
-    #adsbAircraftList::-webkit-scrollbar,
-    #adsbBoxContent::-webkit-scrollbar,
-    #geofenceFloatContent::-webkit-scrollbar,
-    #settingsFloatContent::-webkit-scrollbar,
-    #mapLayerFloatContent::-webkit-scrollbar,
-    #filterContent::-webkit-scrollbar {
+    .pop-toggle input:checked ~ .pop-track { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 12px rgba(46, 230, 214, 0.45); }
+    .pop-toggle input:checked ~ .pop-track::after { content: "ON"; right: auto; left: 9px; color: #04110f; }
+    .pop-toggle input:checked ~ .pop-knob { left: 32px; background: var(--bg); box-shadow: none; }
+    label.mm-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 6px 0;
+      cursor: pointer;
+      min-width: 0;
+    }
+    /* A switch row's title (Settings: TAK server, FAA registry) */
+    .mm-toggle-title { display: block; font: 500 13px/1.3 var(--sans); color: var(--text); letter-spacing: 0; text-transform: none; }
+    /* The FAA lookup's state under its switch; an empty FAA slot in a popup takes no room */
+    .mm-faa-status { margin-top: 2px; }
+    .mm-faa-status:empty, .mm-faa-slot:empty { display: none; }
+
+    /* Range sliders: a hairline track, an accent thumb */
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 18px;
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      border: none;
+      outline: none;
+      cursor: pointer;
+      box-sizing: border-box;
+    }
+    input[type="range"]::-webkit-slider-runnable-track { height: 3px; background: var(--line2); border: 0; border-radius: 2px; }
+    input[type="range"]::-moz-range-track { height: 3px; background: var(--line2); border: 0; border-radius: 2px; }
+    input[type="range"]::-moz-range-progress { height: 3px; background: var(--accent); border-radius: 2px; }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      margin-top: -5.5px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--bg);
+      box-shadow: 0 0 0 1px var(--accent);
+      cursor: pointer;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--bg);
+      box-shadow: 0 0 0 1px var(--accent);
+      cursor: pointer;
+    }
+    input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px rgba(46, 230, 214, 0.2); }
+    /* Hue pickers (a drone's or a plane's own color): the spectrum is the track */
+    input[type="range"].mm-hue::-webkit-slider-runnable-track {
+      height: 8px;
+      border-radius: 4px;
+      background: linear-gradient(to right, hsl(0,90%,62%), hsl(60,90%,62%), hsl(120,90%,62%), hsl(180,90%,62%), hsl(240,90%,62%), hsl(300,90%,62%), hsl(360,90%,62%));
+    }
+    input[type="range"].mm-hue::-moz-range-track {
+      height: 8px;
+      border-radius: 4px;
+      background: linear-gradient(to right, hsl(0,90%,62%), hsl(60,90%,62%), hsl(120,90%,62%), hsl(180,90%,62%), hsl(240,90%,62%), hsl(300,90%,62%), hsl(360,90%,62%));
+    }
+    input[type="range"].mm-hue::-moz-range-progress { background: transparent; }
+    input[type="range"].mm-hue::-webkit-slider-thumb { margin-top: -3px; background: var(--text); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6); }
+    input[type="range"].mm-hue::-moz-range-thumb { background: var(--text); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6); }
+
+    /* Thin scrollbars on every panel */
+    #adsbAircraftList, #adsbBoxContent, #geofenceFloatContent, #settingsFloatContent,
+    #mapLayerFloatContent, #filterContent, #filterBox, .placeholder, #cachePanel,
+    #geofenceList, #geofenceAlertList, #geoResults {
+      scrollbar-width: thin;
+      scrollbar-color: var(--line3) transparent;
+    }
+    #adsbAircraftList::-webkit-scrollbar, #adsbBoxContent::-webkit-scrollbar, #geofenceFloatContent::-webkit-scrollbar,
+    #settingsFloatContent::-webkit-scrollbar, #mapLayerFloatContent::-webkit-scrollbar, #filterContent::-webkit-scrollbar,
+    #filterBox::-webkit-scrollbar, .placeholder::-webkit-scrollbar, #cachePanel::-webkit-scrollbar,
+    #geofenceList::-webkit-scrollbar, #geofenceAlertList::-webkit-scrollbar, #geoResults::-webkit-scrollbar {
       width: 6px;
       height: 6px;
       background: transparent;
     }
-    #adsbAircraftList::-webkit-scrollbar-track,
-    #adsbBoxContent::-webkit-scrollbar-track,
-    #geofenceFloatContent::-webkit-scrollbar-track,
-    #settingsFloatContent::-webkit-scrollbar-track,
-    #mapLayerFloatContent::-webkit-scrollbar-track,
-    #filterContent::-webkit-scrollbar-track {
-      background: transparent;
-      border: none;
-    }
-    #adsbAircraftList::-webkit-scrollbar-thumb,
-    #adsbBoxContent::-webkit-scrollbar-thumb,
-    #geofenceFloatContent::-webkit-scrollbar-thumb,
-    #settingsFloatContent::-webkit-scrollbar-thumb,
-    #mapLayerFloatContent::-webkit-scrollbar-thumb,
-    #filterContent::-webkit-scrollbar-thumb {
-      background: rgba(255,255,255,0.14);
+    #adsbAircraftList::-webkit-scrollbar-thumb, #adsbBoxContent::-webkit-scrollbar-thumb, #geofenceFloatContent::-webkit-scrollbar-thumb,
+    #settingsFloatContent::-webkit-scrollbar-thumb, #mapLayerFloatContent::-webkit-scrollbar-thumb, #filterContent::-webkit-scrollbar-thumb,
+    #filterBox::-webkit-scrollbar-thumb, .placeholder::-webkit-scrollbar-thumb, #cachePanel::-webkit-scrollbar-thumb,
+    #geofenceList::-webkit-scrollbar-thumb, #geofenceAlertList::-webkit-scrollbar-thumb, #geoResults::-webkit-scrollbar-thumb {
+      background: var(--line3);
       border-radius: 3px;
-      transition: background 0.15s;
     }
-    #adsbAircraftList::-webkit-scrollbar-thumb:hover,
-    #adsbBoxContent::-webkit-scrollbar-thumb:hover,
-    #geofenceFloatContent::-webkit-scrollbar-thumb:hover,
-    #settingsFloatContent::-webkit-scrollbar-thumb:hover,
-    #mapLayerFloatContent::-webkit-scrollbar-thumb:hover,
-    #filterContent::-webkit-scrollbar-thumb:hover {
-      background: rgba(136, 200, 255, 0.4);
+    #adsbAircraftList::-webkit-scrollbar-thumb:hover, #adsbBoxContent::-webkit-scrollbar-thumb:hover,
+    #geofenceFloatContent::-webkit-scrollbar-thumb:hover, #settingsFloatContent::-webkit-scrollbar-thumb:hover,
+    #mapLayerFloatContent::-webkit-scrollbar-thumb:hover, #filterContent::-webkit-scrollbar-thumb:hover,
+    #filterBox::-webkit-scrollbar-thumb:hover, .placeholder::-webkit-scrollbar-thumb:hover,
+    #cachePanel::-webkit-scrollbar-thumb:hover { background: var(--silk-mark); }
+    #adsbAircraftList::-webkit-scrollbar-track, #adsbBoxContent::-webkit-scrollbar-track, #geofenceFloatContent::-webkit-scrollbar-track,
+    #settingsFloatContent::-webkit-scrollbar-track, #mapLayerFloatContent::-webkit-scrollbar-track, #filterContent::-webkit-scrollbar-track,
+    .placeholder::-webkit-scrollbar-track { background: transparent; border: none; }
+    ::-webkit-scrollbar-corner { background: transparent; }
+
+    /* ---- AIR TRAFFIC (top left) -------------------------------------------- */
+    #adsbBoxSettingsToggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--silk);
+      transition: color .12s;
     }
-    /* Kill the corner artifact between vertical + horizontal bars */
-    #adsbAircraftList::-webkit-scrollbar-corner,
-    #adsbBoxContent::-webkit-scrollbar-corner,
-    #geofenceFloatContent::-webkit-scrollbar-corner,
-    #settingsFloatContent::-webkit-scrollbar-corner,
-    #mapLayerFloatContent::-webkit-scrollbar-corner,
-    #filterContent::-webkit-scrollbar-corner {
-      background: transparent;
+    #adsbBoxSettingsToggle::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--silk-line); }
+    #adsbBoxSettingsToggle:hover { color: var(--soft); }
+    #adsbBoxSettings { padding-top: 8px; }
+    #adsbBoxFilterChips { display: flex; flex-wrap: wrap; gap: 4px; }
+    #adsbCount {
+      margin: 0 10px 6px 0;
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--silk);
+      text-align: center;
+    }
+    #adsbAircraftList {
+      overflow-y: auto;
+      max-height: 180px;
+      min-height: 60px;
+      padding-right: 6px;
+      padding-bottom: 4px;
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 10px, black calc(100% - 14px), transparent 100%);
+      mask-image: linear-gradient(to bottom, transparent 0, black 10px, black calc(100% - 14px), transparent 100%);
+    }
+    #adsbAircraftList .adsbRow {
+      font-family: var(--sans);
+      border-radius: 2px;
+      transition: background .12s;
+    }
+    #adsbAircraftList .adsbRow:hover { background: rgba(92, 200, 255, 0.07) !important; }
+    .mm-empty {
+      padding: 14px 6px;
+      text-align: center;
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--faint);
     }
 
-    /* ───────── Unified collapsible-panel skin ─────────
-       Gives every floating panel + every collapsible sub-section the same
-       look as the new ADS-B / drone popup cards: dark gradient surface,
-       thin translucent border, system UI font, comfortable padding. The
-       individual panel borders override the accent color (cyan / lime /
-       pink) so the user can still tell them apart at a glance. */
-    #filterBox {
-      background: linear-gradient(180deg, #11161c 0%, #0a0d12 100%) !important;
-      border: 1px solid rgba(136, 255, 153, 0.28) !important;
-      border-radius: 8px !important;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.6),
-                  0 0 12px rgba(136, 255, 153, 0.06) !important;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      color: #dde6ee !important;
-      padding: 10px !important;
+    /* ---- DRONES (top right) ------------------------------------------------- */
+    #filterHeader { position: relative; }
+    #filterContent {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      padding: 10px 12px 12px;
+      border-top: 1px solid var(--silk-line);
     }
-    #filterHeader h3 {
-      color: #88ff99 !important;
-      letter-spacing: 2px;
-      font-weight: 700;
-      font-size: 0.85em !important;
-    }
-    /* Sub-section headers inside #filterContent (Active / Inactive Drones) */
-    #filterContent > h3 {
-      color: #a5b8a8 !important;
-      font-size: 0.72em !important;
-      letter-spacing: 1.5px !important;
-      font-weight: 700 !important;
-      margin: 10px 0 4px 0 !important;
-      padding: 6px 8px !important;
-      background: rgba(255,255,255,0.03);
-      border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 5px;
-      transition: background .15s, border-color .15s;
-    }
-    #filterContent > h3:hover {
-      background: rgba(136, 255, 153, 0.06);
-      border-color: rgba(136, 255, 153, 0.25);
-    }
-    /* Sub-cards (staleout slider, basemap select wrappers, geofence panel,
-       settings panel) — match the popup vocabulary. */
-    #filterBox > div,
-    #filterContent > div {
-      border-radius: 6px;
-    }
-    #filterContent > div[style*="border:1px solid lime"],
-    #filterBox > div[style*="border:1px solid lime"] {
-      border: 1px solid rgba(136, 255, 153, 0.18) !important;
-      background: rgba(255,255,255,0.025) !important;
-    }
-    /* The drone-item pills (each drone in the list) */
-    .drone-item {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      border-radius: 5px !important;
-      padding: 4px 8px !important;
-      letter-spacing: 0.3px;
-      transition: filter .15s, background .15s;
-    }
-    .drone-item:hover {
-      filter: brightness(1.2);
-      background: rgba(255, 255, 255, 0.04) !important;
-    }
-    /* Headings inside the geofence + settings sub-panels (those ▼ collapsibles) */
-    #geofenceToggle, #settingsToggle, #adsbToggle {
-      color: #a5b8a8 !important;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      font-size: 0.78em !important;
-      letter-spacing: 1.5px !important;
-      padding: 6px 8px !important;
-      background: rgba(255,255,255,0.03);
-      border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 5px;
-      transition: background .15s, border-color .15s;
-    }
-    #geofenceToggle:hover, #settingsToggle:hover, #adsbToggle:hover {
-      background: rgba(136, 255, 153, 0.06);
-      border-color: rgba(136, 255, 153, 0.25);
-    }
-    /* Make the [-] / [+] toggle in the drones panel header a clean glyph */
-    #filterToggle {
-      color: #88ff99 !important;
-      font-size: 16px !important;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      font-weight: 700;
-    }
-    /* USB-status pill inside the header — keep it readable on the new dark bg */
-    #filterHeader .alwaysVisible {
-      background: rgba(255, 255, 255, 0.04) !important;
-      border-color: rgba(136, 200, 255, 0.25) !important;
-      border-radius: 5px;
-      color: #aac8d6 !important;
-      font-size: 0.7em !important;
-    }
-    /* Active/inactive drone count: push to the LEFT of the header so it doesn't
-       crowd the ON badge. Larger + accent-colored. */
-    #dronesHeaderCount {
-      flex: 1 1 auto;
-      text-align: left;
-      font-weight: 700;
-      letter-spacing: 1px;
-      font-size: 0.78em !important;
-      color: #88ff99 !important;
-      padding-left: 4px;
-      order: 0;
-    }
-    /* Push the ON badge + switch + [-] toggle to the right so the count owns
-       the left side of the collapsed header. */
-    #filterHeader #dronesLayerStateLabel { margin-left: auto; }
-    /* Inline lime/yellow accent borders inside the drones panel — replaced */
-    #filterContent div[style*="border:1px solid lime"],
-    #filterContent div[style*="border: 1px solid lime"] {
-      border: 1px solid rgba(136, 255, 153, 0.18) !important;
-      background: rgba(255, 255, 255, 0.025) !important;
-      border-radius: 6px !important;
-    }
-    /* Section headings inside the drones panel sub-cards */
-    #filterContent div[style*="color:#aaffaa"] {
-      color: #a5b8a8 !important;
-      letter-spacing: 1.5px !important;
-      font-weight: 700 !important;
-      font-size: 0.78em !important;
-    }
-    /* "DRONE EXPORTS" header pill */
-    #filterContent .alwaysVisible-export-header { display: none; }
-    /* Staleout slider styling */
-    #staleoutSlider {
-      accent-color: #88ff99 !important;
-    }
-    #staleoutValue {
-      color: #88ff99 !important;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      font-size: 0.78em !important;
-      letter-spacing: 1px;
-      font-weight: 700;
-    }
-    /* Basemap select inside #filterContent */
-    #layerSelect {
-      color: #88c8ff !important;
-      letter-spacing: 0.5px;
-    }
-    /* Active / Inactive drone section headers — modern subtle pills */
+    #filterContent > * { flex: 0 0 auto; }
+    #filterBox.collapsed #filterContent { display: none; }
+    /* Collapsed: hide every direct child but the header (and anything marked
+       .alwaysVisible); the header becomes the whole pill. */
+    #filterBox.collapsed > *:not(#filterHeader):not(.alwaysVisible) { display: none; }
+    #filterBox.collapsed { width: auto; min-width: 0; }
+    #filterBox.collapsed #filterHeader .alwaysVisible { margin: 0; padding: 2px 8px !important; max-width: none; flex: 0 0 auto; }
+    #dronesHeaderCount { color: var(--muted); font-weight: 600; }
+    /* Active / inactive list heads: a printed caption with a rule */
     #activeHeader, #inactiveHeader {
-      color: #a5b8a8 !important;
-      font-size: 0.72em !important;
-      letter-spacing: 1.5px !important;
-      font-weight: 700 !important;
-      padding: 6px 10px !important;
-      background: rgba(255, 255, 255, 0.03) !important;
-      border: 1px solid rgba(255, 255, 255, 0.06) !important;
-      border-radius: 6px !important;
-      margin: 10px 0 0 0 !important;
-      transition: background .15s, border-color .15s;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 10px 0 6px;
+      padding: 0;
+      cursor: pointer;
+      user-select: none;
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--silk);
+      text-align: left;
+      transition: color .12s;
     }
-    #activeHeader:hover, #inactiveHeader:hover {
-      background: rgba(136, 255, 153, 0.06) !important;
-      border-color: rgba(136, 255, 153, 0.25) !important;
-    }
-    /* Tiny chevron arrow next to the section heading */
-    #activeArrow, #inactiveArrow {
-      color: rgba(255, 255, 255, 0.5) !important;
-    }
-    /* Export button pills — pill-style instead of cyberpunk neon */
-    #downloadCsv, #downloadKml, #downloadAliases,
-    #downloadCumulativeCsv, #downloadCumulativeKml {
-      background: rgba(255, 255, 255, 0.04) !important;
-      color: #88c8ff !important;
-      border: 1px solid rgba(136, 200, 255, 0.25) !important;
-      border-radius: 5px !important;
-      padding: 5px 0 !important;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      font-size: 0.72em !important;
-      letter-spacing: 1px !important;
-      font-weight: 700 !important;
-      transition: background .15s, border-color .15s, filter .15s;
-    }
-    #downloadCsv:hover, #downloadKml:hover, #downloadAliases:hover,
-    #downloadCumulativeCsv:hover, #downloadCumulativeKml:hover {
-      background: rgba(136, 200, 255, 0.10) !important;
-      border-color: rgba(136, 200, 255, 0.45) !important;
-      filter: brightness(1.1);
-    }
-    /* AIR TRAFFIC + GEOFENCING + SETTINGS + MAP LAYER + DRONE PANEL all share
-       the same outer card vocabulary. Per-panel border-color is left alone
-       (set inline) so colors stay distinct. */
-    #adsbBox, #geofenceFloatBox, #settingsFloatBox, #mapLayerFloatBox {
-      background: linear-gradient(180deg, #11161c 0%, #0a0d12 100%) !important;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.6),
-                  0 0 12px rgba(0,0,0,0.4) !important;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-    }
-    /* AIR TRAFFIC panel — sizes to fit content, never scrolls itself.
-       The aircraft LIST inside has its own short cap so the panel doesn't
-       grow taller than the screen. */
-    #adsbBox { overflow: visible; }
-    #adsbBoxHeader, #geofenceFloatHeader, #settingsFloatHeader, #mapLayerFloatHeader {
-      background: rgba(255, 255, 255, 0.03) !important;
-      transition: background .15s;
-    }
-    #adsbBoxHeader:hover, #geofenceFloatHeader:hover, #settingsFloatHeader:hover, #mapLayerFloatHeader:hover {
-      background: rgba(255, 255, 255, 0.06) !important;
-    }
-    #adsbBoxHeader h3, #geofenceFloatHeader h3, #settingsFloatHeader h3, #mapLayerFloatHeader h3 {
-      letter-spacing: 2px !important;
-      font-weight: 700 !important;
-      font-size: 0.78em !important;
-    }
-    /* Inputs / selects across all panels — same dark glass treatment */
-    #adsbBox input[type="text"], #adsbBox input[type="number"], #adsbBox input[type="password"], #adsbBox select,
-    #filterBox input[type="text"], #filterBox input[type="number"], #filterBox select,
-    #geofenceFloatBox input[type="text"], #geofenceFloatBox input[type="number"], #geofenceFloatBox select,
-    #settingsFloatBox input[type="text"], #settingsFloatBox input[type="number"], #settingsFloatBox select,
-    #mapLayerFloatBox select {
-      background: rgba(255,255,255,0.04) !important;
-      border: 1px solid rgba(255,255,255,0.10) !important;
-      border-radius: 4px !important;
-      color: #dde6ee !important;
-      font-family: inherit !important;
+    #activeHeader { margin-top: 0; }
+    #activeHeader::after, #inactiveHeader::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--silk-line); }
+    #activeHeader:hover, #inactiveHeader:hover { color: var(--soft); }
+    /* The lists: wrapped tags, each in its drone's own color */
+    .placeholder {
+      display: flex;
+      flex-wrap: wrap;
+      align-content: flex-start;
+      gap: 5px;
+      flex: 0 0 auto;
+      min-height: 64px;
+      max-height: 28vh;
+      margin: 0;
+      padding: 8px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      box-sizing: border-box;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      background: rgba(7, 9, 12, 0.55);
       transition: border-color .15s;
     }
-    #adsbBox input:focus, #filterBox input:focus, #geofenceFloatBox input:focus,
-    #settingsFloatBox input:focus, #mapLayerFloatBox select:focus,
-    #adsbBox select:focus, #filterBox select:focus, #geofenceFloatBox select:focus, #settingsFloatBox select:focus {
-      outline: none;
-      border-color: rgba(136, 200, 255, 0.55) !important;
-    }
-    /* Buttons across panels */
-    #adsbBox button, #filterBox button, #geofenceFloatBox button,
-    #settingsFloatBox button, #mapLayerFloatBox button {
-      font-family: inherit !important;
-      border-radius: 4px !important;
-      letter-spacing: 0.5px;
-      transition: filter .15s;
-      cursor: pointer;
-    }
-    #adsbBox button:hover, #filterBox button:hover, #geofenceFloatBox button:hover,
-    #settingsFloatBox button:hover, #mapLayerFloatBox button:hover {
-      filter: brightness(1.18);
-    }
-    /* ───── AIR TRAFFIC panel — refined sub-elements ───── */
-    /* Initial state-label inline style: lime → cyan baseline so the very first
-       paint matches the ADS-B family before _adsbSetUiEnabled runs. */
-    #adsbBoxStateLabel {
-      color: #586978 !important;
-      border-color: rgba(255, 255, 255, 0.10) !important;
-      background: transparent !important;
-    }
-    /* "▸ SETTINGS" sub-section header inside the AIR TRAFFIC panel */
-    #adsbBoxSettingsToggle {
-      color: #aac8d6 !important;
-      letter-spacing: 1.5px !important;
-      font-weight: 700 !important;
-      font-size: 0.85em !important;
-      padding: 5px 8px !important;
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      border-radius: 5px;
-      transition: background .15s, border-color .15s, color .15s;
-    }
-    #adsbBoxSettingsToggle:hover {
-      background: rgba(136, 200, 255, 0.08);
-      border-color: rgba(136, 200, 255, 0.30);
-      color: #88c8ff !important;
-    }
-    /* OSINT filter chips — outline-style off, soft-tinted bg + dark text on. */
-    #adsbBoxFilterChips > span {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      font-size: 0.7em !important;
-      letter-spacing: 0.5px !important;
-      font-weight: 700 !important;
-      padding: 3px 7px !important;
-      border-radius: 9px !important;
-      transition: filter .15s, background .15s !important;
-    }
-    #adsbBoxFilterChips > span:hover { filter: brightness(1.18); }
-    /* Count + source line ("N in view · adsblol") — tighter typography */
-    #adsbCount {
-      color: #6b8294 !important;
-      font-size: 0.72em !important;
-      letter-spacing: 1.2px !important;
-      font-weight: 600 !important;
-      padding: 4px 0 !important;
+    #activePlaceholder, #inactivePlaceholder { max-height: 28vh; min-height: 64px; }
+    .placeholder:hover { border-color: var(--line3); }
+    .placeholder:empty { display: block; }
+    .placeholder:empty::before {
+      content: 'none';
+      display: block;
+      padding: 14px 0;
+      text-align: center;
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.16em;
       text-transform: uppercase;
+      color: var(--faint);
     }
-    /* Aircraft list rows — softer hover, no row jitter */
-    #adsbAircraftList .adsbRow {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      transition: background .12s, filter .12s;
-    }
-    #adsbAircraftList .adsbRow:hover {
-      background: rgba(136, 200, 255, 0.08) !important;
-    }
-    /* Soft fade-out at the bottom (and top when scrolled) so rows don't
-       hard-cut under the panel's edge — they dissolve into the dark
-       background instead. Uses CSS mask-image which the scrollbar respects. */
-    #adsbAircraftList {
-      -webkit-mask-image: linear-gradient(to bottom,
-        transparent 0,
-        black 14px,
-        black calc(100% - 18px),
-        transparent 100%);
-      mask-image: linear-gradient(to bottom,
-        transparent 0,
-        black 14px,
-        black calc(100% - 18px),
-        transparent 100%);
-      padding-bottom: 4px;
-    }
-    /* THE ACTUAL BUG: the dronCircle / pilotCircle panes use a canvas
-       renderer (preferCanvas: true on the map), and that canvas spans the
-       entire map at z-index 650 — sitting on top of the marker pane (z 600)
-       where plane icons live. The canvas was intercepting every hover and
-       click before they reached the planes. Drone circles are purely
-       decorative (no bindPopup, no .on('click')) so we can safely tell the
-       canvas to let mouse events pass through. */
-    .leaflet-pane.leaflet-droneCircle-pane,
-    .leaflet-pane.leaflet-pilotCircle-pane,
-    .leaflet-droneCircle-pane canvas,
-    .leaflet-pilotCircle-pane canvas {
-      pointer-events: none !important;
-    }
-    /* Aircraft map marker — pointer cursor on EVERY descendant so the entire
-       32×32 hit box flips to the one-finger icon on hover, just like drones. */
-    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon,
-    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon *,
-    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon svg,
-    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon svg * {
-      pointer-events: auto !important;
-      cursor: pointer !important;
-    }
-    /* And prevent the plane SVG from being draggable (which would block clicks
-       AND trick the map into thinking the user is dragging the map). */
-    .leaflet-marker-pane .leaflet-marker-icon.adsb-icon svg {
-      -webkit-user-drag: none;
-      user-select: none;
-      -webkit-user-select: none;
-    }
-    /* Live in-view aircraft count in panel header — bare number,
-       right-aligned, cyan accent, full visibility (never truncated). */
-    #adsbBoxStatus {
-      color: #88c8ff !important;
-      font-weight: 700 !important;
-      letter-spacing: 0.3px;
-      text-transform: none !important;
-      font-size: 0.85em !important;
-      text-align: right;
-      overflow: visible !important;
-      text-overflow: clip !important;
-    }
-    /* ───── MAP LAYER panel — refined sub-elements ───── */
-    /* Offline mapping wrapper (the lime-bordered cyberpunk card inside the
-       MAP LAYER panel). Replaced with the dark glass treatment. */
-    #offlineMappingPanel {
-      border: 1px solid rgba(136, 255, 153, 0.18) !important;
-      background: rgba(255, 255, 255, 0.025) !important;
-      border-radius: 6px !important;
-      padding: 8px !important;
-      margin: 0 !important;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      color: #dde6ee !important;
-      font-size: 12px !important;
-    }
-    /* "▼ OFFLINE MAPPING" sub-toggle inside the panel */
-    #cacheToggle {
-      color: #a5b8a8 !important;
-      letter-spacing: 1.5px !important;
-      font-weight: 700 !important;
-      font-size: 0.85em !important;
-      padding: 4px 6px !important;
-      border-radius: 4px;
-      transition: background .15s, color .15s;
-    }
-    #cacheToggle:hover {
-      background: rgba(136, 255, 153, 0.06);
-      color: #88ff99 !important;
-    }
-    #cacheToggle > span:first-child { color: #a5b8a8 !important; }
-    #cacheToggleArrow { color: rgba(255, 255, 255, 0.5) !important; }
-    /* Place search / cache controls inside cachePanel */
-    #cachePanel input[type="text"],
-    #cachePanel input[type="number"],
-    #cachePanel input[type="search"],
-    #cachePanel select {
-      background: rgba(255, 255, 255, 0.04) !important;
-      border: 1px solid rgba(255, 255, 255, 0.10) !important;
-      border-radius: 4px !important;
-      color: #dde6ee !important;
-      font-family: inherit !important;
-      padding: 5px 7px !important;
+    .drone-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
       box-sizing: border-box;
-    }
-    #cachePanel input:focus,
-    #cachePanel select:focus {
-      outline: none;
-      border-color: rgba(136, 255, 153, 0.55) !important;
-    }
-    #cachePanel button {
-      background: rgba(255, 255, 255, 0.04) !important;
-      color: #88ff99 !important;
-      border: 1px solid rgba(136, 255, 153, 0.25) !important;
-      border-radius: 4px !important;
-      font-family: inherit !important;
-      letter-spacing: 0.5px;
-      font-weight: 600;
-      padding: 5px 8px !important;
-      transition: background .15s, border-color .15s, filter .15s;
+      margin: 0;
+      padding: 4px 8px;
+      border: 1px solid;
+      border-color: color-mix(in srgb, currentColor 55%, transparent) !important;
+      border-radius: var(--r);
+      background: rgba(7, 9, 12, 0.72);
+      font: 500 11.5px/1.3 var(--mono);
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
       cursor: pointer;
+      user-select: none;
+      caret-color: transparent;
+      outline: none;
+      transition: background .12s, box-shadow .12s;
     }
-    #cachePanel button:hover {
-      background: rgba(136, 255, 153, 0.10) !important;
-      border-color: rgba(136, 255, 153, 0.45) !important;
-      filter: brightness(1.1);
+    .drone-item::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.55;
     }
-    /* Sub-section labels inside cache panel ("PLACE SEARCH", "CACHE THIS AREA"
-       etc.) — clean uppercase letterspaced data labels. */
-    #cachePanel div[style*="background: linear-gradient"],
-    #cachePanel div[style*="background:linear-gradient"] {
-      background: none !important;
-      -webkit-background-clip: initial !important;
-      -webkit-text-fill-color: initial !important;
-      color: #a5b8a8 !important;
-      letter-spacing: 1.5px !important;
-      font-weight: 700 !important;
-      font-size: 0.78em !important;
+    .drone-item:hover { background: rgba(255, 255, 255, 0.04); }
+    .drone-item:focus { outline: none; caret-color: transparent; }
+    /* Heard in the last 5 seconds: the LED lights */
+    .drone-item.recent:not(.no-gps)::before { opacity: 1; box-shadow: 0 0 7px 1px currentColor; }
+    /* Heard, but no GPS lock: a dashed sky outline */
+    .drone-item.no-gps { position: relative; border-style: dashed; border-color: var(--sky) !important; }
+    .drone-item.no-gps::before { background: var(--sky); opacity: 1; }
+    .selected { background: rgba(46, 230, 214, 0.12) !important; box-shadow: inset 0 0 0 1px rgba(46, 230, 214, 0.6); }
+    /* Staleout */
+    #staleoutValue { margin-top: 4px; font: 600 12px/1.2 var(--mono); color: var(--accent); text-align: center; }
+    /* USB status (moves into SETTINGS at load) */
+    #serialStatus { font: 500 11.5px/1.5 var(--mono); color: var(--soft); text-align: left; }
+    #serialStatus:empty::before { content: 'no receivers connected'; color: var(--faint); font-family: var(--sans); }
+    #serialStatus div { margin-bottom: 2px; }
+    #serialStatus div:last-child { margin-bottom: 0; }
+    .usb-name { color: var(--text); }
+
+    /* ---- MAP LAYER (bottom right) ------------------------------------------ */
+    #basemapStatus {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 6px;
+      padding: 5px 10px;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      font: 600 10px/1.2 var(--mono);
+      letter-spacing: 0.14em;
+      color: var(--green);
+      background: rgba(7, 9, 12, 0.55);
+    }
+    #offlineMappingPanel { position: relative; }
+    #cacheToggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.16em;
       text-transform: uppercase;
+      color: var(--silk);
+      transition: color .12s;
     }
-    /* ───── Offline mapping flyout — opens to the LEFT of the Map Layer panel ─────
-       When toggled open, cachePanel pops out as a horizontal panel anchored
-       to the left edge of #offlineMappingPanel (which lives inside the Map
-       Layer panel). It floats outside the Map Layer panel's right anchor so
-       it doesn't push the Map Layer taller — purely horizontal expansion. */
-    /* While the flyout is open, let it escape the box. The toggle JS adds
-       .flyout-open to #mapLayerFloatBox alongside the panel, so this works
-       even in browsers without :has() (older Chromium on RPI kiosks, pre-121
-       Firefox, pre-15.4 Safari). !important beats the inline overflow:hidden /
-       overflow-y:auto on these elements; scoped to flyout-open so normal
-       scroll + rounded-corner clipping stay intact when it's closed. */
+    #cacheToggle::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--silk-line); min-width: 8px; }
+    #cacheToggle .mm-ico, #geofenceAlertHeader .mm-ico { width: 13px; height: 13px; }
+    #cacheToggle:hover, #geofenceAlertHeader:hover { color: var(--soft); }
+    #cachePanel { font-size: 12.5px; }
+    #cachePanel .mm-block { margin-top: 12px; }
+    #cacheEstimate { margin-top: 6px; font: 500 11.5px/1.4 var(--mono); color: var(--sky); }
+    /* The offline-mapping flyout opens to the LEFT of the MAP LAYER panel.
+       The toggle JS adds .flyout-open to the box too, so this works without
+       :has() (older Chromium on RPi kiosks, Firefox before 121, Safari 15.3). */
     #mapLayerFloatBox.flyout-open { overflow: visible !important; }
     #mapLayerFloatBox.flyout-open #mapLayerFloatContent { overflow: visible !important; }
     #offlineMappingPanel.flyout-open #cachePanel {
       position: absolute;
-      right: calc(100% + 8px);
-      bottom: 0;
+      right: calc(100% + 22px);
+      bottom: -12px;
       width: 340px;
-      max-width: calc(100vw - 420px);
+      max-width: calc(100vw - 440px);
       max-height: calc(100vh - 80px);
       overflow-y: auto;
       margin-top: 0;
-      padding: 10px 12px;
-      background: linear-gradient(180deg, #11161c 0%, #0a0d12 100%);
-      border: 1px solid rgba(136, 255, 153, 0.28);
-      border-radius: 8px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.6),
-                  0 0 12px rgba(136, 255, 153, 0.06);
+      padding: 12px;
+      --m: #6b747f;
+      background:
+        linear-gradient(var(--m), var(--m)) left top / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left top / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right top / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right top / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left bottom / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left bottom / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right bottom / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right bottom / 1px 8px no-repeat border-box,
+        var(--glass);
+      border: 1px solid #313843;
+      border-radius: var(--r);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
       z-index: 1001;
       animation: flyoutSlideLeft .18s ease-out;
     }
@@ -5862,573 +7837,544 @@ HTML_PAGE = '''
       from { opacity: 0; transform: translateX(8px); }
       to   { opacity: 1; transform: translateX(0); }
     }
-    /* On mobile, fall back to vertical expansion (no horizontal room) */
+
+    /* ---- GEOFENCING (bottom left) ------------------------------------------ */
+    #geofenceList { margin-top: 10px; max-height: 240px; overflow-y: auto; }
+    #geofenceAlertList { max-height: 220px; overflow-y: auto; font-size: 12px; color: var(--soft); }
+    #geofenceAlertHeader {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+      margin: 0 0 6px;
+      font: 600 10px/1.3 var(--mono);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--silk);
+    }
+    #geofenceAlertHeader::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--silk-line); min-width: 8px; }
+    #geofenceAlertCount { order: 2; color: var(--muted); letter-spacing: 0.04em; }
+    #geofenceCreateForm { margin-top: 10px; }
+    .gf-row {
+      margin-top: 4px;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      background: rgba(7, 9, 12, 0.55);
+    }
+    .gf-row-head { display: flex; align-items: center; gap: 8px; padding: 7px 8px; cursor: pointer; }
+    .gf-row-head:hover { background: rgba(255, 255, 255, 0.02); }
+    .gf-row-detail { padding: 8px 8px 9px; border-top: 1px solid var(--line); font-size: 12px; color: var(--soft); }
+    .gf-swatch { width: 18px; height: 18px; border-radius: 50%; cursor: pointer; box-sizing: border-box; border: 2px solid transparent; }
+    .gf-alert {
+      margin-top: 4px;
+      padding: 6px 8px;
+      border-left: 2px solid var(--c, var(--red));
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    /* ---- SETTINGS (bottom center) -------------------------------------------- */
+    #portRows { display: flex; flex-direction: column; gap: 5px; }
+    #portRows select { width: 100%; font-family: var(--mono); font-size: 12px; }
+    .mm-usb-pill { margin: 0 0 12px; }
+
+    /* ---- popups ---------------------------------------------------------------- */
+    .leaflet-popup-content-wrapper {
+      --m: var(--silk-mark);
+      background:
+        linear-gradient(var(--m), var(--m)) left top / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left top / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right top / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right top / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left bottom / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left bottom / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right bottom / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right bottom / 1px 8px no-repeat border-box,
+        rgba(9, 11, 15, 0.96) !important;
+      color: var(--text) !important;
+      font-family: var(--sans);
+      border: 1px solid var(--silk-line) !important;
+      border-radius: var(--r) !important;
+      box-shadow: 0 16px 38px rgba(0, 0, 0, 0.6) !important;
+    }
+    .leaflet-popup > .leaflet-popup-content-wrapper { width: 230px !important; max-width: 230px; }
+    .leaflet-popup-content {
+      margin: 12px 14px;
+      font-size: 13px;
+      line-height: 1.4;
+      white-space: normal;
+      background: transparent !important;
+      padding: 0 !important;
+      box-shadow: none !important;
+      color: inherit !important;
+    }
+    .leaflet-popup-tip-container { overflow: hidden; }
+    .leaflet-popup-tip {
+      background: rgba(9, 11, 15, 0.96) !important;
+      border: 1px solid var(--silk-line) !important;
+      box-shadow: none !important;
+    }
+    .leaflet-container a.leaflet-popup-close-button {
+      color: var(--muted) !important;
+      font: 400 18px/14px var(--sans) !important;
+      padding: 6px 6px 0 0 !important;
+      transition: color .12s;
+    }
+    .leaflet-container a.leaflet-popup-close-button:hover { color: var(--accent) !important; }
+    .leaflet-popup.adsb-popup > .leaflet-popup-content-wrapper { width: auto !important; max-width: 290px !important; }
+    .leaflet-popup.drone-popup > .leaflet-popup-content-wrapper { width: auto !important; max-width: 310px !important; }
+    .leaflet-popup.adsb-popup .leaflet-popup-content,
+    .leaflet-popup.drone-popup .leaflet-popup-content { margin: 13px 15px !important; font-size: 13px !important; line-height: 1.4 !important; }
+    .leaflet-popup.drone-popup .leaflet-popup-content { font-family: var(--sans) !important; color: var(--text) !important; }
+    /* A drone popup taller than the room between the pills (most have an FAA
+       record now) scrolls inside instead of running under them */
+    .leaflet-popup.drone-popup .leaflet-popup-content {
+      max-height: max(220px, calc(100vh - 230px));
+      max-height: max(220px, calc(100dvh - 230px));
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      touch-action: pan-y;
+      scrollbar-width: thin;
+      scrollbar-color: var(--line3) transparent;
+    }
+    .leaflet-popup.drone-popup .leaflet-popup-content::-webkit-scrollbar { width: 6px; background: transparent; }
+    .leaflet-popup.drone-popup .leaflet-popup-content::-webkit-scrollbar-thumb { background: var(--line3); border-radius: 3px; }
+    .leaflet-popup.no-gps-popup > .leaflet-popup-content-wrapper { color: var(--text) !important; }
+    .leaflet-popup-content-wrapper input:not([type="text"]) { caret-color: transparent; }
+    .mm-pop-title { font: 600 15px/1.25 var(--sans); color: var(--text); letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; }
+    .mm-pop-sub { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
+    .mm-pop-sub .mm-mac { font: 500 11.5px/1.3 var(--mono); color: var(--muted); letter-spacing: 0.01em; }
+    .mm-pop-sub .mm-tag { margin-left: auto; }
+    .mm-pop .mm-rule { margin: 11px 0; }
+    .mm-pop .mm-sec { margin-bottom: 6px; }
+    .mm-pop .mm-kv { font-size: 12.5px; }
+    .mm-pop .mm-row + .mm-row { margin-top: 6px; }
+    .mm-pop button { padding: 7px 8px; font-size: 11.5px; letter-spacing: 0.04em; }
+    .mm-pop a.mm-link { padding: 7px 8px; font-size: 11.5px; letter-spacing: 0.04em; flex: 1; }
+    .mm-pop .mm-hint { margin-top: 4px; font: 400 11px/1.3 var(--sans); color: var(--muted); text-align: center; }
+    .mm-faa {
+      padding: 6px 9px;
+      border: 1px solid var(--silk-line);
+      border-radius: var(--r);
+      background: rgba(7, 9, 12, 0.55);
+    }
+    /* The new-detection banner at the top */
+    #dronePopup {
+      --m: rgba(255, 61, 168, 0.8);
+      background:
+        linear-gradient(var(--m), var(--m)) left top / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left top / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right top / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right top / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left bottom / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) left bottom / 1px 8px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right bottom / 8px 1px no-repeat border-box,
+        linear-gradient(var(--m), var(--m)) right bottom / 1px 8px no-repeat border-box,
+        rgba(9, 11, 15, 0.95) !important;
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+    }
+    #dronePopup .mm-banner-head { display: flex; align-items: center; justify-content: center; gap: 8px; }
+    #dronePopup .mm-banner-id { margin-top: 3px; font: 500 11.5px/1.35 var(--mono); color: var(--soft); }
+    #dronePopup button { margin-top: 8px; }
+
+    /* ---- phones and narrow windows -------------------------------------------- */
+    /* Tablet portrait / split windows: tighten before phones kick in */
+    @media (max-width: 900px) {
+      /* the top boxes keep their 300px: two of them fit down to the phone
+         layout at 700px, and their headers need the room */
+      #filterBox {
+        max-width: calc(100vw - 20px);
+        top: 8px;
+        right: 8px;
+      }
+      #adsbBox {
+        top: 8px !important;
+        left: 8px !important;
+        max-width: calc(100vw - 16px) !important;
+      }
+      #adsbBoxContent {
+        max-width: calc(100vw - 20px) !important;
+      }
+      #mapLayerFloatBox {
+        right: 8px !important;
+        bottom: 10px !important;
+      }
+      #mapLayerFloatContent {
+        width: 340px !important;
+        max-width: calc(100vw - 16px) !important;
+        max-height: 40vh !important;
+      }
+      #geofenceFloatContent { width: 330px !important; max-width: calc(100vw - 20px) !important; }
+      #settingsFloatContent { width: 340px !important; max-width: calc(100vw - 20px) !important; }
+      #activePlaceholder, #inactivePlaceholder {
+        max-height: 24vh !important;
+      }
+    }
+    /* Narrow desktops and tablets: three bottom panels do not fit side by
+       side, so SETTINGS stacks above GEOFENCING on the left (clear of the zoom
+       keys) and MAP LAYER keeps the right. An open panel then never runs into
+       its neighbours: each grows up from its own corner. */
+    @media (min-width: 701px) and (max-width: 1000px) {
+      #geofenceFloatBox { left: 54px !important; bottom: 10px !important; }
+      #settingsFloatBox { left: 54px !important; transform: none !important; bottom: 58px !important; }
+    }
+    /* Phones: map-first. Every panel is a compact pill that expands into a
+       scrollable sheet, one at a time, and the map stays usable.
+         TOP-LEFT   AIR TRAFFIC pill      TOP-RIGHT  DRONES pill
+         BOTTOM     MAP LAYER bar (full width)
+         ABOVE IT   SETTINGS pill (left) + GEOFENCING pill (right) */
     @media (max-width: 700px) {
+      #adsbBox {
+        top: 6px !important;
+        left: 6px !important;
+        right: auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: 47vw !important;
+        box-sizing: border-box !important;
+      }
+      /* The pill shares the top row with DRONES: the count and the ON/OFF tag
+         hide (the switch shows the state; the sheet has the count). */
+      #adsbBoxStatus,
+      #adsbBoxStateLabel { display: none !important; }
+      #adsbBoxHeader { padding: 0 8px !important; gap: 8px !important; min-height: 42px; }
+      /* the collapsed pill shares the top row: the short name, ADS-B */
+      #adsbBox:not(.open) #adsbBoxHeader h3 .mm-long { display: none; }
+      #adsbBox:not(.open) #adsbBoxHeader h3 .mm-short { display: inline; }
+      #adsbBoxHeader h3 { letter-spacing: 0.1em; gap: 6px; }
+      #dronesHeaderCount { display: block; white-space: nowrap; text-overflow: ellipsis; }
+      #dronesHeaderCount::before { display: none; }
+      #adsbBoxContent {
+        width: auto !important;
+        max-width: calc(100vw - 24px) !important;
+        max-height: 55vh !important;
+        overflow-y: auto !important;
+      }
+      #filterBox {
+        top: 6px !important;
+        right: 6px !important;
+        left: auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: 47vw !important;
+        max-height: none !important;
+        overflow: hidden !important;
+        box-sizing: border-box !important;
+      }
+      /* Collapsed drones pill: no wordmark, no ON tag, so it stays narrow */
+      #filterBox.collapsed #filterHeader h3,
+      #filterBox.collapsed #dronesLayerStateLabel { display: none; }
+      #filterBox.collapsed #filterHeader { gap: 8px !important; padding: 0 8px !important; min-height: 42px; }
+      #filterBox.collapsed #dronesHeaderCount { max-width: 90px; }
+      #filterBox.collapsed #dronesHeaderCount::before { display: none; }
+      /* Expanded drones panel: a full-width top sheet with its own scroll */
+      #filterBox:not(.collapsed) {
+        left: 6px !important;
+        right: 6px !important;
+        max-width: none !important;
+        max-height: 62vh !important;
+        overflow-y: auto !important;
+      }
+      /* --- bottom row: the main bar and two pills above it --- */
+      #mapLayerFloatBox {
+        left: 6px !important;
+        right: 6px !important;
+        bottom: 6px !important;
+        width: auto !important;
+      }
+      #mapLayerFloatContent {
+        width: auto !important;
+        max-width: none !important;
+        max-height: 55vh !important;
+      }
+      /* SETTINGS is centred on desktop; on a phone it sits bottom-left */
+      #settingsFloatBox {
+        left: 6px !important;
+        right: auto !important;
+        transform: none !important;
+        bottom: 54px !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: 47vw !important;
+      }
+      #settingsFloatContent {
+        width: auto !important;
+        max-width: calc(100vw - 24px) !important;
+        max-height: 50vh !important;
+      }
+      #geofenceFloatBox {
+        left: auto !important;
+        right: 6px !important;
+        bottom: 54px !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: 47vw !important;
+      }
+      #geofenceFloatContent {
+        width: auto !important;
+        max-width: calc(100vw - 24px) !important;
+        max-height: 50vh !important;
+      }
+      /* Bigger tap targets on the bars */
+      #mapLayerFloatHeader,
+      #settingsFloatHeader,
+      #geofenceFloatHeader { padding: 0 10px !important; min-height: 42px; }
+      /* SETTINGS and GEOFENCING share a row as pills: tighter tracking, no
+         icon, and the readout ends in an ellipsis instead of being clipped */
+      #geofenceFloatHeader h3, #settingsFloatHeader h3 { letter-spacing: 0.04em; font-size: 10.5px; }
+      #geofenceFloatStatus, #settingsFloatStatus, #mapLayerFloatStatus { font-size: 10.5px; }
+      #geofenceFloatBox:not(.open) #geofenceFloatHeader .mm-ico,
+      #settingsFloatBox:not(.open) #settingsFloatHeader .mm-ico { display: none; }
+      #geofenceFloatBox:not(.open) #geofenceFloatHeader,
+      #settingsFloatBox:not(.open) #settingsFloatHeader { gap: 7px !important; padding: 0 8px !important; }
+      #geofenceFloatStatus, #settingsFloatStatus { display: block; white-space: nowrap; text-overflow: ellipsis; }
+      #geofenceFloatStatus::before, #settingsFloatStatus::before { display: none; }
+      /* Leaflet's own controls sit above the bottom pills so they stay reachable */
+      .leaflet-bottom.leaflet-left,
+      .leaflet-bottom.leaflet-right { bottom: 98px !important; }
+      /* Larger text and tap targets inside the sheets */
+      #filterBox, #adsbBox, #mapLayerFloatBox,
+      #settingsFloatBox, #geofenceFloatBox { font-size: 14px; }
+      #filterBox button, #adsbBox button, #settingsFloatBox button,
+      #geofenceFloatBox button, #mapLayerFloatBox button { padding: 9px 10px !important; }
+      #filterBox input[type="text"], #adsbBox input[type="text"], #settingsFloatBox input[type="text"],
+      #settingsFloatBox input[type="password"], #settingsFloatBox input[type="number"],
+      #geofenceFloatBox input[type="text"], #mapLayerFloatBox input[type="text"],
+      #filterBox select, #adsbBox select, #settingsFloatBox select, #mapLayerFloatBox select { font-size: 16px; }
+      /* An expanded panel owns the whole row, so its header and fold key can
+         never be covered by another bar. JS adds .open while it is shown. */
+      #adsbBox.open {
+        left: 6px !important;
+        right: 6px !important;
+        max-width: none !important;
+      }
+      #adsbBox.open #adsbBoxContent {
+        width: auto !important;
+        max-width: none !important;
+        max-height: 58vh !important;
+      }
+      #settingsFloatBox.open, #geofenceFloatBox.open {
+        left: 6px !important;
+        right: 6px !important;
+        max-width: none !important;
+        bottom: 54px !important;
+      }
+      #settingsFloatBox.open #settingsFloatContent,
+      #geofenceFloatBox.open #geofenceFloatContent {
+        width: auto !important;
+        max-width: none !important;
+      }
+      #filterBox:not(.collapsed) #filterHeader h3 { display: inline-flex !important; }
+      /* An open sheet always paints above its siblings' collapsed pills, and
+         is opaque so the pill under it does not ghost through */
+      #adsbBox.open, #filterBox:not(.collapsed),
+      #settingsFloatBox.open, #geofenceFloatBox.open, #mapLayerFloatBox.open { z-index: 1002 !important; --glass: rgb(9, 11, 15); }
+      /* Roomier fold keys: the whole header taps, the key is the obvious target */
+      #adsbBoxToggle, #filterToggle, #geofenceFloatToggle,
+      #settingsFloatToggle, #mapLayerFloatToggle { width: 26px; height: 26px; font-size: 16px !important; }
+      /* Respect notch / home-indicator / app-bar insets (WKWebView inside the
+         Sky Spy / MeshDetect apps embeds this page under their own chrome) */
+      #adsbBox, #filterBox { top: calc(6px + env(safe-area-inset-top, 0px)) !important; }
+      #mapLayerFloatBox { bottom: calc(6px + env(safe-area-inset-bottom, 0px)) !important; }
+      #settingsFloatBox, #geofenceFloatBox { bottom: calc(54px + env(safe-area-inset-bottom, 0px)) !important; }
+      .leaflet-bottom.leaflet-left,
+      .leaflet-bottom.leaflet-right { bottom: calc(98px + env(safe-area-inset-bottom, 0px)) !important; }
+      /* The offline-mapping flyout opens downward on phones (no room to the side) */
       #offlineMappingPanel.flyout-open #cachePanel {
         position: static;
         width: auto;
         max-width: none;
         max-height: 50vh;
-        margin-top: 6px;
+        margin-top: 10px;
+        padding: 10px 0 0;
+        background: none;
+        border: 0;
+        border-top: 1px solid var(--silk-line);
+        border-radius: 0;
+        box-shadow: none;
         animation: none;
       }
+      #dronePopup { max-width: 88vw; }
     }
-    /* ───────── Leaflet zoom control — matches panel/popup card vocabulary ───────── */
-    .leaflet-control-zoom {
-      border: 1px solid rgba(136, 200, 255, 0.28) !important;
-      border-radius: 8px !important;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.6),
-                  0 0 12px rgba(0,0,0,0.4) !important;
-      overflow: hidden;
-      background: linear-gradient(180deg, #11161c 0%, #0a0d12 100%);
+    @media (max-width: 400px) {
+      #mapLayerFloatStatus::before { display: none; }
     }
-    .leaflet-control-zoom a {
-      background: transparent !important;
-      color: #dde6ee !important;
-      border: 0 !important;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-      font-weight: 600 !important;
-      font-size: 16px !important;
-      width: 32px !important;
-      height: 32px !important;
-      line-height: 32px !important;
-      transition: background .12s, color .12s;
+    @media (max-width: 380px) {
+      #adsbBox:not(.open) #adsbBoxHeader h3 .mm-ico { display: none; }
+      /* smaller phones: tighter pills so every readout still fits whole */
+      #geofenceFloatBox:not(.open) #geofenceFloatHeader,
+      #settingsFloatBox:not(.open) #settingsFloatHeader,
+      #filterBox.collapsed #filterHeader { gap: 5px !important; }
+      #geofenceFloatToggle, #settingsFloatToggle, #filterToggle { width: 22px; height: 22px; }
+      #geofenceFloatStatus, #settingsFloatStatus, #dronesHeaderCount { letter-spacing: 0; }
     }
-    .leaflet-control-zoom a:hover {
-      background: rgba(136, 200, 255, 0.12) !important;
-      color: #88c8ff !important;
+    @media (max-width: 340px) {
+      #geofenceFloatBox:not(.open) #geofenceFloatStatus,
+      #settingsFloatBox:not(.open) #settingsFloatStatus,
+      #mapLayerFloatStatus .mm-ml-name { display: none; }
+      #filterBox.collapsed #filterHeader { padding: 0 6px !important; }
+      #dronesHeaderCount { font-size: 10.5px; }
     }
-    .leaflet-control-zoom a:active {
-      background: rgba(136, 200, 255, 0.22) !important;
-    }
-    .leaflet-control-zoom a:first-child {
-      border-bottom: 1px solid rgba(255,255,255,0.07) !important;
-    }
-    .leaflet-control-zoom a.leaflet-disabled {
-      color: #4a5560 !important;
-      cursor: not-allowed;
-    }
-    /* Collapse inner Leaflet popup layers into the outer wrapper */
-    .leaflet-popup-content {
-      background: transparent !important;
-      padding: 0 !important;
-      box-shadow: none !important;
-      color: inherit !important;
-    }
-    .leaflet-popup-tip-container,
-    .leaflet-popup-tip {
-      background: transparent !important;
-      box-shadow: none !important;
-    }
-    /* Collapse inner popup layers for no-GPS popups */
-    .leaflet-popup.no-gps-popup > .leaflet-popup-content-wrapper {
-      /* ensure outer wrapper styling persists */
-      background-color: black !important;
-      color: lime !important;
-    }
-    .leaflet-popup.no-gps-popup .leaflet-popup-content {
-      background: transparent !important;
-      padding: 0 !important;
-      box-shadow: none !important;
-      color: inherit !important;
-    }
-    .leaflet-popup.no-gps-popup .leaflet-popup-tip-container,
-    .leaflet-popup.no-gps-popup .leaflet-popup-tip {
-      background: transparent !important;
-      box-shadow: none !important;
-    }
-    button {
-      margin-top: 4px;
-      padding: 3px;
-      font-size: 0.8em;
-      border: 1px solid lime;
-      background-color: #333;
-      color: lime;
-      cursor: pointer;
-      width: auto;
-    }
-    select {
-      background-color: #333;
-      color: lime;
-      border: none;
-      padding: 3px;
-    }
-    .leaflet-control-zoom-in, .leaflet-control-zoom-out {
-      background: rgba(0,0,0,0.8);
-      color: lime;
-      border: 1px solid lime;
-      border-radius: 5px;
-    }
-    /* Style zoom control container to match drone box */
-    .leaflet-control-zoom.leaflet-bar {
-      background: rgba(0,0,0,0.8);
-      border: 1px solid lime;
-      border-radius: 10px;
-    }
-    .leaflet-control-zoom.leaflet-bar a {
-      background: transparent;
-      color: lime;
-      border: none;
-      width: 30px;
-      height: 30px;
-      line-height: 30px;
-      text-align: center;
-      padding: 0;
-      user-select: none;
-      caret-color: transparent;
-      cursor: pointer;
-      outline: none;
-    }
-    .leaflet-control-zoom.leaflet-bar a:focus {
-      outline: none;
-      caret-color: transparent;
-    }
-    .leaflet-control-zoom.leaflet-bar a:hover {
-      background: rgba(255,255,255,0.1);
-    }
-    .leaflet-control-zoom-in:hover, .leaflet-control-zoom-out:hover { background-color: #222; }
-    input#aliasInput {
-      background-color: #222;
-      color: #87CEEB;         /* pastel blue (updated) */
-      border: 1px solid #FF00FF;
-      padding: 4px;
-      font-size: 1.06em;
-      caret-color: #87CEEB;
-      outline: none;
-    }
-    .leaflet-popup-content-wrapper input:not(#aliasInput) {
-      caret-color: transparent;
-    }
-    /* Popup button styling */
-    .leaflet-popup-content-wrapper button {
-      display: inline-block;
-      margin: 2px 4px 2px 0;
-      padding: 4px 6px;
-      font-size: 0.9em;
-      width: auto;
-      background-color: #333;
-      border: 1px solid lime;
-      color: lime;
-      box-shadow: none;
-      text-shadow: none;
-    }
-
-    /* Locked button styling */
-    .leaflet-popup-content-wrapper button[style*="background-color: green"] {
-      background-color: green;
-      color: black;
-      border-color: green;
-    }
-
-    /* Hover effect */
-    .leaflet-popup-content-wrapper button:hover {
-      background-color: rgba(255,255,255,0.1);
-    }
-    .leaflet-popup-content-wrapper input[type="text"],
-    .leaflet-popup-content-wrapper input[type="range"] {
-      font-size: 0.75em;
-      padding: 2px;
-    }
-    /* Tile rendering: smooth bilinear scaling during animated zoom, GPU
-       compositing hint for pan/zoom, no fighting with the fade-in anim. */
-    .leaflet-tile {
-      display: block;
-      margin: 0;
-      padding: 0;
-      image-rendering: auto;
-      background-color: black;
-      border: none !important;
-      box-shadow: none !important;
-    }
-    .leaflet-container {
-      background-color: black;
-    }
-    /* Disable text cursor in drone list and filter toggle */
-    .drone-item, #filterToggle {
-      user-select: none;
-      caret-color: transparent;
-      outline: none;
-    }
-    .drone-item:focus, #filterToggle:focus {
-      outline: none;
-      caret-color: transparent;
-    }
-    /* (Old cyberpunk magenta heading style — neutralized; the new pill-style
-       overrides further down own this now.) */
-    #filterContent > h3:nth-of-type(1),
-    #filterContent > h3:nth-of-type(2) {
-      text-align: left;
-      font-size: inherit;
-    }
-    /* Lime-green hacky dashes around filter headers */
-    #filterContent > h3 {
-      display: block;
-      width: 100%;
-      text-align: center;
-      margin: 0.5em 0;
-    }
-    /* Old lime "---" hacky dashes — neutralized; the new pill headers don't need them. */
-    #filterContent > h3::before,
-    #filterContent > h3::after {
-      content: '';
-      margin: 0;
-    }
-    /* Download buttons styling */
-    #downloadButtons {
-      display: flex;
-      width: 100%;
-      gap: 4px;
-      margin-top: 8px;
-    }
-    #downloadButtons button {
-      flex: 1;
-      margin: 0;
-      padding: 4px;
-      font-size: 0.8em;
-      border: 1px solid lime;
-      border-radius: 5px;
-      background-color: #333;
-      color: lime;
-      font-family: monospace;
-      cursor: pointer;
-    }
-    #downloadButtons button:focus {
-      outline: none;
-      caret-color: transparent;
-    }
-    /* Gradient blue border flush with heading */
-    #downloadSection {
-      padding: 0 8px 8px 8px;  /* no top padding so border is flush with heading */
-      margin-top: 12px;
-    }
-    /* Staleout slider styling – match popup sliders */
-    #staleoutSlider {
-      -webkit-appearance: none;
-      width: 100%;
-      height: 4px;
-      background: transparent;
-      border: none;
-      outline: none;
-    }
-    #staleoutSlider::-webkit-slider-runnable-track {
-      width: 100%;
-      height: 4px;
-      background: rgba(255, 255, 255, 0.10);
-      border: none;
-      border-radius: 4px;
-    }
-    #staleoutSlider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      height: 14px;
-      width: 14px;
-      background: #fff;
-      border: 0;
-      margin-top: -5px;
-      border-radius: 50%;
-      cursor: pointer;
-      box-shadow: 0 0 0 2px rgba(136, 255, 153, 0.6),
-                  0 1px 3px rgba(0, 0, 0, 0.4);
-      transition: box-shadow .15s, transform .15s;
-    }
-    #staleoutSlider::-webkit-slider-thumb:hover { transform: scale(1.1); }
-    /* Firefox */
-    #staleoutSlider::-moz-range-track {
-      width: 100%;
-      height: 4px;
-      background: rgba(255, 255, 255, 0.10);
-      border: none;
-      border-radius: 4px;
-    }
-    #staleoutSlider::-moz-range-thumb {
-      height: 14px;
-      width: 14px;
-      background: #fff;
-      border: 0;
-      margin-top: -5px;
-      border-radius: 50%;
-      cursor: pointer;
-      box-shadow: 0 0 0 2px rgba(136, 255, 153, 0.6),
-                  0 1px 3px rgba(0, 0, 0, 0.4);
-    }
-    /* IE */
-    #staleoutSlider::-ms-fill-lower,
-    #staleoutSlider::-ms-fill-upper {
-      background: rgba(255, 255, 255, 0.10);
-      border: none;
-      border-radius: 4px;
-    }
-    #staleoutSlider::-ms-thumb {
-      height: 14px;
-      width: 14px;
-      background: #fff;
-      border: 0;
-      border-radius: 50%;
-      cursor: pointer;
-      margin-top: -6.5px;
-    }
-
-    /* Popup range sliders styling */
-    .leaflet-popup-content-wrapper input[type="range"] {
-      -webkit-appearance: none;
-      width: 100%;
-      height: 3px;
-      background: transparent;
-      border: none;
-    }
-    .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
-      border-radius: 50%;
-      cursor: pointer;
-    }
-    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-thumb {
-      height: 16px;
-      width: 16px;
-      background: lime;
-      border: 1px solid #9B30FF;
-      margin-top: -6.5px;
-      border-radius: 50%;
-      cursor: pointer;
-    }
-    /* Ensure popup sliders have the same track styling */
-    .leaflet-popup-content-wrapper input[type="range"]::-webkit-slider-runnable-track {
-      width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: 1px solid lime;
-      border-radius: 0;
-    }
-    .leaflet-popup-content-wrapper input[type="range"]::-moz-range-track {
-      width: 100%;
-      height: 3px;
-      background: #9B30FF;
-      border: 1px solid lime;
-      border-radius: 0;
-    }
-
-    /* 1) Remove rounded corners from all sliders */
-    /* WebKit */
-    input[type="range"]::-webkit-slider-runnable-track,
-    input[type="range"]::-webkit-slider-thumb {
-      border-radius: 0;
-    }
-    /* Firefox */
-    input[type="range"]::-moz-range-track,
-    input[type="range"]::-moz-range-thumb {
-      border-radius: 0;
-    }
-    /* IE */
-    input[type="range"]::-ms-fill-lower,
-    input[type="range"]::-ms-fill-upper,
-    input[type="range"]::-ms-thumb {
-      border-radius: 0;
-    }
-
-    /* 2) Smaller, side-by-side Observer buttons */
-    .leaflet-popup-content-wrapper #lock-observer,
-    .leaflet-popup-content-wrapper #unlock-observer {
-      display: inline-block;
-      font-size: 0.9em;
-      padding: 4px 6px;
-      margin: 2px 4px 2px 0;
-    }
-    /* Cumulative download buttons styling to match regular download buttons */
-    #downloadCumulativeButtons button {
-      flex: 1;
-      margin: 0;
-      padding: 4px;
-      font-size: 0.8em;
-      border: 1px solid lime;
-      border-radius: 5px;
-      background-color: #333;
-      color: lime;
-      font-family: monospace;
-      cursor: pointer;
-    }
-    #downloadCumulativeButtons button:focus {
-      outline: none;
-      caret-color: transparent;
-    }
-</style>
-    <style>
-      /* Remove glow and shadows on text boxes, selects, and buttons */
-      input, select, button {
-        text-shadow: none !important;
-        box-shadow: none !important;
-      }
-    </style>
+  </style>
 </head>
 <body>
 <div id="map"></div>
 
 <!-- BOTTOM-LEFT: GEOFENCING float box (expands UP). Sits just to the right of
      Leaflet's bottom-left zoom controls. Width = content when collapsed, fixed
-     when expanded. Same card aesthetic as the new ADS-B/drone popups. -->
-<div id="geofenceFloatBox" style="position:absolute; bottom:10px; left:60px; z-index:1000; width:fit-content; border:1px solid rgba(255,102,136,0.35); border-radius:8px; background:linear-gradient(180deg,#181216 0%,#0c0a0c 100%); font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; color:#e8d8de; box-shadow:0 8px 24px rgba(0,0,0,0.6), 0 0 12px rgba(255,102,136,0.08); overflow:hidden;">
-  <div id="geofenceFloatContent" style="display:none; padding:10px 12px; width:320px; max-height:60vh; overflow-y:auto; box-sizing:border-box;">
+     when expanded. -->
+<div id="geofenceFloatBox">
+  <div id="geofenceFloatContent" style="display:none;">
     <!-- populated at startup from #geofencePanel relocation -->
   </div>
-  <div id="geofenceFloatHeader" style="display:flex; justify-content:space-between; align-items:center; padding:8px 14px; cursor:pointer; background:rgba(40,18,24,0.6); border-top:1px solid rgba(255,102,136,0.35); gap:12px; white-space:nowrap;">
-    <h3 style="margin:0; font-size:0.78em; color:#ff99aa; letter-spacing:2px; font-weight:700;">GEOFENCING</h3>
-    <span id="geofenceFloatStatus" style="color:#a87f87; font-size:0.7em; letter-spacing:0.5px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;"></span>
-    <span id="geofenceFloatToggle" style="font-size:16px; color:#ff99aa; font-weight:bold;">[+]</span>
+  <div id="geofenceFloatHeader">
+    <h3><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 8.2 11.8 4l7.6 4.8-1.6 9.6L7 20z" stroke-dasharray="2.4 2.2"/><circle cx="5" cy="8.2" r="1.5" fill="currentColor" stroke="none"/><circle cx="11.8" cy="4" r="1.5" fill="currentColor" stroke="none"/><circle cx="19.4" cy="8.8" r="1.5" fill="currentColor" stroke="none"/><circle cx="17.8" cy="18.4" r="1.5" fill="currentColor" stroke="none"/><circle cx="7" cy="20" r="1.5" fill="currentColor" stroke="none"/></svg>GEOFENCING</h3>
+    <span id="geofenceFloatStatus"></span>
+    <span id="geofenceFloatToggle">+</span>
   </div>
 </div>
 
 <!-- Bottom-CENTER: SETTINGS float box (expands UP). Width = content (collapses tight). -->
-<div id="settingsFloatBox" style="position:absolute; bottom:10px; left:50%; transform:translateX(-50%); z-index:1000; width:fit-content; border:1px solid lime; border-radius:8px; background:rgba(0,0,0,0.88); font-family:monospace; color:lime; box-shadow:0 0 10px #002200; overflow:hidden;">
-  <div id="settingsFloatContent" style="display:none; padding:8px 12px; width:340px; max-height:60vh; overflow-y:auto; box-sizing:border-box;">
+<div id="settingsFloatBox">
+  <div id="settingsFloatContent" style="display:none;">
     <!-- populated at startup -->
   </div>
-  <div id="settingsFloatHeader" style="display:flex; justify-content:space-between; align-items:center; padding:6px 14px; cursor:pointer; background:rgba(0,30,0,0.7); border-top:1px solid lime; gap:14px; white-space:nowrap;">
-    <h3 style="margin:0; font-size:0.85em; color:#aaffaa; letter-spacing:1px;">SETTINGS</h3>
-    <span id="settingsFloatStatus" style="color:#88aa88; font-size:0.75em;">general</span>
-    <span id="settingsFloatToggle" style="font-size:18px; color:#aaffaa;">[+]</span>
+  <div id="settingsFloatHeader">
+    <h3><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9M17.4 7H20M4 17h3M11.4 17H20"/><circle cx="15.2" cy="7" r="2.2"/><circle cx="9.2" cy="17" r="2.2"/></svg>SETTINGS</h3>
+    <span id="settingsFloatStatus">general</span>
+    <span id="settingsFloatToggle">+</span>
   </div>
 </div>
 
 <!-- Bottom-RIGHT: MAP LAYER float box. Anchored bottom-right; expands UP and LEFT.
      Width grows when content opens (BASEMAP + OFFLINE MAPPING). Height capped
-     so it never reaches the Drones panel above. Mobile rules below override. -->
-<div id="mapLayerFloatBox" style="position:absolute; bottom:10px; right:10px; z-index:1000; width:fit-content; border:1px solid rgba(136,255,153,0.28); border-radius:8px; background:linear-gradient(180deg,#11161c 0%,#0a0d12 100%); font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; color:#dde6ee; box-shadow:0 8px 24px rgba(0,0,0,0.6), 0 0 12px rgba(136,255,153,0.06); overflow:hidden;">
-  <div id="mapLayerFloatContent" style="display:none; padding:10px 12px; width:380px; max-width:calc(100vw - 20px); max-height:calc(100vh - 380px); min-height:0; overflow-y:auto; box-sizing:border-box;">
+     so it never reaches the Drones panel above. Mobile rules override. -->
+<div id="mapLayerFloatBox">
+  <div id="mapLayerFloatContent" style="display:none;">
     <!-- populated at startup with BASEMAP + OFFLINE MAPPING -->
   </div>
-  <div id="mapLayerFloatHeader" style="display:flex; justify-content:space-between; align-items:center; padding:8px 14px; cursor:pointer; background:rgba(255,255,255,0.03); border-top:1px solid rgba(136,255,153,0.28); gap:12px; white-space:nowrap;">
-    <h3 style="margin:0; font-size:0.78em; color:#88ff99; letter-spacing:2px; font-weight:700;">MAP LAYER</h3>
-    <span id="mapLayerFloatStatus" style="color:#7e9486; font-size:0.7em; letter-spacing:0.5px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;"></span>
-    <span id="mapLayerFloatToggle" style="font-size:16px; color:#88ff99; font-weight:700;">[+]</span>
+  <div id="mapLayerFloatHeader">
+    <h3><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 21 8.5l-9 5-9-5z"/><path d="M3.8 12.4 12 17l8.2-4.6"/><path d="M3.8 16 12 20.6l8.2-4.6"/></svg>MAP LAYER</h3>
+    <span id="mapLayerFloatStatus"></span>
+    <span id="mapLayerFloatToggle">+</span>
   </div>
 </div>
 
 <!-- Top-left AIR TRAFFIC panel: full ADS-B settings + live aircraft list (in current view), collapsible.
-     [+]/[-] is on the LEFT of the header (because the box itself is on the left of the screen). -->
-<div id="adsbBox" style="position:absolute; top:10px; left:10px; z-index:1000; width:300px; border:1px solid rgba(136,200,255,0.28); border-radius:8px; background:linear-gradient(180deg,#11161c 0%,#0a0d12 100%); font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; color:#dde6ee; box-shadow:0 8px 24px rgba(0,0,0,0.6), 0 0 12px rgba(136,200,255,0.06); overflow:hidden;">
-  <div id="adsbBoxHeader" style="display:flex; justify-content:flex-start; align-items:center; padding:8px 12px; cursor:pointer; background:rgba(255,255,255,0.03); border-bottom:1px solid rgba(136,200,255,0.18); gap:8px; white-space:nowrap;">
-    <span id="adsbBoxToggle" style="font-size:15px; color:#88c8ff; font-weight:bold; flex-shrink:0;">[-]</span>
-    <h3 style="margin:0; font-size:0.72em; color:#88c8ff; letter-spacing:1.5px; font-weight:700; flex-shrink:0;">AIR TRAFFIC</h3>
-    <span id="adsbBoxStatus" style="color:#88c8ff; font-size:0.78em; font-weight:700; letter-spacing:0.3px; flex:1; min-width:0; text-align:right; overflow:visible;"></span>
-    <span id="adsbBoxStateLabel" style="color:#586978; font-size:0.65em; font-weight:700; letter-spacing:0.5px; padding:2px 6px; border:1px solid rgba(255,255,255,0.10); border-radius:8px; background:transparent; flex-shrink:0;">OFF</span>
-    <label class="switch" style="margin:0; flex-shrink:0;" title="Enable ADS-B layer">
+     The fold key is on the LEFT of the header (the box itself is on the left of the screen). -->
+<div id="adsbBox">
+  <div id="adsbBoxHeader">
+    <span id="adsbBoxToggle">&minus;</span>
+    <h3><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.8c.9 0 1.4.9 1.4 2v4.9l7.1 4.3v2.1l-7.1-2.2v4l2.1 1.6v1.7L12 20.4l-3.5.8v-1.7l2.1-1.6v-4l-7.1 2.2V14l7.1-4.3V4.8c0-1.1.5-2 1.4-2z"/></svg><span class="mm-long">AIR TRAFFIC</span><span class="mm-short">ADS-B</span></h3>
+    <span id="adsbBoxStatus"></span>
+    <span id="adsbBoxStateLabel">OFF</span>
+    <label class="switch" title="Enable ADS-B layer">
       <input type="checkbox" id="adsbBoxEnableToggle">
       <span class="slider"></span>
     </label>
   </div>
-  <div id="adsbBoxContent" style="padding:0; width:300px; box-sizing:border-box;">
+  <div id="adsbBoxContent">
     <!-- Settings sub-section (collapsible inside the panel) -->
-    <div style="padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.05); font-size:0.78em;">
-      <div id="adsbBoxSettingsToggle" style="cursor:pointer; user-select:none;">▸ SETTINGS</div>
-      <div id="adsbBoxSettings" style="display:none; margin-top:4px;">
-        <label style="display:block;">Source:
-          <select id="adsbBoxSource" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;">
-            <optgroup label="── Network ──">
+    <div class="mm-pad">
+      <div id="adsbBoxSettingsToggle"><span id="adsbBoxSettingsCaret">▸</span>Settings</div>
+      <div id="adsbBoxSettings" style="display:none;">
+        <label class="mm-field"><span class="mm-label mm-field-label">Source</span>
+          <select id="adsbBoxSource">
+            <optgroup label="Network">
               <option value="adsblol">adsb.lol</option>
               <option value="adsbfi">adsb.fi</option>
               <option value="airplaneslive">airplanes.live</option>
               <option value="opensky">OpenSky</option>
               <option value="adsbexchange">ADS-B Exchange (key)</option>
             </optgroup>
-            <optgroup label="── Local SDR ──">
+            <optgroup label="Local SDR">
               <option value="dump1090">Local dump1090/readsb</option>
               <option value="beast">Beast TCP raw (pyModeS)</option>
             </optgroup>
           </select>
         </label>
-        <label style="display:block; margin-top:3px;">Refresh (s):
-          <input id="adsbBoxInterval" type="number" min="2" max="120" value="8"
-                 style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
+        <label class="mm-field"><span class="mm-label mm-field-label">Refresh (s)</span>
+          <input id="adsbBoxInterval" type="number" min="2" max="120" value="8"/>
         </label>
-        <label style="display:flex; align-items:center; gap:6px; margin-top:3px;">
-          <input type="checkbox" id="adsbBoxBboxOnly" checked style="accent-color:#00aaff;"/>
+        <label class="mm-check" style="margin-top:9px;">
+          <input type="checkbox" id="adsbBoxBboxOnly" checked/>
           <span>Only fetch around current view</span>
         </label>
-        <div id="adsbBoxDump1090Box" style="display:none; margin-top:4px;">
-          <input id="adsbBoxDump1090Url" type="text" placeholder="http://localhost:8080/data/aircraft.json"
-                 style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
+        <div id="adsbBoxDump1090Box" style="display:none; margin-top:8px;">
+          <input id="adsbBoxDump1090Url" class="mm-mono" type="text" placeholder="http://localhost:8080/data/aircraft.json" style="width:100%;"/>
         </div>
-        <div id="adsbBoxBeastBox" style="display:none; margin-top:4px; display:flex; gap:4px;">
-          <input id="adsbBoxBeastHost" type="text" placeholder="host"
-                 style="flex:2; min-width:0; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
-          <input id="adsbBoxBeastPort" type="number" placeholder="30005" min="1" max="65535"
-                 style="flex:1; min-width:0; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
+        <div id="adsbBoxBeastBox" class="mm-row" style="display:none; margin-top:8px; display:flex;">
+          <input id="adsbBoxBeastHost" class="mm-mono" type="text" placeholder="host" style="flex:2;"/>
+          <input id="adsbBoxBeastPort" class="mm-mono" type="number" placeholder="30005" min="1" max="65535" style="flex:1;"/>
         </div>
-        <div id="adsbBoxOpenskyBox" style="display:none; margin-top:4px;">
-          <input id="adsbBoxOpenskyUser" type="text" placeholder="opensky user"
-                 style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
-          <input id="adsbBoxOpenskyPass" type="password" placeholder="pass"
-                 style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px; margin-top:2px;"/>
+        <div id="adsbBoxOpenskyBox" style="display:none; margin-top:8px;">
+          <input id="adsbBoxOpenskyUser" type="text" placeholder="opensky user" style="width:100%;"/>
+          <input id="adsbBoxOpenskyPass" type="password" placeholder="pass" style="width:100%; margin-top:5px;"/>
         </div>
-        <div id="adsbBoxExchangeBox" style="display:none; margin-top:4px;">
-          <input id="adsbBoxExchangeKey" type="password" placeholder="RapidAPI key"
-                 style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
+        <div id="adsbBoxExchangeBox" style="display:none; margin-top:8px;">
+          <input id="adsbBoxExchangeKey" type="password" placeholder="RapidAPI key" style="width:100%;"/>
         </div>
-        <button id="adsbBoxSaveBtn" style="margin-top:4px; width:100%; padding:3px; background:#001a2a; border:1px solid #00aaff; color:#aaeeff; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">SAVE CONFIG</button>
+        <button id="adsbBoxSaveBtn" class="mm-primary mm-block" style="margin-top:10px;">SAVE CONFIG</button>
       </div>
     </div>
-    <!-- OSINT filter chips -->
-    <!-- OSINT filter chips — what aircraft types to show on the map + list. -->
-    <div style="padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.05);">
-      <div style="font-size:0.65em; color:#7a8b9a; letter-spacing:1.5px; font-weight:700; margin-bottom:5px;">FILTER</div>
-      <div id="adsbBoxFilterChips" style="display:flex; flex-wrap:wrap; gap:4px; font-size:0.72em;"></div>
+    <!-- OSINT filter chips: what aircraft types to show on the map + list. -->
+    <div class="mm-pad">
+      <div class="mm-sec">Filter</div>
+      <div id="adsbBoxFilterChips"></div>
     </div>
     <!-- Flight paths are PER-PLANE only: click a plane, toggle its path in the popup.
-         The per-type chips + ALL IN VIEW were removed — they lit up thousands of full
+         The per-type chips + ALL IN VIEW were removed - they lit up thousands of full
          traces at once (unreadable spaghetti) and the bulk trace-fetch hammered the
          upstream hosts into rate-limiting us. CLEAR ALL wipes whatever's shown. -->
-    <div style="padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.05);">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <span style="font-size:0.65em; color:#7a8b9a; letter-spacing:1.5px; font-weight:700;">FLIGHT PATHS</span>
-        <button id="adsbPathsClearBtn" title="Hide all flight paths" style="padding:2px 6px; background:#2a0010; border:1px solid #ff5577; color:#ffccd5; font-family:monospace; font-size:0.72em; border-radius:3px; cursor:pointer;">CLEAR ALL</button>
+    <div class="mm-pad">
+      <div class="mm-row">
+        <span class="mm-sec mm-grow" style="margin:0;">Flight paths</span>
+        <button id="adsbPathsClearBtn" class="mm-danger" title="Hide all flight paths" style="padding:4px 8px; font-size:11px;">CLEAR ALL</button>
       </div>
-      <div style="font-size:0.6em; color:#586978; letter-spacing:0.5px; margin-top:4px;">click a plane, then toggle its path in the popup</div>
+      <div class="mm-note" style="margin-top:5px;">Click a plane, then toggle its path in the popup.</div>
     </div>
     <!-- Live count + aircraft list. Zero right-padding so the scrollbar sits
          flush with the panel border; rows have their own internal right
          padding so content never touches the scrollbar. max-height pairs
          with #adsbBox max-height so it can never grow into GEOFENCING below. -->
-    <div style="padding:6px 0 6px 10px;">
-      <div id="adsbCount" style="text-align:center; margin-bottom:6px; padding-right:10px;">— OFF —</div>
-      <div id="adsbAircraftList" style="overflow-y:auto; max-height:180px; min-height:60px; padding-right:6px;"></div>
+    <div style="padding:8px 0 4px 10px;">
+      <div id="adsbCount">&mdash; OFF &mdash;</div>
+      <div id="adsbAircraftList"></div>
     </div>
   </div>
 </div>
 
 <div id="filterBox">
   <div id="filterHeader">
-    <h3>Drones</h3>
-    <span id="dronesHeaderCount" style="color:#00ff88; font-size:0.75em; font-weight:bold; letter-spacing:0.5px; min-width:0; flex-shrink:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></span>
-    <span id="dronesLayerStateLabel" style="color:#00ff88; font-size:0.7em; font-weight:bold; letter-spacing:1px; padding:2px 6px; border:1px solid #00ff88; border-radius:3px; background:rgba(0,255,136,0.1);">ON</span>
-    <label class="switch" style="margin:0; flex:0 0 auto;" title="Show/hide drone & pilot markers">
+    <h3><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.2 7.2l9.6 9.6M16.8 7.2l-9.6 9.6"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><rect x="9.7" y="9.7" width="4.6" height="4.6" rx="1" fill="currentColor" stroke="none"/></svg>Drones</h3>
+    <span id="dronesHeaderCount"></span>
+    <span id="dronesLayerStateLabel">ON</span>
+    <label class="switch" title="Show/hide drone &amp; pilot markers">
       <input type="checkbox" id="dronesLayerToggle" checked onclick="event.stopPropagation();">
-      <span class="slider" style="background-color:#222;"></span>
+      <span class="slider"></span>
     </label>
-    <span id="filterToggle" style="cursor: pointer; font-size: 20px;">[-]</span>
+    <span id="filterToggle" style="cursor: pointer;">&minus;</span>
   </div>
   <div id="filterContent">
-    <h3 id="activeHeader" style="cursor:pointer; user-select:none; display:flex; justify-content:center; align-items:center; gap:6px;">
-      <span id="activeArrow" style="font-size:0.85em;">▼</span> Active Drones
+    <h3 id="activeHeader">
+      <span id="activeArrow">▾</span> Active Drones
     </h3>
     <div id="activePlaceholder" class="placeholder"></div>
-    <h3 id="inactiveHeader" style="cursor:pointer; user-select:none; display:flex; justify-content:center; align-items:center; gap:6px;">
-      <span id="inactiveArrow" style="font-size:0.85em;">▼</span> Inactive Drones
+    <h3 id="inactiveHeader">
+      <span id="inactiveArrow">▾</span> Inactive Drones
     </h3>
     <div id="inactivePlaceholder" class="placeholder"></div>
     <!-- Staleout Slider -->
-    <div style="margin:10px 8px 0 8px; padding:6px; border:1px solid lime; background:rgba(0,0,0,0.5); border-radius:4px; box-sizing:border-box;">
-      <div style="color:#aaffaa; font-family:monospace; font-size:0.75em; text-align:center; margin-bottom:4px; font-weight:bold;">STALEOUT TIME</div>
-      <input type="range" id="staleoutSlider" min="1" max="5" step="1" value="1"
-             style="width:100%; box-sizing:border-box; border:1px solid lime; margin:0;">
-      <div id="staleoutValue" style="color:lime; font-family:monospace; font-size:0.85em; width:100%; text-align:center; margin-top:2px;">1 min</div>
+    <div class="mm-section">
+      <div class="mm-sec"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Staleout time</div>
+      <input type="range" id="staleoutSlider" min="1" max="5" step="1" value="1">
+      <div id="staleoutValue">1 min</div>
     </div>
-    <!-- Basemap + status -->
-    <div style="margin:8px 8px 0 8px; padding:6px; border:1px solid lime; background:rgba(0,0,0,0.5); border-radius:4px; box-sizing:border-box;">
-      <div style="color:#aaffaa; font-family:monospace; font-size:0.75em; text-align:center; margin-bottom:4px; font-weight:bold;">BASEMAP</div>
-      <select id="layerSelect" style="width:100%; box-sizing:border-box; background-color:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; padding:3px; font-family:monospace; font-size:0.8em; text-align:center; text-align-last:center;">
-        <optgroup label="── ONLINE ──" style="color:#FF00FF; font-style:normal;">
+    <!-- Basemap + status (moves into MAP LAYER at load) -->
+    <div id="basemapBlock" class="mm-section">
+      <div class="mm-sec"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 6.5 9 4l6 2.5 5.5-2.5v13L15 19.5 9 17l-5.5 2.5z"/><path d="M9 4v13M15 6.5v13"/></svg>Basemap</div>
+      <select id="layerSelect" style="width:100%;">
+        <optgroup label="Online">
           <option value="osmStandard">OSM Standard</option>
           <option value="osmHumanitarian">OSM Humanitarian</option>
           <option value="cartoPositron">CartoDB Positron</option>
@@ -6438,16 +8384,16 @@ HTML_PAGE = '''
           <option value="esriDarkGray">Esri Dark Gray Canvas</option>
           <option value="openTopoMap">OpenTopoMap</option>
         </optgroup>
-        <optgroup id="offlineLayerGroup" label="── OFFLINE ──" style="color:lime; font-style:normal;">
+        <optgroup id="offlineLayerGroup" label="Offline">
           <!-- populated from /api/offline_layers -->
         </optgroup>
       </select>
-      <!-- Status pill — full-width bar, color reflects ONLINE / OFFLINE -->
-      <div id="basemapStatus" style="width:100%; box-sizing:border-box; margin-top:4px; padding:3px 10px; border:1px solid #00ff00; color:#00ff00; background:black; font-family:monospace; font-size:0.7em; letter-spacing:1px; border-radius:3px; text-align:center;">
-        <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:#00ff00; box-shadow:0 0 6px #00ff00; vertical-align:middle; margin-right:5px;"></span>ONLINE
+      <!-- Status bar: color reflects ONLINE / OFFLINE -->
+      <div id="basemapStatus">
+        <span class="mm-dot live" style="--c:var(--green);"></span>ONLINE
       </div>
     </div>
-    <!-- Legacy compact ADS-B toggle — hidden; the top-left adsbBox is now the primary
+    <!-- Legacy compact ADS-B toggle - hidden; the top-left adsbBox is now the primary
          control. Kept in DOM so #adsbMainToggle / #adsbMainStatus references don't break. -->
     <div style="display:none;">
       <span id="adsbMainStatus">off</span>
@@ -6457,27 +8403,25 @@ HTML_PAGE = '''
            When the user opens this collapsible inside the Map Layer panel,
            the inner cachePanel flies OUT to the LEFT (horizontal flyout)
            instead of pushing the Map Layer panel taller. -->
-      <div id="offlineMappingPanel" style="position:relative; margin:8px 8px 0 8px; border:1px solid lime; background:rgba(0,0,0,0.7); padding:6px; font-family:monospace; font-size:0.7em; color:lime;">
-        <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" id="cacheToggle">
-          <span style="color:#aaffaa; font-weight:bold;">▼ OFFLINE MAPPING</span>
-          <span id="cacheToggleArrow" style="color:lime;">+</span>
+      <div id="offlineMappingPanel" class="mm-section">
+        <div id="cacheToggle">
+          <span id="cacheToggleArrow">▸</span><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v10M8 9.5l4 4 4-4M4.5 14.5v3a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3"/></svg><span>Offline mapping</span>
         </div>
-        <div id="cachePanel" style="display:none; margin-top:6px;">
+        <div id="cachePanel" style="display:none; margin-top:10px;">
           <!-- Place search (Nominatim) -->
-          <div style="margin-bottom:6px;">
-            <div style="font-size:0.95em; background: linear-gradient(to right, #ff00ff, #00ffff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight:bold;">⌕ PLACE SEARCH</div>
-            <div style="display:flex; gap:3px; margin-top:3px;">
-              <input id="geoQuery" type="text" placeholder="e.g. Yosemite National Park"
-                     style="flex:1; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid #00ffff; font-family:monospace; font-size:0.9em; padding:2px;"/>
-              <button id="geoGoBtn" style="padding:2px 8px; background:#001a1a; border:1px solid #00ffff; color:#00ffff; font-family:monospace; cursor:pointer;">GO</button>
+          <div>
+            <div class="mm-sec"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.3-4.3"/></svg>Place search</div>
+            <div class="mm-row">
+              <input id="geoQuery" type="text" placeholder="e.g. Yosemite National Park" class="mm-grow"/>
+              <button id="geoGoBtn" class="mm-accent">GO</button>
             </div>
-            <div id="geoResults" style="margin-top:4px; max-height:120px; overflow-y:auto;"></div>
+            <div id="geoResults" style="margin-top:6px; max-height:120px; overflow-y:auto;"></div>
           </div>
           <!-- Region presets -->
-          <div style="margin-bottom:6px;">
-            <div style="font-size:0.95em; background: linear-gradient(to right, lime, #00ffff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight:bold;">▣ REGION PRESETS</div>
-            <select id="regionPreset" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; font-family:monospace; font-size:0.9em; padding:2px; margin-top:3px;">
-              <option value="">— pick a region —</option>
+          <div class="mm-block">
+            <div class="mm-sec">Region presets</div>
+            <select id="regionPreset" style="width:100%;">
+              <option value="">Pick a region</option>
               <option value='{"bbox":[-125,32,-114,42],"name":"california"}'>California</option>
               <option value='{"bbox":[-125,42,-117,49],"name":"pacific_northwest"}'>Pacific Northwest (OR/WA)</option>
               <option value='{"bbox":[-120,37,-117,40],"name":"eastern_sierra"}'>Eastern Sierra</option>
@@ -6493,61 +8437,59 @@ HTML_PAGE = '''
               <option value='{"bbox":[129.5,30.5,146,46],"name":"japan"}'>Japan</option>
             </select>
           </div>
-          <label style="display:block; margin-top:4px;">Source:
-            <select id="cacheSource" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; font-family:monospace; font-size:0.9em; padding:2px;">
-              <option value="esriWorldImagery" selected>Esri World Imagery</option>
-              <option value="cartoDarkMatter">CartoDB Dark Matter</option>
-              <option value="cartoPositron">CartoDB Positron</option>
-              <option value="esriWorldTopo">Esri World TopoMap</option>
-              <option value="esriDarkGray">Esri Dark Gray Canvas</option>
-              <option value="openTopoMap">OpenTopoMap</option>
-              <option value="osmHumanitarian">OSM Humanitarian</option>
-              <option value="osmStandard">OSM Standard</option>
-            </select>
-          </label>
-          <label style="display:block; margin-top:4px;">Name (a-z 0-9 _ -):
-            <input id="cacheName" type="text" placeholder="op_zone" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; font-family:monospace; font-size:0.9em; padding:2px;"/>
-          </label>
-          <div style="display:flex; gap:4px; margin-top:4px;">
-            <label style="flex:1;">zMin
-              <input id="cacheZmin" type="number" min="0" max="22" value="10" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; font-family:monospace; font-size:0.9em; padding:2px;"/>
+          <div class="mm-block">
+            <div class="mm-sec">Cache this area</div>
+            <label class="mm-field"><span class="mm-label mm-field-label">Source</span>
+              <select id="cacheSource">
+                <option value="esriWorldImagery" selected>Esri World Imagery</option>
+                <option value="cartoDarkMatter">CartoDB Dark Matter</option>
+                <option value="cartoPositron">CartoDB Positron</option>
+                <option value="esriWorldTopo">Esri World TopoMap</option>
+                <option value="esriDarkGray">Esri Dark Gray Canvas</option>
+                <option value="openTopoMap">OpenTopoMap</option>
+                <option value="osmHumanitarian">OSM Humanitarian</option>
+                <option value="osmStandard">OSM Standard</option>
+              </select>
             </label>
-            <label style="flex:1;">zMax
-              <input id="cacheZmax" type="number" min="0" max="22" value="16" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; font-family:monospace; font-size:0.9em; padding:2px;"/>
+            <label class="mm-field"><span class="mm-label mm-field-label">Name (a-z 0-9 _ -)</span>
+              <input id="cacheName" class="mm-mono" type="text" placeholder="op_zone"/>
             </label>
+            <div class="mm-row" style="margin-top:8px;">
+              <label class="mm-field mm-grow"><span class="mm-label mm-field-label">zMin</span>
+                <input id="cacheZmin" type="number" min="0" max="22" value="10"/>
+              </label>
+              <label class="mm-field mm-grow" style="margin-top:0;"><span class="mm-label mm-field-label">zMax</span>
+                <input id="cacheZmax" type="number" min="0" max="22" value="16"/>
+              </label>
+            </div>
+            <div id="cacheEstimate">&mdash; tiles in current view</div>
+            <button id="cacheStartBtn" class="mm-primary mm-block" style="margin-top:8px;">START CACHE</button>
           </div>
-          <div id="cacheEstimate" style="margin-top:4px; font-size:0.95em; color:#00ffff;">— tiles in current view</div>
-          <button id="cacheStartBtn" style="margin-top:6px; width:100%; padding:4px; background:#003300; border:1px solid lime; color:lime; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">▶ START CACHE</button>
-          <!-- World baseline presets — quick globe-wide overview at low zoom -->
-          <div style="margin-top:8px; padding-top:6px; border-top:1px dashed #225522;">
-            <div style="font-size:0.95em; background: linear-gradient(to right, #00ffff, lime); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight:bold; margin-bottom:3px;">◉ WORLD BASELINE</div>
-            <div style="font-size:0.85em; color:#aaffaa; margin-bottom:4px;">Globe-wide overview of the selected source. Auto-names <code>world_&lt;source&gt;</code>.</div>
-            <div style="display:flex; gap:4px;">
-              <button id="worldZ6Btn" title="~5,500 tiles · ~80 MB · continents → cities"
-                      style="flex:1; padding:4px; background:#001a1a; border:1px solid #00ffff; color:#00ffff; font-family:monospace; font-size:0.9em; border-radius:3px; cursor:pointer;">z0–6 (~80 MB)</button>
-              <button id="worldZ8Btn" title="~88,000 tiles · ~1.3 GB · road networks visible"
-                      style="flex:1; padding:4px; background:#001a1a; border:1px solid #00ffff; color:#00ffff; font-family:monospace; font-size:0.9em; border-radius:3px; cursor:pointer;">z0–8 (~1.3 GB)</button>
+          <!-- World baseline presets: quick globe-wide overview at low zoom -->
+          <div class="mm-block">
+            <div class="mm-sec">World baseline</div>
+            <div class="mm-note" style="margin-bottom:7px;">Globe-wide overview of the selected source. Auto-names <code>world_&lt;source&gt;</code>.</div>
+            <div class="mm-row">
+              <button id="worldZ6Btn" class="mm-info mm-grow" title="~5,500 tiles · ~80 MB · continents → cities">z0–6 (~80 MB)</button>
+              <button id="worldZ8Btn" class="mm-info mm-grow" title="~88,000 tiles · ~1.3 GB · road networks visible">z0–8 (~1.3 GB)</button>
             </div>
           </div>
           <!-- Import existing MBTiles (URL or file upload) -->
-          <div style="margin-top:8px; padding-top:6px; border-top:1px dashed #225522;">
-            <div style="font-size:0.95em; background: linear-gradient(to right, #ff00ff, lime); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight:bold; margin-bottom:3px;">📥 IMPORT MBTILES</div>
-            <div style="font-size:0.85em; color:#aaffaa; margin-bottom:4px;">Drop in a prebuilt file (raster or vector). Validates it's a real MBTiles before saving.</div>
-            <label style="display:block;">Name (a-z 0-9 _ -):
-              <input id="importName" type="text" placeholder="my_region"
-                     style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid #ff00ff; font-family:monospace; font-size:0.9em; padding:2px;"/>
+          <div class="mm-block">
+            <div class="mm-sec">Import MBTiles</div>
+            <div class="mm-note" style="margin-bottom:7px;">Drop in a prebuilt file (raster or vector). It is checked to be a real MBTiles before it is saved.</div>
+            <label class="mm-field"><span class="mm-label mm-field-label">Name (a-z 0-9 _ -)</span>
+              <input id="importName" class="mm-mono" type="text" placeholder="my_region"/>
             </label>
-            <label style="display:block; margin-top:3px;">URL (download):
-              <input id="importUrl" type="text" placeholder="https://example.com/area.mbtiles"
-                     style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid #ff00ff; font-family:monospace; font-size:0.9em; padding:2px;"/>
+            <label class="mm-field"><span class="mm-label mm-field-label">URL (download)</span>
+              <input id="importUrl" class="mm-mono" type="text" placeholder="https://example.com/area.mbtiles"/>
             </label>
-            <button id="importUrlBtn" style="margin-top:4px; width:100%; padding:4px; background:#1a001a; border:1px solid #ff00ff; color:#ff00ff; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">⇩ DOWNLOAD URL</button>
-            <div style="text-align:center; color:#aaffaa; margin:4px 0; font-size:0.85em;">— or —</div>
-            <label style="display:block;">Upload file:
-              <input id="importFile" type="file" accept=".mbtiles"
-                     style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid #ff00ff; font-family:monospace; font-size:0.9em; padding:2px;"/>
+            <button id="importUrlBtn" class="mm-violet mm-block" style="margin-top:8px;">DOWNLOAD URL</button>
+            <div class="mm-sec" style="margin:12px 0 8px;">or</div>
+            <label class="mm-field"><span class="mm-label mm-field-label">Upload file</span>
+              <input id="importFile" type="file" accept=".mbtiles"/>
             </label>
-            <button id="importFileBtn" style="margin-top:4px; width:100%; padding:4px; background:#1a001a; border:1px solid #ff00ff; color:#ff00ff; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">↑ UPLOAD FILE</button>
+            <button id="importFileBtn" class="mm-violet mm-block" style="margin-top:8px;">UPLOAD FILE</button>
             <div id="importJobs" style="margin-top:6px;"></div>
           </div>
           <div id="cacheJobs" style="margin-top:6px;"></div>
@@ -6555,238 +8497,325 @@ HTML_PAGE = '''
         </div>
       </div>
     </div>
-    <!-- ADS-B AIR TRAFFIC (legacy panel, hidden — settings now live in the top-left adsbBox).
+    <!-- ADS-B AIR TRAFFIC (legacy panel, hidden - settings now live in the top-left adsbBox).
          Kept in the DOM so existing JS that drives `adsbEnabled`, `adsbSource`, etc. still
          finds its inputs; the top-left UI mirrors values into them via change events. -->
     <div id="adsbPanelOuter" style="display:none;">
-      <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" id="adsbToggle">
-        <span style="color:#aaccff; font-weight:bold;">▼ AIR TRAFFIC (ADS-B)</span>
-        <span id="adsbToggleArrow" style="color:#aaccff;">+</span>
+      <div id="adsbToggle">
+        <span>AIR TRAFFIC (ADS-B)</span>
+        <span id="adsbToggleArrow">+</span>
       </div>
       <div id="adsbPanel" style="display:none; margin-top:6px;">
         <!-- Flight paths master toggles (drone/pilot/aircraft trail visibility).
              "ALL" is a meta-switch: ON enables every kind, OFF disables every
              kind. Per-kind switches stay independently usable below it. -->
-        <div style="margin-bottom:6px; padding:6px; border:1px dashed #ff66cc; border-radius:3px;">
-          <div style="color:#ffaaff; font-weight:bold; letter-spacing:1px; text-align:center; margin-bottom:4px; font-size:0.95em;">FLIGHT PATHS</div>
-          <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding-bottom:4px; border-bottom:1px dashed rgba(255,102,204,0.3);">
-            <span style="font-size:0.95em; font-weight:bold; color:#ffccee;">ALL</span>
-            <label class="switch" style="margin:0;"><input type="checkbox" id="pathsAllToggle"><span class="slider"></span></label>
-          </div>
-          <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:4px;">
-            <span style="font-size:0.95em;">Drone</span>
-            <label class="switch" style="margin:0;"><input type="checkbox" id="pathsDroneToggle"><span class="slider"></span></label>
-          </div>
-          <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:3px;">
-            <span style="font-size:0.95em;">Pilot</span>
-            <label class="switch" style="margin:0;"><input type="checkbox" id="pathsPilotToggle"><span class="slider"></span></label>
-          </div>
-          <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:3px;">
-            <span style="font-size:0.95em;">Aircraft</span>
-            <label class="switch" style="margin:0;"><input type="checkbox" id="pathsAircraftToggle"><span class="slider"></span></label>
-          </div>
+        <div class="mm-card">
+          <div class="mm-sec">Flight paths</div>
+          <label class="mm-toggle"><span>ALL</span><span class="switch"><input type="checkbox" id="pathsAllToggle"><span class="slider"></span></span></label>
+          <label class="mm-toggle"><span>Drone</span><span class="switch"><input type="checkbox" id="pathsDroneToggle"><span class="slider"></span></span></label>
+          <label class="mm-toggle"><span>Pilot</span><span class="switch"><input type="checkbox" id="pathsPilotToggle"><span class="slider"></span></span></label>
+          <label class="mm-toggle"><span>Aircraft</span><span class="switch"><input type="checkbox" id="pathsAircraftToggle"><span class="slider"></span></span></label>
         </div>
-        <label style="display:flex; align-items:center; gap:6px; margin-top:3px;">
-          <input type="checkbox" id="adsbEnabled" style="accent-color:#00aaff;"/>
+        <label class="mm-check" style="margin-top:6px;">
+          <input type="checkbox" id="adsbEnabled"/>
           <span>Enable ADS-B layer</span>
         </label>
-        <label style="display:block; margin-top:4px;">Source:
-          <select id="adsbSource" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;">
-            <optgroup label="── Network (no setup) ──">
+        <label class="mm-field"><span class="mm-label mm-field-label">Source</span>
+          <select id="adsbSource">
+            <optgroup label="Network (no setup)">
               <option value="adsblol">adsb.lol (free, no key)</option>
               <option value="adsbfi">adsb.fi (free, no key)</option>
               <option value="airplaneslive">airplanes.live (free, no key)</option>
               <option value="opensky">OpenSky Network (free)</option>
               <option value="adsbexchange">ADS-B Exchange (RapidAPI key)</option>
             </optgroup>
-            <optgroup label="── Local SDR receivers ──">
+            <optgroup label="Local SDR receivers">
               <option value="dump1090">Local SDR · HackRF / RTL-SDR / AirSpy / SDRplay</option>
               <option value="beast">Beast TCP raw feed (advanced)</option>
             </optgroup>
           </select>
         </label>
-        <label style="display:block; margin-top:4px;">Refresh (sec):
-          <input id="adsbInterval" type="number" min="2" max="120" value="8"
-                 style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
+        <label class="mm-field"><span class="mm-label mm-field-label">Refresh (sec)</span>
+          <input id="adsbInterval" type="number" min="2" max="120" value="8"/>
         </label>
-        <label style="display:flex; align-items:center; gap:6px; margin-top:4px;">
-          <input type="checkbox" id="adsbBboxOnly" style="accent-color:#00aaff;"/>
+        <label class="mm-check" style="margin-top:6px;">
+          <input type="checkbox" id="adsbBboxOnly"/>
           <span>Only fetch around current map view</span>
         </label>
         <!-- OSINT filter chips: which categories to render -->
-        <div style="margin-top:6px;">
-          <div style="font-size:0.95em; color:#aaccff; margin-bottom:3px;">Show:</div>
-          <div id="adsbFilterChips" style="display:flex; flex-wrap:wrap; gap:3px;">
+        <div style="margin-top:8px;">
+          <div class="mm-sec">Show</div>
+          <div id="adsbFilterChips" class="mm-chips">
             <!-- chips populated by JS so colors match the marker palette -->
           </div>
         </div>
-        <div id="adsbDump1090Box" style="display:none; margin-top:4px;">
-          <div style="font-size:0.95em; color:#88aaff;">Works with any SDR fed through dump1090 / readsb / tar1090 / PiAware:</div>
-          <label style="display:block; margin-top:2px;">Preset:
-            <select id="adsbDump1090Preset" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;">
+        <div id="adsbDump1090Box" style="display:none; margin-top:8px;">
+          <div class="mm-note">Works with any SDR fed through dump1090 / readsb / tar1090 / PiAware:</div>
+          <label class="mm-field"><span class="mm-label mm-field-label">Preset</span>
+            <select id="adsbDump1090Preset">
               <!-- populated from /api/adsb/sources -->
             </select>
           </label>
-          <label style="display:block; margin-top:2px;">JSON URL:
-            <input id="adsbDump1090Url" type="text" placeholder="http://localhost:8080/data/aircraft.json"
-                   style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
+          <label class="mm-field"><span class="mm-label mm-field-label">JSON URL</span>
+            <input id="adsbDump1090Url" class="mm-mono" type="text" placeholder="http://localhost:8080/data/aircraft.json"/>
           </label>
         </div>
-        <div id="adsbOpenskyBox" style="display:none; margin-top:4px;">
-          <div style="font-size:0.95em; color:#88aaff;">Optional auth (boosts rate limit):</div>
-          <input id="adsbOpenskyUser" type="text" placeholder="opensky username"
-                 style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px; margin-top:2px;"/>
-          <input id="adsbOpenskyPass" type="password" placeholder="opensky password"
-                 style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px; margin-top:2px;"/>
+        <div id="adsbOpenskyBox" style="display:none; margin-top:8px;">
+          <div class="mm-note">Optional auth (boosts rate limit):</div>
+          <input id="adsbOpenskyUser" type="text" placeholder="opensky username" style="width:100%; margin-top:5px;"/>
+          <input id="adsbOpenskyPass" type="password" placeholder="opensky password" style="width:100%; margin-top:5px;"/>
         </div>
-        <div id="adsbExchangeBox" style="display:none; margin-top:4px;">
-          <div style="font-size:0.95em; color:#88aaff;">RapidAPI key for ADS-B Exchange (paid tier):</div>
-          <input id="adsbExchangeKey" type="password" placeholder="RapidAPI key"
-                 style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px; margin-top:2px;"/>
-          <div style="font-size:0.85em; color:#ffaa44; margin-top:2px;">Note: ADS-B Exchange requires the bbox toggle on.</div>
+        <div id="adsbExchangeBox" style="display:none; margin-top:8px;">
+          <div class="mm-note">RapidAPI key for ADS-B Exchange (paid tier):</div>
+          <input id="adsbExchangeKey" type="password" placeholder="RapidAPI key" style="width:100%; margin-top:5px;"/>
+          <div class="mm-note" style="color:var(--amber); margin-top:4px;">Note: ADS-B Exchange requires the bbox toggle on.</div>
         </div>
-        <div id="adsbBeastBox" style="display:none; margin-top:4px;">
-          <div style="font-size:0.95em; color:#88aaff;">Direct connect to any ADS-B receiver speaking Beast (port 30005). Works with HackRF / RTL-SDR / AirSpy / SDRplay via dump1090, readsb, modesmixer2, or any FlightAware/PiAware feeder.</div>
-          <div style="display:flex; gap:4px; margin-top:4px;">
-            <label style="flex:2;">Host
-              <input id="adsbBeastHost" type="text" placeholder="localhost"
-                     style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
+        <div id="adsbBeastBox" style="display:none; margin-top:8px;">
+          <div class="mm-note">Direct connect to any ADS-B receiver speaking Beast (port 30005). Works with HackRF / RTL-SDR / AirSpy / SDRplay via dump1090, readsb, modesmixer2, or any FlightAware/PiAware feeder.</div>
+          <div class="mm-row" style="margin-top:8px;">
+            <label class="mm-field" style="flex:2;"><span class="mm-label mm-field-label">Host</span>
+              <input id="adsbBeastHost" class="mm-mono" type="text" placeholder="localhost"/>
             </label>
-            <label style="flex:1;">Port
-              <input id="adsbBeastPort" type="number" placeholder="30005" min="1" max="65535"
-                     style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>
+            <label class="mm-field" style="flex:1; margin-top:0;"><span class="mm-label mm-field-label">Port</span>
+              <input id="adsbBeastPort" class="mm-mono" type="number" placeholder="30005" min="1" max="65535"/>
             </label>
           </div>
-          <div style="font-size:0.85em; color:#ffaa44; margin-top:2px;">
+          <div class="mm-note" style="color:var(--amber); margin-top:4px;">
             Requires: <code>pip install pyModeS</code> (Mode-S/CPR decoder by junzis).
           </div>
         </div>
-        <button id="adsbSaveBtn" style="margin-top:6px; width:100%; padding:4px; background:#001a2a; border:1px solid #00aaff; color:#aaeeff; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">SAVE CONFIG</button>
-        <div style="font-size:0.85em; color:#88aaff; margin-top:2px; text-align:center;">
-          (enable/disable handled by the toggle — this saves source &amp; credentials)
+        <button id="adsbSaveBtn" class="mm-primary mm-block" style="margin-top:8px;">SAVE CONFIG</button>
+        <div class="mm-note mm-center" style="margin-top:4px;">
+          (enable/disable handled by the toggle; this saves source &amp; credentials)
         </div>
-        <div id="adsbStatus" style="margin-top:4px; font-size:0.9em; color:#88aaff; text-align:center;">— off —</div>
+        <div id="adsbStatus" class="mm-status">&mdash; off &mdash;</div>
       </div>
     </div>
 
     <!-- GEOFENCING toolkit (draw, list, edit, delete + alerts) -->
-    <div style="margin:8px 8px 0 8px; padding:6px; border:1px solid #ff5577; background:rgba(0,0,0,0.5); border-radius:4px; box-sizing:border-box; font-family:monospace; font-size:0.75em; color:#ffaaaa;">
-      <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" id="geofenceToggle">
-        <span style="color:#ff8888; font-weight:bold; letter-spacing:1px;">▼ GEOFENCING</span>
-        <span id="geofenceToggleArrow" style="color:#ff8888;">+</span>
+    <div class="mm-card" style="margin-top:8px;">
+      <div id="geofenceToggle">
+        <span>GEOFENCING</span>
+        <span id="geofenceToggleArrow">+</span>
       </div>
       <div id="geofencePanel" style="display:none; margin-top:6px;">
-        <div style="display:flex; gap:4px;">
-          <button id="drawPolygonBtn"   style="flex:1; padding:5px 4px; background:#1a000a; border:1px solid #ff5577; color:#ffaaaa; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">▱ POLY</button>
-          <button id="drawCircleBtn"    style="flex:1; padding:5px 4px; background:#1a000a; border:1px solid #ff5577; color:#ffaaaa; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">○ CIRCLE</button>
-          <button id="drawRectangleBtn" style="flex:1; padding:5px 4px; background:#1a000a; border:1px solid #ff5577; color:#ffaaaa; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">▭ RECT</button>
+        <div class="mm-sec">Draw a fence</div>
+        <div class="mm-seg">
+          <button id="drawPolygonBtn"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 8.5 12 4l7.5 5-1.8 9.5L7 20z"/></svg>POLY</button>
+          <button id="drawCircleBtn"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="7.5"/></svg>CIRCLE</button>
+          <button id="drawRectangleBtn"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6.5" width="15" height="11" rx="1"/></svg>RECT</button>
         </div>
         <!-- Inline form shown after a shape is drawn (replaces window.prompt) -->
-        <div id="geofenceCreateForm" style="display:none; margin-top:6px; padding:6px; background:rgba(60,0,20,0.4); border:1px dashed #ff5577; border-radius:3px; font-size:0.95em;">
-          <input id="gfFormName" type="text" placeholder="Fence name" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#ffcccc; border:1px solid #ff5577; font-family:monospace; padding:3px;"/>
-          <div style="display:flex; align-items:center; gap:6px; margin-top:4px;">
-            <span style="font-size:0.95em;">Color:</span>
-            <div id="gfFormColorSwatches" style="display:flex; gap:3px; flex-wrap:wrap; flex:1;"></div>
-            <input id="gfFormColor" type="color" value="#ff5577" style="width:28px; height:22px; padding:0; border:1px solid #ff5577; background:transparent; cursor:pointer;"/>
-          </div>
-          <div style="margin-top:6px;">
-            <div style="font-size:0.78em; color:#a87f87; letter-spacing:1.5px; margin-bottom:3px;">WATCH</div>
-            <div style="display:flex; gap:4px;">
-              <label style="flex:1; display:flex; align-items:center; justify-content:center; gap:4px; padding:4px; border:1px solid rgba(255,102,136,0.35); border-radius:4px; cursor:pointer; font-size:0.85em;">
-                <input id="gfFormTargetDrone" type="radio" name="gfFormTarget" value="drone" checked style="accent-color:#ff5577;">DRONES</label>
-              <label style="flex:1; display:flex; align-items:center; justify-content:center; gap:4px; padding:4px; border:1px solid rgba(255,102,136,0.35); border-radius:4px; cursor:pointer; font-size:0.85em;">
-                <input type="radio" name="gfFormTarget" value="aircraft" style="accent-color:#ff5577;">AIRCRAFT</label>
-              <label style="flex:1; display:flex; align-items:center; justify-content:center; gap:4px; padding:4px; border:1px solid rgba(255,102,136,0.35); border-radius:4px; cursor:pointer; font-size:0.85em;">
-                <input type="radio" name="gfFormTarget" value="both" style="accent-color:#ff5577;">BOTH</label>
+        <div id="geofenceCreateForm" class="mm-card" style="display:none;">
+          <label class="mm-field"><span class="mm-label mm-field-label">Name</span>
+            <input id="gfFormName" type="text" placeholder="Fence name"/>
+          </label>
+          <div class="mm-field" style="margin-top:8px;">
+            <span class="mm-label mm-field-label">Color</span>
+            <div class="mm-row">
+              <div id="gfFormColorSwatches" class="mm-grow" style="display:flex; gap:4px; flex-wrap:wrap;"></div>
+              <input id="gfFormColor" type="color" value="#ff4d5e"/>
             </div>
           </div>
-          <div id="gfFormDroneTagsRow" style="margin-top:6px;">
-            <div style="font-size:0.78em; color:#a87f87; letter-spacing:1.5px; margin-bottom:3px;">DRONE TAGS <span style="color:#7a5a60; font-weight:normal; letter-spacing:0; font-size:0.95em;">(blank = any)</span></div>
-            <div id="gfFormTagChips" style="display:flex; flex-wrap:wrap; gap:3px;"></div>
+          <div class="mm-field" style="margin-top:9px;">
+            <span class="mm-label mm-field-label">Watch</span>
+            <div class="mm-seg">
+              <label>
+                <input id="gfFormTargetDrone" type="radio" name="gfFormTarget" value="drone" checked>DRONES</label>
+              <label>
+                <input type="radio" name="gfFormTarget" value="aircraft">AIRCRAFT</label>
+              <label>
+                <input type="radio" name="gfFormTarget" value="both">BOTH</label>
+            </div>
           </div>
-          <div id="gfFormAircraftTagsRow" style="display:none; margin-top:6px;">
-            <div style="font-size:0.78em; color:#a87f87; letter-spacing:1.5px; margin-bottom:3px;">AIRCRAFT TAGS <span style="color:#7a5a60; font-weight:normal; letter-spacing:0; font-size:0.95em;">(blank = any)</span></div>
-            <div id="gfFormAircraftChips" style="display:flex; flex-wrap:wrap; gap:3px;"></div>
+          <div id="gfFormDroneTagsRow" style="margin-top:9px;">
+            <span class="mm-label mm-field-label">Drone tags <span style="color:var(--faint); letter-spacing:0; text-transform:none;">(blank = any)</span></span>
+            <div id="gfFormTagChips" class="mm-chips"></div>
           </div>
-          <div style="margin-top:6px;">
-            <div style="font-size:0.78em; color:#a87f87; letter-spacing:1.5px; margin-bottom:3px;">PER-FENCE WEBHOOK <span style="color:#7a5a60; font-weight:normal; letter-spacing:0; font-size:0.95em;">(blank = use global)</span></div>
-            <input id="gfFormWebhook" type="text" placeholder="https://example.com/hook" style="width:100%; box-sizing:border-box; background:rgba(255,255,255,0.04); color:#ffcccc; border:1px solid rgba(255,102,136,0.35); border-radius:4px; font-family:inherit; padding:5px 7px; font-size:0.85em;"/>
+          <div id="gfFormAircraftTagsRow" style="display:none; margin-top:9px;">
+            <span class="mm-label mm-field-label">Aircraft tags <span style="color:var(--faint); letter-spacing:0; text-transform:none;">(blank = any)</span></span>
+            <div id="gfFormAircraftChips" class="mm-chips"></div>
           </div>
-          <div style="display:flex; gap:6px; margin-top:8px; font-size:0.85em;">
-            <label style="flex:1; display:flex; align-items:center; gap:4px;"><input id="gfFormEnter" type="checkbox" checked style="accent-color:#ff5577;">Alert on enter</label>
-            <label style="flex:1; display:flex; align-items:center; gap:4px;"><input id="gfFormExit" type="checkbox" checked style="accent-color:#ff5577;">Alert on exit</label>
+          <label class="mm-field" style="margin-top:9px;"><span class="mm-label mm-field-label">Per-fence webhook <span style="color:var(--faint); letter-spacing:0; text-transform:none;">(blank = use global)</span></span>
+            <input id="gfFormWebhook" class="mm-mono" type="text" placeholder="https://example.com/hook"/>
+          </label>
+          <div class="mm-row" style="margin-top:10px;">
+            <label class="mm-check mm-grow"><input id="gfFormEnter" type="checkbox" checked>Alert on enter</label>
+            <label class="mm-check mm-grow"><input id="gfFormExit" type="checkbox" checked>Alert on exit</label>
           </div>
-          <div style="display:flex; gap:4px; margin-top:8px;">
-            <button id="gfFormCancel" style="flex:1; padding:6px; background:transparent; border:1px solid #6b4248; color:#ffaaaa; font-family:inherit; font-size:0.78em; letter-spacing:1px; font-weight:600; border-radius:5px; cursor:pointer;">CANCEL</button>
-            <button id="gfFormSave"   style="flex:2; padding:6px; background:#ff5577; border:0; color:#1a0000; font-family:inherit; font-size:0.78em; letter-spacing:1px; font-weight:700; border-radius:5px; cursor:pointer;">SAVE FENCE</button>
+          <div class="mm-row" style="margin-top:10px;">
+            <button id="gfFormCancel" style="flex:1;">CANCEL</button>
+            <button id="gfFormSave" class="mm-primary" style="flex:2;">SAVE FENCE</button>
           </div>
         </div>
-        <div id="geofenceList" style="margin-top:6px; max-height:240px; overflow-y:auto;"></div>
-        <div style="margin-top:6px; padding-top:4px; border-top:1px dashed #552222;">
-          <div id="geofenceAlertHeader" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer; color:#ffaaaa; font-weight:bold; margin-bottom:3px;">
-            <span>Recent alerts <span id="geofenceAlertCount" style="color:#a87f87; font-weight:normal;"></span></span>
-            <span id="geofenceAlertArrow" style="color:#ff8888;">−</span>
+        <div id="geofenceList"></div>
+        <div class="mm-section">
+          <div id="geofenceAlertHeader">
+            <span id="geofenceAlertArrow">▾</span><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 2h-14z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/></svg><span>Recent alerts</span>
+            <span id="geofenceAlertCount"></span>
           </div>
-          <div id="geofenceAlertList" style="max-height:220px; overflow-y:auto; font-size:0.95em; color:#ffcccc;">— none —</div>
+          <div id="geofenceAlertList"><div class="mm-empty">none</div></div>
         </div>
       </div>
     </div>
     <!-- SETTINGS / EXPORTS expansion -->
-    <div style="margin:8px 8px 0 8px; border:1px solid lime; background:rgba(0,0,0,0.7); padding:6px; font-family:monospace; font-size:0.7em; color:lime;">
-      <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" id="settingsToggle">
-        <span style="color:#aaffaa; font-weight:bold;">▼ SETTINGS &amp; EXPORTS</span>
-        <span id="settingsToggleArrow" style="color:lime;">+</span>
+    <div class="mm-card" style="margin-top:8px;">
+      <div id="settingsToggle">
+        <span>SETTINGS &amp; EXPORTS</span>
+        <span id="settingsToggleArrow">+</span>
       </div>
       <div id="settingsPanel" style="display:none; margin-top:6px;">
         <!-- Archive / Export buttons -->
-        <div style="margin-bottom:6px;">
-          <div style="font-size:0.95em; color:#aaffaa; margin-bottom:3px;">Session Archives</div>
-          <div style="display:flex; gap:4px;">
-            <button id="downloadCsv" style="flex:1;">CSV</button>
-            <button id="downloadKml" style="flex:1;">KML</button>
-            <button id="downloadAliases" style="flex:1;">Aliases</button>
+        <div>
+          <div class="mm-label" style="margin-bottom:6px;">Session archives</div>
+          <div class="mm-row">
+            <button id="downloadCsv" class="mm-grow">CSV</button>
+            <button id="downloadKml" class="mm-grow">KML</button>
+            <button id="downloadAliases" class="mm-grow">Aliases</button>
           </div>
-          <div style="font-size:0.95em; color:#aaffaa; margin:6px 0 3px 0;">Cumulative History</div>
-          <div style="display:flex; gap:4px;">
-            <button id="downloadCumulativeCsv" style="flex:1;">Cumulative CSV</button>
-            <button id="downloadCumulativeKml" style="flex:1;">Cumulative KML</button>
+          <div class="mm-label" style="margin:10px 0 6px;">Cumulative history</div>
+          <div class="mm-row">
+            <button id="downloadCumulativeCsv" class="mm-grow">Cumulative CSV</button>
+            <button id="downloadCumulativeKml" class="mm-grow">Cumulative KML</button>
           </div>
         </div>
         <!-- Port / hardware config (inline, no navigation) -->
-        <div style="padding-top:6px; border-top:1px dashed #225522;">
-          <div style="font-size:0.95em; color:#aaffaa; margin-bottom:3px; font-weight:bold; letter-spacing:1px;">USB PORTS · DRONE RECEIVERS</div>
-          <div style="font-size:0.85em; color:#779977; margin-bottom:3px;">ESP32 boards forwarding Remote-ID detections over serial.</div>
-          <div id="portRows" style="display:flex; flex-direction:column; gap:3px;">
-            <select class="portSel" data-idx="1" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; font-family:monospace; font-size:0.9em; padding:2px;"></select>
-            <select class="portSel" data-idx="2" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; font-family:monospace; font-size:0.9em; padding:2px;"></select>
-            <select class="portSel" data-idx="3" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; font-family:monospace; font-size:0.9em; padding:2px;"></select>
+        <div id="usbPortsBlock" class="mm-section">
+          <div class="mm-sec"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v4M15 3v4M7 7h10v3.5a5 5 0 0 1-10 0z M12 15.5V21"/></svg>USB ports · drone receivers</div>
+          <div class="mm-note" style="margin-bottom:8px;">ESP32 boards forwarding Remote ID detections over serial.</div>
+          <div id="portRows">
+            <select class="portSel" data-idx="1"></select>
+            <select class="portSel" data-idx="2"></select>
+            <select class="portSel" data-idx="3"></select>
           </div>
-          <div style="display:flex; gap:4px; margin-top:4px;">
-            <button id="portRefreshBtn" style="flex:1; padding:4px; border:1px solid lime; background-color:#001a00; color:lime; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">REFRESH</button>
-            <button id="portApplyBtn" style="flex:2; padding:4px; border:1px solid lime; background-color:#003300; color:lime; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">APPLY</button>
+          <div class="mm-row" style="margin-top:8px;">
+            <button id="portRefreshBtn" style="flex:1;">REFRESH</button>
+            <button id="portApplyBtn" class="mm-primary" style="flex:2;">APPLY</button>
           </div>
-          <div id="portStatus" style="margin-top:4px; font-size:0.9em; color:#88aaff; text-align:center;"></div>
+          <div id="portStatus" class="mm-status"></div>
+        </div>
+        <!-- FAA registry: each drone serial heard is looked up once, in the
+             background on the server (the same lookup as a popup's QUERY FAA).
+             A record found is saved and that serial is never looked up again.
+             Moves into SETTINGS at load, before the webhooks. -->
+        <div id="faaAutoSection" class="mm-section">
+          <div class="mm-sec"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="2"/><circle cx="9" cy="11" r="2"/><path d="M5.9 15.6c.6-1.3 1.7-2 3.1-2s2.5.7 3.1 2M14.5 10h3.5M14.5 13.5h2.5"/></svg><span>FAA registry</span>
+            <span class="mm-sec-end" style="display:inline-flex; align-items:center; gap:6px;"><span id="faaAutoDot" class="mm-dot"></span><span id="faaAutoHead">auto</span></span>
+          </div>
+          <label class="mm-toggle" style="padding:0 0 6px;">
+            <span style="min-width:0;">
+              <span class="mm-toggle-title">Auto query FAA</span>
+              <span class="mm-note">Each new drone serial is looked up once. A record found is saved and never looked up again.</span>
+            </span>
+            <span class="switch"><input type="checkbox" id="faaAutoToggle" checked><span class="slider"></span></span>
+          </label>
+          <div id="faaAutoStatus" class="mm-note mm-faa-status"></div>
         </div>
         <!-- Webhooks (collapsible). Detection webhook fires on every drone
              ingest; geofence webhook fires on enter/exit alerts. If geofence
              URL is blank, geofence events fall back to the detection URL. -->
-        <div style="margin-top:8px; padding-top:6px; border-top:1px dashed #225522;">
-          <div style="cursor:pointer; user-select:none; color:#aaffaa; font-weight:bold; letter-spacing:1px; display:flex; justify-content:space-between; align-items:center;" id="webhooksToggle">
-            <span><span id="webhooksArrow">&#9656;</span> WEBHOOKS</span>
-            <span id="webhooksStatus" style="color:#779977; font-weight:normal; font-size:0.95em;"></span>
+        <div id="webhooksSection" class="mm-section">
+          <div class="mm-sec" id="webhooksToggle" style="cursor:pointer; user-select:none; margin-bottom:0;">
+            <span id="webhooksArrow">&#9656;</span><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg><span>Webhooks</span>
+            <span id="webhooksStatus" class="mm-sec-end"></span>
           </div>
-          <div id="webhooksPanel" style="display:none; margin-top:6px;">
-            <div style="font-size:0.95em; color:#aaffaa; margin:4px 0 2px 0;">Detection (drones)</div>
-            <input id="webhookUrlMain" type="text" placeholder="https://example.com/hook"
-                   style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#FF00FF; border:1px solid lime; font-family:monospace; font-size:0.95em; padding:3px;"/>
-            <div style="font-size:0.95em; color:#aaffaa; margin:6px 0 2px 0;">Geofence alerts</div>
-            <input id="webhookUrlGeofence" type="text" placeholder="(optional — falls back to detection URL)"
-                   style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#ff66ff; border:1px solid #ff66ff; font-family:monospace; font-size:0.95em; padding:3px;"/>
-            <div style="display:flex; gap:4px; margin-top:6px;">
-              <button id="webhookSaveBtn" style="flex:2; padding:4px; border:1px solid lime; background:#003300; color:lime; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">SAVE</button>
-              <button id="webhookTestBtn" style="flex:1; padding:4px; border:1px solid #00aaff; background:#001a2a; color:#00aaff; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;" title="POST a sample geofence payload to the geofence URL (or detection URL if blank)">TEST</button>
+          <div id="webhooksPanel" style="display:none; margin-top:8px;">
+            <label class="mm-field"><span class="mm-label mm-field-label">Detection (drones)</span>
+              <input id="webhookUrlMain" class="mm-mono" type="text" placeholder="https://example.com/hook"/>
+            </label>
+            <label class="mm-field"><span class="mm-label mm-field-label">Geofence alerts</span>
+              <input id="webhookUrlGeofence" class="mm-mono" type="text" placeholder="(optional, falls back to the detection URL)"/>
+            </label>
+            <div class="mm-row" style="margin-top:8px;">
+              <button id="webhookSaveBtn" class="mm-primary" style="flex:2;">SAVE</button>
+              <button id="webhookTestBtn" class="mm-info" style="flex:1;" title="POST a sample geofence payload to the geofence URL (or detection URL if blank)">TEST</button>
             </div>
-            <div id="webhookSaveResult" style="margin-top:4px; font-size:0.9em; text-align:center;"></div>
+            <div id="webhookSaveResult" class="mm-status"></div>
+          </div>
+        </div>
+        <!-- TAK server: drones and their pilots as Cursor-on-Target on a TAK
+             server's map (ATAK / WinTAK / iTAK). The link itself runs on the
+             server side in its own thread; this edits it and shows its state.
+             Moves into SETTINGS at load, after the webhooks. -->
+        <div id="takSection" class="mm-section">
+          <div class="mm-sec" id="takToggle" style="cursor:pointer; user-select:none; margin-bottom:0;">
+            <span id="takArrow">&#9656;</span><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.4"/></svg><span>TAK server</span>
+            <span class="mm-sec-end" style="display:inline-flex; align-items:center; gap:6px;"><span id="takHeadDot" class="mm-dot"></span><span id="takHeadText">off</span></span>
+          </div>
+          <div id="takPanel" style="display:none; margin-top:10px;">
+            <label class="mm-toggle" style="padding:0 0 6px;">
+              <span style="min-width:0;">
+                <span class="mm-toggle-title">Enabled</span>
+                <span class="mm-note">Drones and their pilots on a TAK server's map</span>
+              </span>
+              <span class="switch"><input type="checkbox" id="takEnabled"><span class="slider"></span></span>
+            </label>
+            <div class="mm-row" style="margin-top:4px;">
+              <label class="mm-field" style="flex:3;"><span class="mm-label mm-field-label">Host</span>
+                <input id="takHost" class="mm-mono" type="text" placeholder="tak.example.org or 10.0.0.5" autocomplete="off" spellcheck="false" autocapitalize="off"/>
+              </label>
+              <label class="mm-field" style="flex:1.3; margin-top:0;"><span class="mm-label mm-field-label">Port</span>
+                <input id="takPort" class="mm-mono" type="number" min="1" max="65535" placeholder="8087"/>
+              </label>
+            </div>
+            <div class="mm-field" style="margin-top:9px;">
+              <span class="mm-label mm-field-label">Protocol</span>
+              <div class="mm-seg" id="takProto">
+                <button type="button" data-proto="tcp">TCP</button>
+                <button type="button" data-proto="udp">UDP</button>
+                <button type="button" data-proto="tls">TLS</button>
+              </div>
+            </div>
+            <div id="takTlsBox" style="display:none; margin-top:10px;">
+              <div class="mm-field">
+                <span class="mm-label mm-field-label">Client certificate (.p12)</span>
+                <div id="takCertInfo" class="mm-note">none</div>
+                <div class="mm-row" style="margin-top:6px;">
+                  <input id="takCertFile" type="file" accept=".p12,.pfx,application/x-pkcs12" class="mm-grow"/>
+                  <button type="button" id="takCertRemove" class="mm-danger" style="display:none; padding:6px 9px; font-size:11px;">REMOVE</button>
+                </div>
+              </div>
+              <label class="mm-field" style="margin-top:8px;"><span class="mm-label mm-field-label">Certificate password</span>
+                <input id="takCertPass" type="password" autocomplete="new-password" placeholder="none"/>
+              </label>
+              <label class="mm-check" style="margin-top:10px;">
+                <input type="checkbox" id="takVerify" checked/>
+                <span>Check the server's certificate against the CA in the .p12 (or the one below)</span>
+              </label>
+              <div class="mm-field" style="margin-top:10px;">
+                <span class="mm-label mm-field-label">Server CA, optional (.p12 / .pem)</span>
+                <div id="takTrustInfo" class="mm-note">none: the CA inside the .p12 is used</div>
+                <div class="mm-row" style="margin-top:6px;">
+                  <input id="takTrustFile" type="file" accept=".p12,.pfx,.pem,.crt,.cer" class="mm-grow"/>
+                  <button type="button" id="takTrustRemove" class="mm-danger" style="display:none; padding:6px 9px; font-size:11px;">REMOVE</button>
+                </div>
+              </div>
+              <label class="mm-field" style="margin-top:8px;"><span class="mm-label mm-field-label">CA password, if it differs</span>
+                <input id="takTrustPass" type="password" autocomplete="new-password" placeholder="same as the .p12"/>
+              </label>
+            </div>
+            <div id="takLoginBox" style="margin-top:10px;">
+              <div class="mm-row">
+                <label class="mm-field mm-grow"><span class="mm-label mm-field-label">Username</span>
+                  <input id="takUser" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="only if asked"/>
+                </label>
+                <label class="mm-field mm-grow" style="margin-top:0;"><span class="mm-label mm-field-label">Password</span>
+                  <input id="takPass" type="password" autocomplete="new-password" placeholder="none"/>
+                </label>
+              </div>
+              <div class="mm-note" style="margin-top:5px;">Only for a server input that asks for a login (auth="file" or LDAP).</div>
+            </div>
+            <div class="mm-row" style="margin-top:10px;">
+              <label class="mm-field mm-grow"><span class="mm-label mm-field-label">Track timeout (s)</span>
+                <input id="takTimeout" type="number" min="30" max="3600" placeholder="120"/>
+              </label>
+              <label class="mm-field mm-grow" style="margin-top:0;"><span class="mm-label mm-field-label">Resend every (s)</span>
+                <input id="takRefresh" type="number" min="1" max="60" placeholder="5"/>
+              </label>
+            </div>
+            <button type="button" id="takSaveBtn" class="mm-primary mm-block" style="margin-top:12px;">SAVE AND CONNECT</button>
+            <div id="takSaveResult" class="mm-status"></div>
+            <div id="takStatus" class="mm-card" style="margin-top:8px;"></div>
           </div>
         </div>
         <!-- Holders for the offline-mapping + adsb panels (moved here from main UI on load) -->
@@ -6794,9 +8823,11 @@ HTML_PAGE = '''
         <div id="adsbHolder" style="margin-top:8px;"></div>
       </div>
     </div>
-    <!-- USB Status display: kept always visible by CSS rule (.alwaysVisible) below -->
-    <div class="alwaysVisible" style="margin-top:8px; width:fit-content; max-width:calc(100% - 16px); margin:8px auto 0 auto; border: 1px solid purple; background: black; padding:4px 8px; display:flex; justify-content:center; align-items:center;">
-      <div id="serialStatus" style="font-family:monospace; font-size:0.7em; text-align:center; line-height:1.2em;">
+    <!-- USB Status display: kept always visible by CSS rule (.alwaysVisible) above;
+         moves into SETTINGS at load -->
+    <div class="alwaysVisible mm-section mm-usb-pill">
+      <div class="mm-sec"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v4M15 3v4M7 7h10v3.5a5 5 0 0 1-10 0z M12 15.5V21"/></svg>Receivers</div>
+      <div id="serialStatus">
         <!-- USB port statuses will be injected here via WebSocket -->
       </div>
     </div>
@@ -6859,8 +8890,9 @@ socket.on('serial_status', function(statuses) {
   if (statuses) {
     for (const port in statuses) {
       const div = document.createElement("div");
-      div.innerHTML = '<span class="usb-name">' + port + '</span>: ' +
-        (statuses[port] ? '<span style="color: lime;">Connected</span>' : '<span style="color: red;">Disconnected</span>');
+      div.innerHTML = '<span class="mm-dot' + (statuses[port] ? ' live' : '') + '" style="--c:' + (statuses[port] ? 'var(--green)' : 'var(--red)') + '; margin-right:7px;"></span>'
+        + '<span class="usb-name">' + port + '</span>: ' +
+        (statuses[port] ? '<span style="color: var(--green);">Connected</span>' : '<span style="color: var(--red);">Disconnected</span>');
       statusDiv.appendChild(div);
     }
   }
@@ -6903,7 +8935,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const wasCollapsed = localStorage.getItem('filterCollapsed') === 'true';
   if (wasCollapsed) {
     filterBox.classList.add('collapsed');
-    filterToggle.textContent = '[+]';
+    filterToggle.textContent = '+';
   }
   // Re-sync the single-line layout now that .collapsed reflects the persisted state
   if (typeof _syncDronesCollapsedLayout === 'function') _syncDronesCollapsedLayout(wasCollapsed);
@@ -6913,13 +8945,13 @@ document.addEventListener('DOMContentLoaded', () => {
   if (window.matchMedia('(max-width: 700px)').matches) {
     if (filterBox && !filterBox.classList.contains('collapsed')) {
       filterBox.classList.add('collapsed');
-      if (filterToggle) filterToggle.textContent = '[+]';
+      if (filterToggle) filterToggle.textContent = '+';
     }
     const adsbContent = document.getElementById('adsbBoxContent');
     if (adsbContent && getComputedStyle(adsbContent).display !== 'none') {
       adsbContent.style.display = 'none';
       const adsbT = document.getElementById('adsbBoxToggle');
-      if (adsbT) adsbT.textContent = '[+]';
+      if (adsbT) adsbT.textContent = '+';
       const adsbBox = document.getElementById('adsbBox');
       if (adsbBox) adsbBox.classList.remove('open');
     }
@@ -6935,7 +8967,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (c && c.style.display !== 'none') {
         c.style.display = 'none';
         const t = document.getElementById(tid);
-        if (t) t.textContent = '[+]';
+        if (t) t.textContent = '+';
         if (c.parentElement) c.parentElement.classList.remove('open');
       }
     }
@@ -7008,7 +9040,7 @@ document.addEventListener('DOMContentLoaded', () => {
     filterToggle.addEventListener('click', function() {
       filterBox.classList.toggle('collapsed');
       const collapsed = filterBox.classList.contains('collapsed');
-      filterToggle.textContent = collapsed ? '[+]' : '[-]';
+      filterToggle.textContent = collapsed ? '+' : '−';
       // Persist filter collapsed state
       localStorage.setItem('filterCollapsed', collapsed);
       // One sheet at a time on phones — collapse siblings so nothing can
@@ -7028,7 +9060,7 @@ document.getElementById("filterToggle").addEventListener("click", function() {
   if (window._filterToggleWired) return;
   const box = document.getElementById("filterBox");
   const isCollapsed = box.classList.toggle("collapsed");
-  this.textContent = isCollapsed ? "[+]" : "[-]";
+  this.textContent = isCollapsed ? "+" : "−";
   localStorage.setItem('filterCollapsed', isCollapsed);
   _syncDronesCollapsedLayout(isCollapsed);
   if (!isCollapsed && window.matchMedia('(max-width: 700px)').matches) {
@@ -7057,10 +9089,10 @@ function _setDronesLayerVisible(visible) {
   const lbl = document.getElementById('dronesLayerStateLabel');
   if (lbl) {
     lbl.textContent = visible ? 'ON' : 'OFF';
-    // Lime accent matches the drone-popup/drone-panel family.
-    lbl.style.color = visible ? '#88ff99' : '#586978';
-    lbl.style.borderColor = visible ? 'rgba(136,255,153,0.55)' : 'rgba(255,255,255,0.10)';
-    lbl.style.background = visible ? 'rgba(136,255,153,0.10)' : 'transparent';
+    // Lit in the accent while the layer shows, red while it is hidden, like the switch.
+    lbl.style.color = visible ? 'var(--accent)' : 'var(--red)';
+    lbl.style.borderColor = visible ? 'rgba(46,230,214,0.55)' : 'rgba(255,77,94,0.55)';
+    lbl.style.background = visible ? 'rgba(46,230,214,0.08)' : 'rgba(255,77,94,0.08)';
   }
   // Path / trail layers respect the per-kind master toggles when re-shown
   if (typeof dronePathLayer !== 'undefined' && typeof pilotPathLayer !== 'undefined') {
@@ -7239,17 +9271,15 @@ function showTerminalPopup(det, isNew) {
     top: isMobile ? '50px' : '10px',
     left: '50%',
     transform: 'translateX(-50%)',
-    background: 'rgba(0,0,0,0.8)',
-    color: 'lime',
-    fontFamily: 'monospace',
+    color: 'var(--text)',
+    fontFamily: 'var(--sans)',
     whiteSpace: 'normal',
-    padding: isMobile ? '2px 4px' : '4px 8px',
-    border: '1px solid lime',
-    borderRadius: '4px',
+    padding: isMobile ? '8px 10px' : '10px 16px',
+    border: '1px solid rgba(255,61,168,0.55)',
+    borderRadius: '3px',
     zIndex: 2000,
-    opacity: 0.9,
-    fontSize: isMobile ? '0.6em' : '',
-    maxWidth: isMobile ? '80vw' : 'none',
+    fontSize: isMobile ? '12px' : '13px',
+    maxWidth: isMobile ? '88vw' : '560px',
     display: 'inline-block',
     textAlign: 'center',
   });
@@ -7271,7 +9301,8 @@ function showTerminalPopup(det, isNew) {
   // Build popup HTML and button using new logic
   // Build popup text
   const isMobileBtn = window.innerWidth <= 600;
-  const headerDiv = `<div>${content}</div>`;
+  const headerDiv = `<div class="mm-banner-head"><span class="mm-dot live" style="--c:var(--hot);"></span><span>${header}</span></div>`
+    + `<div class="mm-banner-id">RID ${rid}  ·  MAC ${det.mac}</div>`;
   let buttonDiv = '';
   if (det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0) {
     const btnStyle = [
@@ -7286,15 +9317,15 @@ function showTerminalPopup(det, isNew) {
       'font-size:' + (isMobileBtn ? '0.8em' : '0.9em'),
       'cursor:pointer'
     ].join('; ');
-    buttonDiv = `<div><button id="zoomBtn" style="${btnStyle}">Zoom to Drone</button></div>`;
+    buttonDiv = `<div><button id="zoomBtn" class="mm-hot">Zoom to Drone</button></div>`;
   }
   popup.innerHTML = headerDiv + buttonDiv;
 
   if (buttonDiv) {
     const zoomBtn = popup.querySelector('#zoomBtn');
     zoomBtn.addEventListener('click', () => {
-      zoomBtn.style.backgroundColor = 'purple';
-      setTimeout(() => { zoomBtn.style.backgroundColor = 'transparent'; }, 200);
+      zoomBtn.style.backgroundColor = 'rgba(255,61,168,0.28)';
+      setTimeout(() => { zoomBtn.style.backgroundColor = ''; }, 200);
       safeSetView([det.drone_lat, det.drone_long]);
     });
   }
@@ -7319,15 +9350,14 @@ var followLock = { type: null, id: null, enabled: false };
 
 function generateObserverPopup() {
   var observerLocked = (followLock.enabled && followLock.type === 'observer');
-  var storedObserverEmoji = localStorage.getItem('observerEmoji') || "😎";
   return `
-  <div>
-    <strong>Observer Location</strong><br>
-    <div style="display:flex; gap:4px; justify-content:center; margin-top:6px;">
-        <button id="lock-observer" onclick="lockObserver()" style="background-color: ${observerLocked ? 'green' : ''};">
+  <div class="mm-pop">
+    <div class="mm-pop-title">Observer location</div>
+    <div class="mm-row" style="margin-top:10px;">
+        <button id="lock-observer" onclick="lockObserver()" class="${observerLocked ? 'mm-on' : ''}" style="flex:1;">
           ${observerLocked ? 'Locked on Observer' : 'Lock on Observer'}
         </button>
-        <button id="unlock-observer" onclick="unlockObserver()" style="background-color: ${observerLocked ? '' : 'green'};">
+        <button id="unlock-observer" onclick="unlockObserver()" class="${observerLocked ? '' : 'mm-on'}" style="flex:1;">
           ${observerLocked ? 'Unlock Observer' : 'Unlocked Observer'}
         </button>
     </div>
@@ -7341,7 +9371,7 @@ function updateObserverEmoji() {
   var selectedEmoji = select.value;
   localStorage.setItem('observerEmoji', selectedEmoji);
   if (observerMarker) {
-    observerMarker.setIcon(createObserverIcon('blue'));
+    observerMarker.setIcon(createObserverIcon('#4da3ff'));
   }
 }
 
@@ -7355,48 +9385,94 @@ function updateObserverPopupButtons() {
   var observerLocked = (followLock.enabled && followLock.type === 'observer');
   var lockBtn = document.getElementById("lock-observer");
   var unlockBtn = document.getElementById("unlock-observer");
-  if(lockBtn) { lockBtn.style.backgroundColor = observerLocked ? "green" : ""; lockBtn.textContent = observerLocked ? "Locked on Observer" : "Lock on Observer"; }
-  if(unlockBtn) { unlockBtn.style.backgroundColor = observerLocked ? "" : "green"; unlockBtn.textContent = observerLocked ? "Unlock Observer" : "Unlocked Observer"; }
+  if(lockBtn) { lockBtn.classList.toggle('mm-on', observerLocked); lockBtn.textContent = observerLocked ? "Locked on Observer" : "Lock on Observer"; }
+  if(unlockBtn) { unlockBtn.classList.toggle('mm-on', !observerLocked); unlockBtn.textContent = observerLocked ? "Unlock Observer" : "Unlocked Observer"; }
 }
 
+// Popups open clear of the pills along the top and the bars along the bottom
+// (a drone popup taller than that scrolls inside; see the stylesheet).
+if (window.L && L.Popup && L.Popup.mergeOptions) {
+  L.Popup.mergeOptions({autoPanPaddingTopLeft: L.point(10, 62), autoPanPaddingBottomRight: L.point(10, 118)});
+}
+
+function _faaEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// The FAA part of a drone popup: the record's fields; "Not in the FAA
+// registry" when the FAA answered without one; nothing before it is asked.
+function faaBlockHtml(fd) {
+  const items = (fd && fd.data && Array.isArray(fd.data.items)) ? fd.data.items : null;
+  const item = (items && items.length && items[0] && typeof items[0] === 'object') ? items[0] : null;
+  if (item) {
+    let h = '<div class="mm-faa">';
+    [['makeName', 'Make'], ['modelName', 'Model'], ['series', 'Series'], ['status', 'Status'],
+     ['trackingNumber', 'Tracking'], ['complianceCategories', 'Compliance'], ['updatedAt', 'Updated']].forEach(([f, label]) => {
+      let v = item[f];
+      if (Array.isArray(v)) v = v.map(x => (x && typeof x === 'object') ? (x.name || x.label || JSON.stringify(x)) : x).join(', ');
+      if (v === undefined || v === null || v === '') return;
+      // an ISO time reads as its date
+      if (f === 'updatedAt' && typeof v === 'string' && v.length > 10 && v.charAt(10) === 'T') v = v.slice(0, 10);
+      h += '<div class="mm-kv"><span class="k">' + label + '</span><span class="v">' + _faaEsc(v) + '</span></div>';
+    });
+    return h + '</div>';
+  }
+  return items ? '<div class="mm-note">Not in the FAA registry</div>' : '';
+}
+
+// What the FAA part shows, as a short key: an open popup redraws it only
+// when this changes.
+function faaKey(fd) {
+  const items = (fd && fd.data && Array.isArray(fd.data.items)) ? fd.data.items : null;
+  if (!items) return '';
+  const it = items[0];
+  if (!it || typeof it !== 'object') return 'none';
+  return 'rec:' + [it.trackingNumber, it.makeName, it.modelName, it.updatedAt].map(x => x == null ? '' : String(x)).join(':');
+}
+
+// An FAA answer that lands while a drone's or pilot's popup is open (the
+// automatic lookup): put it in, leaving the rest of the popup as it is.
+function _faaRefreshOpenPopup(mac, det) {
+  const slot = document.getElementById('faaResult_' + mac);
+  if (!slot || !det) return;
+  const k = faaKey(det.faa_data);
+  if ((slot.getAttribute('data-faa') || '') === k) return;
+  slot.innerHTML = faaBlockHtml(det.faa_data);
+  slot.setAttribute('data-faa', k);
+}
+window._faaRefreshOpenPopup = _faaRefreshOpenPopup;
+
 function generatePopupContent(detection, markerType) {
-  // Drone popup — same visual language as the ADS-B aircraft popup (dark
-  // gradient card, system UI, label/value rows, pill buttons, iOS toggles)
-  // but with a lime accent so it reads as "drone" at a glance. Every existing
-  // feature kept: alias, FAA RemoteID + lookup, OSINT tag, lock-on follow,
-  // path toggles, color slider, Google Maps links, raw key/value telemetry.
+  // Drone popup in the OUI SPY RECON look: printed section heads, key/value
+  // rows, the tag in its own color, accent buttons and the app's switches.
+  // Every existing feature kept: alias, FAA RemoteID + lookup, OSINT tag,
+  // lock-on follow, path toggles, color slider, Google Maps links, raw
+  // key/value telemetry.
   const mac = detection.mac;
-  const accent = '#88ff99';   // lime accent (drone vocabulary)
-  const muted  = '#7e9486';
   const aliasText = aliases[mac] ? aliases[mac] : '';
   const curTag = (window.droneTags && droneTags[mac.toLowerCase()]) || 'unknown';
-  const tagColor = DRONE_TAG_COLORS[curTag] || '#888';
+  const tagColor = DRONE_TAG_COLORS[curTag] || '#7d8999';
   const safeMac = mac.replace(/[^A-Za-z0-9]/g, '');
 
-  // ── stat row helper (same shape as the ADS-B popup's `stat`) ──
-  const stat = (label, value, color) =>
-      '<div style="display:flex; justify-content:space-between; padding:2px 0; gap:8px;">'
-    + '<span style="color:' + muted + ';">' + label + '</span>'
-    + '<span style="color:' + (color || '#dde6ee') + '; font-weight:600; text-align:right; word-break:break-word;">'
+  // Key / value row: the key printed in silk, numbers and IDs in mono
+  const stat = (label, value, color, mono) =>
+      '<div class="mm-kv"><span class="k">' + label + '</span>'
+    + '<span class="v' + (mono ? ' mono' : '') + '"' + (color ? ' style="color:' + color + ';"' : '') + '>'
     + value + '</span></div>';
 
-  const pillBtn = (id, label, onclick, active) => {
-    const fg = active ? '#001028' : accent;
-    const bg = active ? accent : 'transparent';
-    return '<button id="' + id + '" onclick="event.stopPropagation(); ' + onclick + '" '
-      + 'style="flex:1; padding:6px 0; border:' + (active ? '0' : '1px solid ' + accent) + '; '
-      + 'border-radius:5px; cursor:pointer; background:' + bg + '; color:' + fg + '; '
-      + 'font-family:inherit; font-weight:600; letter-spacing:1px; font-size:0.75em;">'
-      + label + '</button>';
-  };
+  // Accent button; an engaged one is filled
+  const pillBtn = (id, label, onclick, active, kind) =>
+      '<button id="' + id + '" onclick="event.stopPropagation(); ' + onclick + '" '
+    + 'class="' + (active ? 'mm-on' : (kind === undefined ? 'mm-accent' : kind)) + '" style="flex:1;">'
+    + label + '</button>';
 
-  // ── Pure-CSS toggle (path show/hide). Animates via input:checked siblings,
-  //    so it stays responsive even while the popup is open and HTML re-render
-  //    is suppressed.
+  // Pure-CSS switch (path show/hide). Animates via input:checked siblings,
+  // so it stays responsive while the popup is open and HTML re-render is
+  // suppressed.
   const toggleSwitch = (id, label, on, onchange) =>
-      '<label style="display:flex; align-items:center; justify-content:space-between; '
-    + 'padding:5px 2px; cursor:pointer; flex:1; min-width:0;" onclick="event.stopPropagation();">'
-    + '<span style="color:' + muted + '; font-size:0.78em; letter-spacing:0.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">'
+      '<label class="mm-toggle" onclick="event.stopPropagation();">'
+    + '<span class="mm-label" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">'
     + label + '</span>'
     + '<span class="pop-toggle">'
     +   '<input id="' + id + '" type="checkbox"' + (on ? ' checked' : '')
@@ -7405,61 +9481,42 @@ function generatePopupContent(detection, markerType) {
     +   '<span class="pop-knob"></span>'
     + '</span></label>';
 
-  let html = '';
+  let html = '<div class="mm-pop">';
 
-  // ── Header: alias (or MAC) + tag chip ──
+  // Header: alias (or MAC), the MAC and the tag
   const headTitle = aliasText || mac;
-  html += '<div style="font-size:1.05em; font-weight:700; color:#fff; letter-spacing:0.3px; '
-       +  'overflow:hidden; text-overflow:ellipsis;">' + headTitle + '</div>';
-  html += '<div style="display:flex; align-items:center; gap:6px; margin-top:1px;">'
-       +    '<span style="color:' + muted + '; font-size:0.72em; letter-spacing:0.5px;">' + mac + '</span>'
-       +    '<span id="droneTagPill_' + safeMac + '" style="margin-left:auto; font-size:0.7em; padding:1px 6px; border-radius:9px; '
-       +      'background:' + tagColor + '22; color:' + tagColor + '; border:1px solid ' + tagColor + '55; letter-spacing:1px; font-weight:600;">'
+  html += '<div class="mm-pop-title">' + headTitle + '</div>';
+  html += '<div class="mm-pop-sub">'
+       +    '<span class="mm-mac">' + mac + '</span>'
+       +    '<span id="droneTagPill_' + safeMac + '" class="mm-tag" style="--c:' + tagColor + ';">'
        +      curTag.toUpperCase() + '</span>'
        + '</div>';
 
-  // ── FAA RemoteID + lookup ──
-  if (detection.basic_id || detection.faa_data) {
-    html += '<div style="height:1px; background:rgba(255,255,255,0.07); margin:8px 0;"></div>';
-    html += '<div style="font-size:0.72em; color:' + muted + '; letter-spacing:1.5px; margin-bottom:4px;">FAA REMOTE-ID</div>';
+  // FAA RemoteID + lookup (automatic for a new serial, unless switched off
+  // in Settings; QUERY FAA asks again by hand)
+  if (detection.basic_id || faaKey(detection.faa_data)) {
+    html += '<div class="mm-rule"></div>';
+    html += '<div class="mm-sec">FAA Remote ID</div>';
     if (detection.basic_id) {
-      html += stat('SERIAL', detection.basic_id, '#fff');
+      html += stat('Serial', detection.basic_id, '', true);
       html += '<button onclick="event.stopPropagation(); queryFaaAPI(\\'' + mac + '\\', \\'' + detection.basic_id + '\\')" '
-           +  'id="queryFaaButton_' + mac + '" '
-           +  'style="width:100%; margin-top:6px; padding:5px 0; border:1px solid ' + accent + '; border-radius:5px; '
-           +  'background:transparent; color:' + accent + '; font-family:inherit; font-weight:600; letter-spacing:1px; '
-           +  'font-size:0.72em; cursor:pointer;">QUERY FAA</button>';
+           +  'id="queryFaaButton_' + mac + '" class="mm-accent mm-block" style="margin-top:7px;">QUERY FAA</button>';
     }
-    html += '<div id="faaResult_' + mac + '" style="margin-top:6px;">';
-    if (detection.faa_data) {
-      let item = null;
-      const fd = detection.faa_data;
-      if (fd && fd.data && fd.data.items && fd.data.items.length > 0) item = fd.data.items[0];
-      if (item) {
-        const fields = ['makeName', 'modelName', 'series', 'trackingNumber', 'complianceCategories', 'updatedAt'];
-        html += '<div style="font-size:0.85em; line-height:1.45; padding:6px 8px; background:rgba(136,255,153,0.05); border:1px solid rgba(136,255,153,0.18); border-radius:4px;">';
-        fields.forEach(f => {
-          if (item[f] !== undefined && item[f] !== '') html += stat(f, String(item[f]), '#dde6ee');
-        });
-        html += '</div>';
-      } else {
-        html += '<div style="font-size:0.78em; color:' + muted + '; font-style:italic; padding:4px 0;">No FAA data available</div>';
-      }
-    }
-    html += '</div>';
+    html += '<div id="faaResult_' + mac + '" class="mm-faa-slot" data-faa="' + _faaEsc(faaKey(detection.faa_data)) + '" style="margin-top:7px;">'
+         +  faaBlockHtml(detection.faa_data) + '</div>';
   }
 
-  // ── Telemetry (key/value, smart-filtered) ──
+  // Telemetry (key/value, smart-filtered)
   // Hide internal/dev fields the user doesn't care about (_simulated comes
   // from the demo flight injector; lockTime/userLocked are UI bookkeeping).
   const skip = new Set(['mac','basic_id','last_update','userLocked','lockTime','faa_data','_simulated']);
   const telemetryKeys = Object.keys(detection).filter(k => !skip.has(k) && detection[k] !== '' && detection[k] !== null && detection[k] !== undefined);
   if (telemetryKeys.length > 0) {
-    html += '<div style="height:1px; background:rgba(255,255,255,0.07); margin:8px 0;"></div>';
-    html += '<div style="font-size:0.72em; color:' + muted + '; letter-spacing:1.5px; margin-bottom:4px;">TELEMETRY</div>';
+    html += '<div class="mm-rule"></div>';
+    html += '<div class="mm-sec">Telemetry</div>';
     // Field-specific decimal precision so coords don't look like scientific
-    // notation. Lat/lon → 5 dp (≈1 m on the ground). Altitude/speed/heading/
-    // distance → integer. Anything else → 2 dp max.
+    // notation. Lat/lon: 5 dp (about 1 m on the ground). Altitude/speed/heading/
+    // distance: integer. Anything else: 2 dp max.
     const _fmtNumber = (key, v) => {
       const k = key.toLowerCase();
       if (k.endsWith('lat') || k.endsWith('lng') || k.endsWith('long') || k.endsWith('lon')) {
@@ -7475,69 +9532,62 @@ function generatePopupContent(detection, markerType) {
       // General case: 2 decimals, trim trailing zeros
       return v.toFixed(2).replace(/\\.?0+$/, '');
     };
-    html += '<div style="font-size:0.85em; line-height:1.45;">';
+    html += '<div>';
     telemetryKeys.forEach(k => {
       let v = detection[k];
-      if (typeof v === 'number') v = _fmtNumber(k, v);
-      html += stat(k, String(v));
+      const isNum = (typeof v === 'number');
+      if (isNum) v = _fmtNumber(k, v);
+      html += stat(k, String(v), '', isNum);
     });
     html += '</div>';
   }
 
-  // ── Google Maps links ──
+  // Google Maps links
   const validDrone = detection.drone_lat && detection.drone_long && detection.drone_lat !== 0 && detection.drone_long !== 0;
   const validPilot = detection.pilot_lat && detection.pilot_long && detection.pilot_lat !== 0 && detection.pilot_long !== 0;
   if (validDrone || validPilot) {
-    html += '<div style="height:1px; background:rgba(255,255,255,0.07); margin:8px 0;"></div>';
-    html += '<div style="display:flex; gap:6px;">';
+    html += '<div class="mm-rule"></div>';
+    html += '<div class="mm-row">';
     if (validDrone) {
-      html += '<a target="_blank" rel="noopener" '
-           +  'href="https://www.google.com/maps/search/?api=1&query=' + detection.drone_lat + ',' + detection.drone_long + '" '
-           +  'style="flex:1; text-align:center; padding:5px 0; border:1px solid rgba(136,255,153,0.4); border-radius:5px; '
-           +  'color:' + accent + '; text-decoration:none; font-size:0.72em; font-weight:600; letter-spacing:1px;">GMAPS · DRONE</a>';
+      html += '<a target="_blank" rel="noopener" class="mm-link" '
+           +  'href="https://www.google.com/maps/search/?api=1&query=' + detection.drone_lat + ',' + detection.drone_long + '">GMAPS · DRONE</a>';
     }
     if (validPilot) {
-      html += '<a target="_blank" rel="noopener" '
-           +  'href="https://www.google.com/maps/search/?api=1&query=' + detection.pilot_lat + ',' + detection.pilot_long + '" '
-           +  'style="flex:1; text-align:center; padding:5px 0; border:1px solid rgba(136,255,153,0.4); border-radius:5px; '
-           +  'color:' + accent + '; text-decoration:none; font-size:0.72em; font-weight:600; letter-spacing:1px;">GMAPS · PILOT</a>';
+      html += '<a target="_blank" rel="noopener" class="mm-link" '
+           +  'href="https://www.google.com/maps/search/?api=1&query=' + detection.pilot_lat + ',' + detection.pilot_long + '">GMAPS · PILOT</a>';
     }
     html += '</div>';
   }
 
-  // ── Alias + OSINT tag ──
-  html += '<div style="height:1px; background:rgba(255,255,255,0.07); margin:8px 0;"></div>';
-  html += '<div style="font-size:0.72em; color:' + muted + '; letter-spacing:1.5px; margin-bottom:4px;">IDENTITY</div>';
+  // Alias + OSINT tag
+  html += '<div class="mm-rule"></div>';
+  html += '<div class="mm-sec">Identity</div>';
   html += '<input type="text" id="aliasInput" placeholder="Alias…" '
        +  'onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" '
        +  'value="' + (aliasText || '').replace(/"/g, '&quot;') + '" '
-       +  'style="width:100%; box-sizing:border-box; background:rgba(255,255,255,0.04); color:#fff; '
-       +  'border:1px solid rgba(255,255,255,0.12); border-radius:4px; padding:6px 8px; '
-       +  'font-family:inherit; font-size:0.85em; outline:none;">';
-  html += '<div style="display:flex; gap:6px; margin-top:6px;">';
+       +  'style="width:100%;">';
+  html += '<div class="mm-row" style="margin-top:7px;">';
   html += pillBtn('saveAliasBtn_' + safeMac, 'SAVE ALIAS',
                   'saveAlias(\\'' + mac + '\\');', false);
   html += pillBtn('clearAliasBtn_' + safeMac, 'CLEAR',
-                  'clearAlias(\\'' + mac + '\\');', false);
+                  'clearAlias(\\'' + mac + '\\');', false, '');
   html += '</div>';
-  html += '<div style="display:flex; align-items:center; gap:8px; margin-top:8px;">';
-  html += '<span style="color:' + muted + '; font-size:0.72em; letter-spacing:1.5px; min-width:32px;">TAG</span>';
+  html += '<div class="mm-row" style="margin-top:8px; gap:10px;">';
+  html += '<span class="mm-label" style="min-width:34px;">Tag</span>';
   html += '<select id="droneTagSelect_' + safeMac + '" '
        +  'onclick="event.stopPropagation();" '
        +  'onchange="saveDroneTag(\\'' + mac + '\\', this.value)" '
-       +  'style="flex:1; background:rgba(255,255,255,0.04); color:' + tagColor + '; '
-       +  'border:1px solid ' + tagColor + '55; border-radius:4px; padding:5px 6px; '
-       +  'font-family:inherit; font-size:0.85em; font-weight:600; outline:none;">';
+       +  'class="mm-grow" style="color:' + tagColor + '; border-color:' + tagColor + '66; font-weight:600;">';
   DRONE_TAG_VALUES.forEach(v => {
     html += '<option value="' + v + '"' + (v === curTag ? ' selected' : '') + '>' + v.toUpperCase() + '</option>';
   });
   html += '</select></div>';
 
-  // ── Tracking + paths ──
-  html += '<div style="height:1px; background:rgba(255,255,255,0.07); margin:8px 0;"></div>';
+  // Tracking + paths
+  html += '<div class="mm-rule"></div>';
   const isDroneLocked = (followLock.enabled && followLock.type === 'drone' && followLock.id === mac);
   const isPilotLocked = (followLock.enabled && followLock.type === 'pilot' && followLock.id === mac);
-  html += '<div style="display:flex; gap:6px;">';
+  html += '<div class="mm-row">';
   html += pillBtn('lock-drone-' + mac,
                   isDroneLocked ? 'TRACKING DRONE' : 'TRACK DRONE',
                   (isDroneLocked
@@ -7554,31 +9604,32 @@ function generatePopupContent(detection, markerType) {
   }
   html += '</div>';
 
-  // Path toggles — drone always, pilot only if we ever saw it
+  // Path toggles: drone always, pilot only if we ever saw it
   const dronePathOn = !hiddenPaths.has('drone:' + mac);
   const pilotPathOn = !hiddenPaths.has('pilot:' + mac);
-  html += '<div style="display:flex; gap:8px; margin-top:2px;">';
-  html += toggleSwitch('drone-path-' + safeMac, 'DRONE PATH', dronePathOn,
+  html += '<div style="margin-top:4px;">';
+  html += toggleSwitch('drone-path-' + safeMac, 'Drone path', dronePathOn,
                        'setPathHidden(\\'drone:' + mac + '\\', !this.checked);');
   if (validPilot) {
-    html += toggleSwitch('pilot-path-' + safeMac, 'PILOT PATH', pilotPathOn,
+    html += toggleSwitch('pilot-path-' + safeMac, 'Pilot path', pilotPathOn,
                          'setPathHidden(\\'pilot:' + mac + '\\', !this.checked);');
   }
   html += '</div>';
 
-  // ── Color hue slider ──
+  // Color hue slider: the drone's own color
   let defaultHue = colorOverrides[mac] !== undefined ? colorOverrides[mac] : (function(){
     let hash = 0;
     for (let i = 0; i < mac.length; i++) hash = mac.charCodeAt(i) + ((hash << 5) - hash);
     return Math.abs(hash) % 360;
   })();
-  html += '<div style="height:1px; background:rgba(255,255,255,0.07); margin:8px 0;"></div>';
-  html += '<div style="display:flex; align-items:center; gap:8px;">';
-  html += '<span style="color:' + muted + '; font-size:0.72em; letter-spacing:1.5px; min-width:38px;">COLOR</span>';
+  html += '<div class="mm-rule"></div>';
+  html += '<div class="mm-row" style="gap:10px;">';
+  html += '<span class="mm-label" style="min-width:40px;">Color</span>';
   html += '<input type="range" id="colorSlider_' + mac + '" min="0" max="360" value="' + defaultHue + '" '
        +  'onclick="event.stopPropagation();" '
        +  'onchange="updateColor(\\'' + mac + '\\', this.value)" '
-       +  'style="flex:1; accent-color:' + accent + ';">';
+       +  'class="mm-hue mm-grow">';
+  html += '</div>';
   html += '</div>';
 
   return html;
@@ -7590,8 +9641,8 @@ async function queryFaaAPI(mac, remote_id) {
     if (button) {
         button.disabled = true;
         const originalText = button.textContent;
-        button.textContent = "Querying...";
-        button.style.backgroundColor = "gray";
+        button.textContent = "QUERYING";
+        button.style.backgroundColor = "";
     }
     try {
         const response = await fetch(window.location.origin + '/api/query_faa', {
@@ -7607,23 +9658,8 @@ async function queryFaaAPI(mac, remote_id) {
             }
             const faaDiv = document.getElementById("faaResult_" + mac);
             if (faaDiv) {
-                let faaData = result.faa_data;
-                let item = null;
-                if (faaData.data && faaData.data.items && faaData.data.items.length > 0) {
-                  item = faaData.data.items[0];
-                }
-                if (item) {
-                  const fields = ["makeName", "modelName", "series", "trackingNumber", "complianceCategories", "updatedAt"];
-                  let html = '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">';
-                  fields.forEach(function(field) {
-                    let value = item[field] !== undefined ? item[field] : "";
-                    html += `<div><span style="color:#FF00FF;">${field}:</span> <span style="color:#00FF00;">${value}</span></div>`;
-                  });
-                  html += '</div>';
-                  faaDiv.innerHTML = html;
-                } else {
-                  faaDiv.innerHTML = '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">No FAA data available</div>';
-                }
+                faaDiv.innerHTML = faaBlockHtml(result.faa_data) || '<div class="mm-note">No FAA data available</div>';
+                faaDiv.setAttribute('data-faa', faaKey(result.faa_data));
             }
             // Immediately refresh popups with new FAA data
             const key = result.mac || mac;
@@ -7650,8 +9686,8 @@ async function queryFaaAPI(mac, remote_id) {
         const button = document.getElementById("queryFaaButton_" + mac);
         if (button) {
             button.disabled = false;
-            button.style.backgroundColor = "#333";
-            button.textContent = "Query FAA API";
+            button.style.backgroundColor = "";
+            button.textContent = "QUERY FAA";
         }
     }
 }
@@ -7687,8 +9723,8 @@ function updateMarkerButtons(markerType, id) {
   var isLocked = (followLock.enabled && followLock.type === markerType && followLock.id === id);
   var lockBtn = document.getElementById("lock-" + markerType + "-" + id);
   var unlockBtn = document.getElementById("unlock-" + markerType + "-" + id);
-  if(lockBtn) { lockBtn.style.backgroundColor = isLocked ? "green" : ""; lockBtn.textContent = isLocked ? "Locked on " + markerType.charAt(0).toUpperCase() + markerType.slice(1) : "Lock on " + markerType.charAt(0).toUpperCase() + markerType.slice(1); }
-  if(unlockBtn) { unlockBtn.style.backgroundColor = isLocked ? "" : "green"; unlockBtn.textContent = isLocked ? "Unlock " + markerType.charAt(0).toUpperCase() + markerType.slice(1) : "Unlocked " + markerType.charAt(0).toUpperCase() + markerType.slice(1); }
+  if(lockBtn) { lockBtn.classList.toggle('mm-on', isLocked); lockBtn.classList.toggle('mm-accent', !isLocked); lockBtn.textContent = isLocked ? "Locked on " + markerType.charAt(0).toUpperCase() + markerType.slice(1) : "Lock on " + markerType.charAt(0).toUpperCase() + markerType.slice(1); }
+  if(unlockBtn) { unlockBtn.classList.toggle('mm-on', !isLocked); unlockBtn.textContent = isLocked ? "Unlock " + markerType.charAt(0).toUpperCase() + markerType.slice(1) : "Unlocked " + markerType.charAt(0).toUpperCase() + markerType.slice(1); }
 }
 
 function openAliasPopup(mac) {
@@ -7709,13 +9745,13 @@ function openAliasPopup(mac) {
 // ---------- Drone OSINT tags ----------
 const DRONE_TAG_VALUES = ['unknown','civilian','police','government','military','commercial','known'];
 const DRONE_TAG_COLORS = {
-  unknown:    '#888888',
-  civilian:   '#88ddff',
-  known:      '#88ff88',
-  police:     '#33aaff',
-  government: '#ffcc00',
-  military:   '#ff8800',
-  commercial: '#88ff88',
+  unknown:    '#7d8999',
+  civilian:   '#5cc8ff',
+  known:      '#3dff9a',
+  police:     '#2f7dff',
+  government: '#ffb547',
+  military:   '#ff9447',
+  commercial: '#a6f04a',
 };
 window.droneTags = {};
 
@@ -7775,7 +9811,7 @@ async function saveAlias(mac) {
         // Force reflow to apply immediate flash
         aliasSpan.getBoundingClientRect();
         const prevBg = aliasSpan.style.backgroundColor;
-        aliasSpan.style.backgroundColor = 'purple';
+        aliasSpan.style.backgroundColor = 'rgba(46,230,214,0.25)';
         setTimeout(() => { aliasSpan.style.backgroundColor = prevBg; }, 300);
       }
       // Ensure the alias list updates immediately
@@ -7968,8 +10004,7 @@ map.on('zoomend', debounce(function() {
   Object.values(droneBroadcastRings).forEach(ring => ring.setRadius(size * 0.34));
   // Update observer icon size based on zoom level
   if (observerMarker) {
-    const storedObserverEmoji = localStorage.getItem('observerEmoji') || "😎";
-    observerMarker.setIcon(createObserverIcon('blue'));
+    observerMarker.setIcon(createObserverIcon('#4da3ff'));
   }
 }, 130));
 
@@ -8007,15 +10042,14 @@ const offlineLayerBounds = {};
 
 function setBasemapStatus(mode, label) {
   // mode: 'online' | 'offline'
-  // online -> lime green (bright); offline -> forest green (camo, deeper)
+  // online -> green; offline (tiles from disk) -> lime
   const el = document.getElementById('basemapStatus');
   if (!el) return;
   const isOff = (mode === 'offline');
-  const color = isOff ? '#228B22' : '#00ff00';
+  const color = isOff ? 'var(--lime)' : 'var(--green)';
   el.style.color = color;
-  el.style.borderColor = color;
-  el.innerHTML = '<span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:'
-    + color + '; box-shadow:0 0 6px ' + color + '; vertical-align:middle; margin-right:5px;"></span>'
+  el.style.borderColor = isOff ? 'rgba(166,240,74,0.4)' : 'rgba(61,255,154,0.35)';
+  el.innerHTML = '<span class="mm-dot live" style="--c:' + color + ';"></span>'
     + (label || (isOff ? 'OFFLINE' : 'ONLINE'));
 }
 
@@ -8079,8 +10113,6 @@ function applyBasemap(value) {
 
 document.getElementById("layerSelect").addEventListener("change", function() {
   applyBasemap(this.value);
-  this.style.backgroundColor = "rgba(0,0,0,0.8)";
-  this.style.color = "#FF00FF";
 });
 
 // ---------- Offline layer discovery & registration ----------
@@ -8141,11 +10173,13 @@ async function refreshOfflineLayers() {
     group.appendChild(opt);
     if (list) {
       const row = document.createElement('div');
-      row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; padding:2px 0; border-top:1px dashed #225522;';
-      const tagColor = lyr.kind === 'vector' ? '#00ffff' : 'lime';
-      row.innerHTML = '<span style="color:' + tagColor + ';">◉ ' + tag + ' ' + lyr.label
-                    + ' · ' + lyr.tile_count + ' tiles · ' + (lyr.size_bytes/1048576).toFixed(1) + ' MB</span>'
-                    + '<button data-name="' + lyr.name + '" class="cacheDelBtn" style="background:#330000; border:1px solid #ff4444; color:#ff8888; font-family:monospace; font-size:0.85em; padding:1px 6px; cursor:pointer;">DEL</button>';
+      row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; gap:8px; padding:7px 0; border-top:1px solid var(--line);';
+      const tagColor = lyr.kind === 'vector' ? 'var(--sky)' : 'var(--lime)';
+      row.innerHTML = '<span style="min-width:0; font-size:12px; color:var(--text);"><span class="mm-tag" style="--c:' + tagColor + '; margin-right:6px;">'
+                    + (lyr.kind === 'vector' ? 'VECTOR' : 'RASTER') + '</span>' + lyr.label
+                    + '<span class="mm-mono" style="display:block; margin-top:3px; font-size:11px; color:var(--muted);">'
+                    + lyr.tile_count + ' tiles · ' + (lyr.size_bytes/1048576).toFixed(1) + ' MB</span></span>'
+                    + '<button data-name="' + lyr.name + '" class="cacheDelBtn mm-danger" style="padding:4px 8px; font-size:11px;">DEL</button>';
       list.appendChild(row);
     }
   }
@@ -8178,7 +10212,7 @@ document.getElementById('cacheToggle').addEventListener('click', (ev) => {
   const box = document.getElementById('mapLayerFloatBox');
   const open = p.style.display === 'none';
   p.style.display = open ? 'block' : 'none';
-  a.textContent = open ? '−' : '+';
+  a.textContent = open ? '▾' : '▸';
   if (wrap) wrap.classList.toggle('flyout-open', open);
   if (box) box.classList.toggle('flyout-open', open);
   if (open) { refreshOfflineLayers(); updateCacheEstimate(); }
@@ -8196,7 +10230,7 @@ document.addEventListener('click', (e) => {
   const p = document.getElementById('cachePanel');
   const a = document.getElementById('cacheToggleArrow');
   if (p) p.style.display = 'none';
-  if (a) a.textContent = '+';
+  if (a) a.textContent = '▸';
 });
 
 // Active / Inactive drone list toggles — collapsible, state persisted across reloads
@@ -8206,11 +10240,11 @@ function _wireDroneListToggle(headerId, placeholderId, arrowId, storageKey) {
   const arrow = document.getElementById(arrowId);
   if (!header || !ph || !arrow) return;
   const collapsed = localStorage.getItem(storageKey) === '1';
-  if (collapsed) { ph.style.display = 'none'; arrow.textContent = '▶'; }
+  if (collapsed) { ph.style.display = 'none'; arrow.textContent = '▸'; }
   header.addEventListener('click', () => {
     const isCollapsed = ph.style.display === 'none';
     ph.style.display = isCollapsed ? '' : 'none';
-    arrow.textContent = isCollapsed ? '▼' : '▶';
+    arrow.textContent = isCollapsed ? '▾' : '▸';
     localStorage.setItem(storageKey, isCollapsed ? '0' : '1');
   });
 }
@@ -8258,24 +10292,23 @@ const geofences = {};         // id -> fence dict (server canonical)
 
 function showGeofenceToast(payload) {
   const t = document.createElement('div');
-  const accent = payload.fence_color || '#ff3333';
+  const accent = payload.fence_color || '#ff4d5e';
   t.style.cssText =
-    'pointer-events:auto; padding:8px 10px; border:2px solid ' + accent + ';'
-    + 'background:rgba(0,0,0,0.92); color:#ffaaaa; font-family:monospace; font-size:0.85em;'
-    + 'border-radius:4px; box-shadow:0 0 12px ' + accent + ';'
+    'pointer-events:auto; min-width:240px; padding:10px 12px; border:1px solid ' + accent + ';'
+    + 'border-left-width:3px; background:rgba(9,11,15,0.96); color:var(--text); font-family:var(--sans); font-size:13px;'
+    + 'border-radius:3px; box-shadow:0 14px 34px rgba(0,0,0,0.55);'
     + 'animation: gfToastDrop 0.35s ease-out;';
   const dt = new Date((payload.ts || 0) * 1000);
   const tagColor = (DRONE_TAG_COLORS[payload.drone_tag] || '#888');
-  const tagPill = '<span style="display:inline-block; padding:1px 5px; border:1px solid '
-    + tagColor + '; color:' + tagColor + '; border-radius:3px; font-size:0.85em;">'
+  const tagPill = '<span class="mm-tag" style="--c:' + tagColor + ';">'
     + (payload.drone_tag || 'unknown').toUpperCase() + '</span>';
   t.innerHTML =
-    '<div style="font-weight:bold;">'
-    + '<span style="color:' + (payload.transition === 'enter' ? '#4ade80' : '#ff6b6b') + ';">'
+    '<div style="display:flex; align-items:center; gap:8px; font:600 11px/1.3 var(--mono); letter-spacing:0.1em;">'
+    + '<span style="color:' + (payload.transition === 'enter' ? 'var(--green)' : 'var(--red)') + ';">'
     + (payload.transition === 'enter' ? '▶ ENTERED' : '◀ LEFT') + '</span>'
-    + ' <span style="color:' + accent + ';">· ' + payload.fence_name + '</span></div>'
-    + '<div style="margin-top:3px;">' + (payload.alias || payload.mac) + ' ' + tagPill + '</div>'
-    + '<div style="font-size:0.85em; color:#888; margin-top:2px;">' + dt.toLocaleTimeString() + '</div>';
+    + ' <span style="color:' + accent + '; font-family:var(--sans); font-size:13px; letter-spacing:0;">· ' + payload.fence_name + '</span></div>'
+    + '<div style="margin-top:5px; display:flex; align-items:center; gap:8px; color:var(--soft);">' + (payload.alias || payload.mac) + ' ' + tagPill + '</div>'
+    + '<div class="mm-mono" style="font-size:11px; color:var(--muted); margin-top:4px;">' + dt.toLocaleTimeString() + '</div>';
   document.getElementById('geofenceToasts').appendChild(t);
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.5s'; }, 8000);
   setTimeout(() => t.remove(), 8500);
@@ -8288,7 +10321,7 @@ function renderGeofenceShape(fence) {
     delete geofenceShapes[fence.id];
   }
   let shape;
-  const color = fence.color || '#ff3333';
+  const color = fence.color || '#ff4d5e';
   const style = { color, weight: 2, opacity: 0.85, fillColor: color, fillOpacity: 0.12 };
   if (fence.type === 'polygon') {
     const pts = (fence.geometry && fence.geometry.points) || [];
@@ -8318,16 +10351,18 @@ function _gfWatchLabel(f) {
 
 function geofencePopup(f) {
   const watch = _gfWatchLabel(f);
-  return '<div style="font-family:monospace; color:#ffaaaa; min-width:200px;">'
-    + '<div style="color:' + (f.color || '#ff3333') + '; font-weight:bold;">' + f.name + '</div>'
-    + '<div style="font-size:0.85em; color:#aaa; margin-top:2px;">' + f.type.toUpperCase() + ' · ' + (f.enabled ? 'enabled' : 'disabled') + '</div>'
-    + '<div style="margin-top:4px;">enter alert: ' + (f.alert_on_enter ? 'on' : 'off')
-    + ' · exit alert: ' + (f.alert_on_exit ? 'on' : 'off') + '</div>'
-    + '<div>watching: <span style="color:#ffcc88;">' + watch + '</span></div>'
-    + '<div style="display:flex; gap:4px; margin-top:6px;">'
-    + '<button onclick="event.stopPropagation(); editGeofence(\\'' + f.id + '\\')" style="flex:1; padding:3px; background:#001a2a; border:1px solid #00aaff; color:#aaeeff; font-family:monospace; cursor:pointer;">EDIT</button>'
-    + '<button onclick="event.stopPropagation(); toggleGeofenceEnabled(\\'' + f.id + '\\')" style="flex:1; padding:3px; background:#1a1a00; border:1px solid #ffaa00; color:#ffcc66; font-family:monospace; cursor:pointer;">' + (f.enabled ? 'DISABLE' : 'ENABLE') + '</button>'
-    + '<button onclick="event.stopPropagation(); deleteGeofence(\\'' + f.id + '\\')" style="flex:1; padding:3px; background:#330000; border:1px solid #ff5555; color:#ff8888; font-family:monospace; cursor:pointer;">DEL</button>'
+  return '<div class="mm-pop" style="min-width:200px;">'
+    + '<div class="mm-pop-title" style="display:flex; align-items:center; gap:8px;"><span class="mm-dot" style="--c:' + (f.color || '#ff4d5e') + ';"></span>' + f.name + '</div>'
+    + '<div class="mm-row" style="margin-top:6px;"><span class="mm-tag">' + f.type.toUpperCase() + '</span>'
+    + '<span class="mm-tag" style="--c:' + (f.enabled ? 'var(--green)' : 'var(--muted)') + ';">' + (f.enabled ? 'enabled' : 'disabled') + '</span></div>'
+    + '<div class="mm-rule"></div>'
+    + '<div class="mm-kv"><span class="k">Enter alert</span><span class="v">' + (f.alert_on_enter ? 'on' : 'off') + '</span></div>'
+    + '<div class="mm-kv"><span class="k">Exit alert</span><span class="v">' + (f.alert_on_exit ? 'on' : 'off') + '</span></div>'
+    + '<div class="mm-kv"><span class="k">Watching</span><span class="v" style="color:var(--amber);">' + watch + '</span></div>'
+    + '<div class="mm-row" style="margin-top:10px;">'
+    + '<button onclick="event.stopPropagation(); editGeofence(\\'' + f.id + '\\')" class="mm-info" style="flex:1; padding:6px 4px;">EDIT</button>'
+    + '<button onclick="event.stopPropagation(); toggleGeofenceEnabled(\\'' + f.id + '\\')" class="mm-warn" style="flex:1; padding:6px 4px;">' + (f.enabled ? 'DISABLE' : 'ENABLE') + '</button>'
+    + '<button onclick="event.stopPropagation(); deleteGeofence(\\'' + f.id + '\\')" class="mm-danger" style="flex:1; padding:6px 4px;">DEL</button>'
     + '</div></div>';
 }
 window.editGeofence = editGeofence;
@@ -8359,36 +10394,37 @@ function renderGeofenceList() {
   c.innerHTML = '';
   const ids = Object.keys(geofences);
   if (ids.length === 0) {
-    c.innerHTML = '<div style="color:#aa6666; font-style:italic; text-align:center; padding:4px;">no fences yet</div>';
+    c.innerHTML = '<div class="mm-empty">no fences yet</div>';
     return;
   }
   ids.forEach(id => {
     const f = geofences[id];
     const watch = _gfWatchLabel(f);
     const row = document.createElement('div');
-    row.style.cssText =
-      'margin-top:3px; border-left:4px solid ' + (f.enabled ? f.color : '#444')
-      + '; background:rgba(0,0,0,0.5); opacity:' + (f.enabled ? '1' : '0.55') + ';';
+    row.className = 'gf-row';
+    row.style.cssText = 'border-left:3px solid ' + (f.enabled ? f.color : 'var(--line3)')
+      + '; opacity:' + (f.enabled ? '1' : '0.55') + ';';
     // Header row — click to fly-to + toggle expansion
     const head = document.createElement('div');
-    head.style.cssText = 'display:flex; justify-content:space-between; align-items:center; padding:4px 6px; cursor:pointer; gap:6px;';
+    head.className = 'gf-row-head';
     head.innerHTML =
-      '<span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:' + f.color + '; flex:0 0 auto;"></span>'
-      + '<span style="color:' + f.color + '; font-weight:bold; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + f.name + '</span>'
-      + '<span style="color:#888; font-size:0.85em;">' + f.type + '</span>'
-      + '<span class="gfRowToggle" style="color:#aa8888; font-size:0.85em; padding-left:4px;">▸</span>';
+      '<span class="mm-dot" style="--c:' + f.color + ';"></span>'
+      + '<span style="color:var(--text); font-weight:500; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + f.name + '</span>'
+      + '<span class="mm-tag">' + f.type + '</span>'
+      + '<span class="gfRowToggle" style="color:var(--silk); font-size:11px; padding-left:2px;">▸</span>';
     // Detail block — hidden by default, shows tag/alert info + actions
     const detail = document.createElement('div');
-    detail.style.cssText = 'display:none; padding:4px 8px 6px 8px; font-size:0.85em; color:#ddd; border-top:1px dashed #553333;';
+    detail.className = 'gf-row-detail';
+    detail.style.cssText = 'display:none;';
     detail.innerHTML =
-      '<div>watching: <span style="color:#ffcc88;">' + watch + '</span></div>'
-      + '<div>alerts: ' + (f.alert_on_enter ? '<span style="color:#88ff88;">enter</span>' : 'enter:off')
-      + ' · ' + (f.alert_on_exit ? '<span style="color:#88ff88;">exit</span>' : 'exit:off') + '</div>'
-      + '<div style="display:flex; gap:4px; margin-top:4px;">'
-      + '  <button data-action="fly" style="flex:1; padding:3px; background:#001a2a; border:1px solid #00aaff; color:#aaeeff; font-family:monospace; font-size:0.85em; cursor:pointer;">FLY TO</button>'
-      + '  <button data-action="edit" style="flex:1; padding:3px; background:#001a2a; border:1px solid #00aaff; color:#aaeeff; font-family:monospace; font-size:0.85em; cursor:pointer;">EDIT</button>'
-      + '  <button data-action="toggle" style="flex:1; padding:3px; background:#1a1a00; border:1px solid #ffaa00; color:#ffcc66; font-family:monospace; font-size:0.85em; cursor:pointer;">' + (f.enabled ? 'DISABLE' : 'ENABLE') + '</button>'
-      + '  <button data-action="del" style="flex:0 0 auto; padding:3px 6px; background:#330000; border:1px solid #ff5555; color:#ff8888; font-family:monospace; font-size:0.85em; cursor:pointer;">DEL</button>'
+      '<div class="mm-kv"><span class="k">Watching</span><span class="v" style="color:var(--amber);">' + watch + '</span></div>'
+      + '<div class="mm-kv"><span class="k">Alerts</span><span class="v">' + (f.alert_on_enter ? '<span style="color:var(--green);">enter</span>' : 'enter:off')
+      + ' · ' + (f.alert_on_exit ? '<span style="color:var(--green);">exit</span>' : 'exit:off') + '</span></div>'
+      + '<div class="mm-row" style="margin-top:8px;">'
+      + '  <button data-action="fly" class="mm-info" style="flex:1; padding:6px 4px;">FLY TO</button>'
+      + '  <button data-action="edit" class="mm-info" style="flex:1; padding:6px 4px;">EDIT</button>'
+      + '  <button data-action="toggle" class="mm-warn" style="flex:1; padding:6px 4px;">' + (f.enabled ? 'DISABLE' : 'ENABLE') + '</button>'
+      + '  <button data-action="del" class="mm-danger" style="flex:0 0 auto; padding:6px 8px;">DEL</button>'
       + '</div>';
     head.addEventListener('click', () => {
       const open = detail.style.display !== 'none';
@@ -8420,7 +10456,7 @@ function renderGeofenceList() {
 
 // Draw mode: opens a Leaflet.Draw handler, then on completion swaps the layer
 // for the inline create form. Rectangle is just a 4-point polygon to the API.
-const FENCE_PALETTE = ['#ff3333','#ff8800','#ffcc00','#88ff88','#33aaff','#cc66ff','#ff66cc','#aaffff'];
+const FENCE_PALETTE = ['#ff4d5e','#ff9447','#ffb547','#3dff9a','#5cc8ff','#a78bfa','#ff3da8','#2ee6d6'];
 let _pendingDrawing = null;   // {kind, layer, geometry}
 let _gfEditId = null;         // when set, the fence form is editing this fence (PUT), not creating (POST)
 
@@ -8431,7 +10467,7 @@ let _circleDrawCleanup = null;
 function _startCircleDraw() {
   if (_circleDrawCleanup) _circleDrawCleanup();   // cancel any in-progress placement
   document.getElementById('geofenceCreateForm').style.display = 'none';
-  const style = { color: '#ff3333', weight: 2, fillColor: '#ff3333', fillOpacity: 0.10 };
+  const style = { color: '#ff4d5e', weight: 2, fillColor: '#ff4d5e', fillOpacity: 0.10 };
   let center = null, preview = null;
   map.getContainer().style.cursor = 'crosshair';
   const radiusTo = (ll) => Math.max(1, map.distance(center, ll));
@@ -8475,7 +10511,7 @@ function _startDraw(kind) {
   // Circle uses the custom center-out, two-click flow above (click center, move to
   // size, click to lock) instead of Leaflet.draw's press-and-drag.
   if (kind === 'circle') { _startCircleDraw(); return; }
-  const opts = { showArea: false, shapeOptions: { color: '#ff3333', weight: 2 } };
+  const opts = { showArea: false, shapeOptions: { color: '#ff4d5e', weight: 2 } };
   let handler;
   if (kind === 'polygon')   handler = new L.Draw.Polygon(map, opts);
   else if (kind === 'rectangle') handler = new L.Draw.Rectangle(map, opts);
@@ -8503,7 +10539,7 @@ function _startDraw(kind) {
 function _showFenceCreateForm() {
   _gfEditId = null;   // drawing a new fence = create mode (overridden by editGeofence)
   document.getElementById('gfFormName').value = '';
-  document.getElementById('gfFormColor').value = '#ff5577';
+  document.getElementById('gfFormColor').value = '#ff4d5e';
   document.getElementById('gfFormEnter').checked = true;
   document.getElementById('gfFormExit').checked = true;
   // Color palette swatches
@@ -8511,12 +10547,13 @@ function _showFenceCreateForm() {
   sw.innerHTML = '';
   FENCE_PALETTE.forEach(c => {
     const s = document.createElement('span');
-    s.style.cssText = 'width:18px; height:18px; border-radius:50%; background:' + c + '; cursor:pointer; border:2px solid transparent;';
+    s.className = 'gf-swatch';
+    s.style.cssText = 'background:' + c + '; border:2px solid transparent;';
     s.title = c;
     s.addEventListener('click', () => {
       document.getElementById('gfFormColor').value = c;
       sw.querySelectorAll('span').forEach(el => el.style.border = '2px solid transparent');
-      s.style.border = '2px solid #fff';
+      s.style.border = '2px solid var(--text)';
       // Live update preview color on the temp layer
       if (_pendingDrawing && _pendingDrawing.layer) {
         try { _pendingDrawing.layer.setStyle({ color: c, fillColor: c }); } catch(e){}
@@ -8532,15 +10569,13 @@ function _showFenceCreateForm() {
     const chip = document.createElement('span');
     chip.dataset.tag = t;
     chip.dataset.on = '0';
-    chip.style.cssText = 'padding:2px 6px; cursor:pointer; user-select:none; border:1px solid '
-      + meta.color + '; color:' + meta.color
-      + '; background:transparent; font-size:0.85em; letter-spacing:0.5px; border-radius:3px;';
+    chip.className = 'mm-chip';
+    chip.style.setProperty('--c', meta.color);
     chip.textContent = meta.label;
     chip.addEventListener('click', () => {
       const on = chip.dataset.on === '1';
       chip.dataset.on = on ? '0' : '1';
-      chip.style.background = on ? 'transparent' : meta.color;
-      chip.style.color = on ? meta.color : '#000';
+      chip.classList.toggle('on', !on);
     });
     tagsBox.appendChild(chip);
   });
@@ -8550,23 +10585,21 @@ function _showFenceCreateForm() {
   // ADSB_TAGS is defined elsewhere; fall back to a sensible static list if missing
   const _aircraftTags = (typeof ADSB_TAGS !== 'undefined' && ADSB_TAGS.map)
     ? ADSB_TAGS.map(t => ({id: t.id, label: t.label, color: t.color}))
-    : [{id:'military',label:'MIL',color:'#ff8800'},{id:'government',label:'GOV',color:'#ffcc00'},
-       {id:'police',label:'LEO',color:'#33aaff'},{id:'rotorcraft',label:'ROTOR',color:'#cc66ff'},
-       {id:'commercial',label:'COMM',color:'#88ff88'},{id:'private',label:'PVT',color:'#aaa'},
-       {id:'emergency',label:'EMERGENCY',color:'#ff3333'},{id:'hijack',label:'HIJACK',color:'#ff66ff'}];
+    : [{id:'military',label:'MIL',color:'#ff9447'},{id:'government',label:'GOV',color:'#ffb547'},
+       {id:'police',label:'LEO',color:'#2f7dff'},{id:'rotorcraft',label:'ROTOR',color:'#a78bfa'},
+       {id:'commercial',label:'COMM',color:'#a6f04a'},{id:'private',label:'PVT',color:'#b4c0ce'},
+       {id:'emergency',label:'EMERGENCY',color:'#ff3da8'},{id:'hijack',label:'HIJACK',color:'#ff4d5e'}];
   _aircraftTags.forEach(t => {
     const chip = document.createElement('span');
     chip.dataset.tag = t.id;
     chip.dataset.on = '0';
-    chip.style.cssText = 'padding:2px 6px; cursor:pointer; user-select:none; border:1px solid '
-      + t.color + '; color:' + t.color
-      + '; background:transparent; font-size:0.85em; letter-spacing:0.5px; border-radius:3px;';
+    chip.className = 'mm-chip';
+    chip.style.setProperty('--c', t.color);
     chip.textContent = t.label;
     chip.addEventListener('click', () => {
       const on = chip.dataset.on === '1';
       chip.dataset.on = on ? '0' : '1';
-      chip.style.background = on ? 'transparent' : t.color;
-      chip.style.color = on ? t.color : '#000';
+      chip.classList.toggle('on', !on);
     });
     acBox.appendChild(chip);
   });
@@ -8718,7 +10751,7 @@ if (gfAlertHeader) gfAlertHeader.addEventListener('click', () => {
   if (!list) return;
   const open = list.style.display === 'none';
   list.style.display = open ? 'block' : 'none';
-  if (arr) arr.textContent = open ? '−' : '+';
+  if (arr) arr.textContent = open ? '▾' : '▸';
 });
 
 socket.on('geofences', (msg) => {
@@ -8746,21 +10779,22 @@ function renderGeofenceAlertList(alerts) {
   if (!c) return;
   const cnt = document.getElementById('geofenceAlertCount');
   if (cnt) cnt.textContent = alerts.length ? '(' + alerts.length + ')' : '';
-  if (!alerts.length) { c.innerHTML = '— none —'; return; }
+  if (!alerts.length) { c.innerHTML = '<div class="mm-empty">none</div>'; return; }
   c.innerHTML = '';
   alerts.slice().reverse().forEach(p => {
     const dt = new Date((p.ts || 0) * 1000);
     const tagColor = DRONE_TAG_COLORS[p.drone_tag] || '#888';
     const div = document.createElement('div');
-    div.style.cssText = 'padding:3px; margin-top:2px; border-left:2px solid ' + (p.fence_color || '#ff3333') + '; padding-left:5px; background:rgba(40,0,0,0.3);';
+    div.className = 'gf-alert';
+    div.style.setProperty('--c', p.fence_color || '#ff4d5e');
     div.innerHTML =
-      '<div style="font-weight:bold;">'
-      + '<span style="color:' + (p.transition === 'enter' ? '#4ade80' : '#ff6b6b') + ';">'
+      '<div style="display:flex; align-items:center; gap:6px; font:600 10.5px/1.3 var(--mono); letter-spacing:0.1em;">'
+      + '<span style="color:' + (p.transition === 'enter' ? 'var(--green)' : 'var(--red)') + ';">'
       + (p.transition === 'enter' ? '▶ ENTER' : '◀ EXIT') + '</span>'
-      + ' <span style="color:' + (p.fence_color || '#ff3333') + ';">· ' + p.fence_name + '</span></div>'
-      + '<div style="color:#ccc;">' + (p.alias || p.mac) + ' '
-      + '<span style="color:' + tagColor + ';">[' + (p.drone_tag || 'unknown') + ']</span></div>'
-      + '<div style="color:#666; font-size:0.85em;">' + dt.toLocaleTimeString() + '</div>';
+      + '<span style="color:' + (p.fence_color || '#ff4d5e') + '; font-family:var(--sans); font-size:12px; letter-spacing:0;">· ' + p.fence_name + '</span>'
+      + '<span style="margin-left:auto; color:var(--muted); letter-spacing:0;">' + dt.toLocaleTimeString() + '</span></div>'
+      + '<div style="margin-top:4px; display:flex; align-items:center; gap:6px; color:var(--soft);">' + (p.alias || p.mac) + ' '
+      + '<span class="mm-tag" style="--c:' + tagColor + ';">' + (p.drone_tag || 'unknown') + '</span></div>';
     c.appendChild(div);
   });
 }
@@ -8874,10 +10908,10 @@ async function loadWebhooks() {
     if (geo)  geo.value  = d.geofence_webhook_url || '';
     if (status) {
       const m = !!d.webhook_url, g = !!d.geofence_webhook_url;
-      if (g && m)      { status.textContent = 'detection + geofence'; status.style.color = '#88ff88'; }
-      else if (m)      { status.textContent = 'detection only';       status.style.color = '#88ff88'; }
-      else if (g)      { status.textContent = 'geofence only';        status.style.color = '#88ff88'; }
-      else             { status.textContent = 'not set';              status.style.color = '#996666'; }
+      if (g && m)      { status.textContent = 'detection + geofence'; status.style.color = 'var(--green)'; }
+      else if (m)      { status.textContent = 'detection only';       status.style.color = 'var(--green)'; }
+      else if (g)      { status.textContent = 'geofence only';        status.style.color = 'var(--green)'; }
+      else             { status.textContent = 'not set';              status.style.color = 'var(--muted)'; }
     }
   } catch (e) { console.warn('loadWebhooks failed:', e); }
 }
@@ -8897,7 +10931,7 @@ document.getElementById('webhookSaveBtn')?.addEventListener('click', async () =>
   const geo  = (document.getElementById('webhookUrlGeofence')?.value || '').trim();
   const validate = (u) => !u || u.startsWith('http://') || u.startsWith('https://');
   if (!validate(main) || !validate(geo)) {
-    if (result) { result.textContent = 'URLs must start with http:// or https://'; result.style.color = '#ff8888'; }
+    if (result) { result.textContent = 'URLs must start with http:// or https://'; result.style.color = 'var(--red)'; }
     return;
   }
   try {
@@ -8913,11 +10947,11 @@ document.getElementById('webhookSaveBtn')?.addEventListener('click', async () =>
     });
     const j2 = await r2.json();
     if (j2.status !== 'ok') throw new Error(j2.message || 'geofence save failed');
-    if (result) { result.textContent = 'saved'; result.style.color = '#88ff88'; }
+    if (result) { result.textContent = 'saved'; result.style.color = 'var(--green)'; }
     loadWebhooks();
     setTimeout(() => { if (result) result.textContent = ''; }, 2000);
   } catch (e) {
-    if (result) { result.textContent = 'save failed: ' + e.message; result.style.color = '#ff8888'; }
+    if (result) { result.textContent = 'save failed: ' + e.message; result.style.color = 'var(--red)'; }
   }
 });
 // TEST — send a sample geofence payload through the webhook pipeline.
@@ -8927,10 +10961,10 @@ document.getElementById('webhookTestBtn')?.addEventListener('click', async () =>
   const main = (document.getElementById('webhookUrlMain')?.value || '').trim();
   const target = geo || main;
   if (!target) {
-    if (result) { result.textContent = 'no URL set'; result.style.color = '#ffaa44'; }
+    if (result) { result.textContent = 'no URL set'; result.style.color = 'var(--amber)'; }
     return;
   }
-  if (result) { result.textContent = 'POSTing test payload...'; result.style.color = '#aaccff'; }
+  if (result) { result.textContent = 'POSTing test payload...'; result.style.color = 'var(--sky)'; }
   try {
     const r = await fetch('/api/webhook_popup', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -8950,12 +10984,12 @@ document.getElementById('webhookTestBtn')?.addEventListener('click', async () =>
     });
     const j = await r.json();
     if (j.status === 'ok') {
-      if (result) { result.textContent = 'test delivered (HTTP ' + (j.response || '?') + ')'; result.style.color = '#88ff88'; }
+      if (result) { result.textContent = 'test delivered (HTTP ' + (j.response || '?') + ')'; result.style.color = 'var(--green)'; }
     } else {
-      if (result) { result.textContent = 'test failed: ' + (j.message || 'unknown'); result.style.color = '#ff8888'; }
+      if (result) { result.textContent = 'test failed: ' + (j.message || 'unknown'); result.style.color = 'var(--red)'; }
     }
   } catch (e) {
-    if (result) { result.textContent = 'test failed: ' + e.message; result.style.color = '#ff8888'; }
+    if (result) { result.textContent = 'test failed: ' + e.message; result.style.color = 'var(--red)'; }
   }
 });
 // Initial fetch so the badge in the SETTINGS header reflects state even when
@@ -8985,7 +11019,7 @@ async function refreshPorts() {
       opt.value = cur;
       opt.textContent = cur + ' (unplugged)';
       opt.selected = true;
-      opt.style.color = '#888';
+      opt.style.color = 'var(--muted)';
       sel.appendChild(opt);
     }
   });
@@ -9004,14 +11038,14 @@ document.getElementById('portApplyBtn').addEventListener('click', async (ev) => 
         body: JSON.stringify({ ports }),
       });
       j = await r.json();
-    } catch (e) { status.textContent = 'failed: ' + e; status.style.color = '#ff5555'; return; }
+    } catch (e) { status.textContent = 'failed: ' + e; status.style.color = 'var(--red)'; return; }
     if (!r.ok) {
       status.textContent = j.error || 'failed';
-      status.style.color = '#ff5555';
+      status.style.color = 'var(--red)';
       return;
     }
     status.textContent = 'applied · ' + (Object.keys(j.selected || {}).length) + ' port(s) active';
-    status.style.color = '#00ff88';
+    status.style.color = 'var(--green)';
     setTimeout(refreshPorts, 800);   // pick up new connection state
   });
 });
@@ -9041,7 +11075,7 @@ function updateCacheEstimate() {
   const mb = (n * 0.015).toFixed(1); // ~15 KB / tile rough estimate
   const el = document.getElementById('cacheEstimate');
   el.textContent = '≈ ' + n.toLocaleString() + ' tiles (~' + mb + ' MB) in current view';
-  el.style.color = (n > 2000000) ? '#ff5555' : '#00ffff';
+  el.style.color = (n > 2000000) ? 'var(--red)' : 'var(--sky)';
 }
 ['cacheZmin', 'cacheZmax'].forEach(id => {
   document.getElementById(id).addEventListener('input', updateCacheEstimate);
@@ -9100,29 +11134,30 @@ function renderJobs() {
   jobs.forEach(j => {
     const pct = j.total > 0 ? (100 * j.done / j.total) : 0;
     const statusColor = ({
-      running:'lime', queued:'#00ffff', done:'#00ff88',
-      paused:'#ffaa00', cancelled:'#ff8800', error:'#ff5555'
-    })[j.status] || 'lime';
-    const reason = j.pause_reason ? '<div style="font-size:0.85em; color:#ffaa00; margin-top:2px;">⚠ ' + j.pause_reason + '</div>' : '';
+      running:'#3dff9a', queued:'#5cc8ff', done:'#2ee6d6',
+      paused:'#ffb547', cancelled:'#ff9447', error:'#ff4d5e'
+    })[j.status] || '#3dff9a';
+    const reason = j.pause_reason ? '<div class="mm-note" style="color:var(--amber); margin-top:4px;">paused: ' + j.pause_reason + '</div>' : '';
     const wrap = document.createElement('div');
-    wrap.style.cssText = 'margin-top:4px; padding:4px; border:1px solid ' + statusColor + '; background:rgba(0,0,0,0.5);';
+    wrap.className = 'mm-card';
+    wrap.style.cssText = 'margin-top:8px; padding:8px 10px; border-color:' + statusColor + '55;';
     let buttons = '';
     if (j.status === 'running' || j.status === 'queued') {
-      buttons = '<button data-id="' + j.id + '" class="cacheCancelBtn" style="margin-top:4px; margin-right:3px; background:#330000; border:1px solid #ff8888; color:#ff8888; font-family:monospace; font-size:0.85em; padding:1px 6px; cursor:pointer;">CANCEL</button>';
+      buttons = '<button data-id="' + j.id + '" class="cacheCancelBtn mm-danger" style="margin-top:8px; margin-right:4px; padding:4px 9px; font-size:11px;">CANCEL</button>';
     } else if (j.status === 'paused' || j.status === 'error' || j.status === 'cancelled') {
-      buttons = '<button data-id="' + j.id + '" class="cacheResumeBtn" style="margin-top:4px; margin-right:3px; background:#003300; border:1px solid lime; color:lime; font-family:monospace; font-size:0.85em; padding:1px 8px; cursor:pointer;">▶ RESUME</button>'
-              + '<button data-id="' + j.id + '" class="cacheForgetBtn" style="margin-top:4px; background:#330000; border:1px solid #ff8888; color:#ff8888; font-family:monospace; font-size:0.85em; padding:1px 6px; cursor:pointer;">FORGET</button>';
+      buttons = '<button data-id="' + j.id + '" class="cacheResumeBtn mm-accent" style="margin-top:8px; margin-right:4px; padding:4px 9px; font-size:11px;">RESUME</button>'
+              + '<button data-id="' + j.id + '" class="cacheForgetBtn mm-danger" style="margin-top:8px; padding:4px 9px; font-size:11px;">FORGET</button>';
     } else if (j.status === 'done') {
-      buttons = '<button data-id="' + j.id + '" class="cacheForgetBtn" style="margin-top:4px; background:#330000; border:1px solid #ff8888; color:#ff8888; font-family:monospace; font-size:0.85em; padding:1px 6px; cursor:pointer;">DISMISS</button>';
+      buttons = '<button data-id="' + j.id + '" class="cacheForgetBtn" style="margin-top:8px; padding:4px 9px; font-size:11px;">DISMISS</button>';
     }
     wrap.innerHTML =
-      '<div style="display:flex; justify-content:space-between; color:' + statusColor + ';">'
-      + '<span>' + j.name + ' · ' + j.source + '</span>'
-      + '<span>' + j.status.toUpperCase() + '</span></div>'
-      + '<div style="height:6px; border:1px solid ' + statusColor + '; margin-top:3px; background:#000; position:relative;">'
-        + '<div style="position:absolute; left:0; top:0; bottom:0; width:' + pct.toFixed(1) + '%; background:' + statusColor + '; box-shadow:0 0 6px ' + statusColor + ';"></div>'
+      '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:12px;">'
+      + '<span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text);">' + j.name + ' · ' + j.source + '</span>'
+      + '<span class="mm-tag" style="--c:' + statusColor + ';">' + j.status.toUpperCase() + '</span></div>'
+      + '<div style="height:4px; margin-top:8px; background:var(--line2); border-radius:2px; position:relative; overflow:hidden;">'
+        + '<div style="position:absolute; left:0; top:0; bottom:0; width:' + pct.toFixed(1) + '%; background:' + statusColor + ';"></div>'
       + '</div>'
-      + '<div style="font-size:0.9em; color:#aaffaa; margin-top:2px;">'
+      + '<div class="mm-mono" style="font-size:11px; color:var(--muted); margin-top:6px;">'
         + j.done + '/' + j.total + ' · fetched ' + j.fetched + ' · skipped ' + j.skipped + ' · errors ' + j.errors
       + '</div>'
       + reason
@@ -9227,30 +11262,30 @@ async function runGeocode() {
   const q = document.getElementById('geoQuery').value.trim();
   const box = document.getElementById('geoResults');
   if (q.length < 2) { box.innerHTML = ''; return; }
-  box.innerHTML = '<div style="color:#00ffff; font-size:0.85em;">searching...</div>';
+  box.innerHTML = '<div class="mm-note" style="color:var(--sky);">searching...</div>';
   try {
     const r = await fetch('/api/geocode?q=' + encodeURIComponent(q));
     const d = await r.json();
     if (!d.results || d.results.length === 0) {
-      box.innerHTML = '<div style="color:#ff8888; font-size:0.85em;">no results</div>';
+      box.innerHTML = '<div class="mm-note" style="color:var(--red);">no results</div>';
       return;
     }
     box.innerHTML = '';
     d.results.forEach(res => {
       const row = document.createElement('div');
-      row.style.cssText = 'padding:3px; margin-top:2px; border:1px solid #003355; cursor:pointer; font-size:0.85em; color:#aaffff; background:rgba(0,20,30,0.5);';
-      row.innerHTML = '◉ ' + res.name.split(',').slice(0, 3).join(',')
-                    + '<div style="font-size:0.85em; color:#88aaaa;">' + res.category + '/' + res.type + '</div>';
-      row.addEventListener('mouseover', () => { row.style.background = 'rgba(0,40,60,0.7)'; });
-      row.addEventListener('mouseout',  () => { row.style.background = 'rgba(0,20,30,0.5)'; });
+      row.style.cssText = 'padding:7px 9px; margin-top:4px; border:1px solid var(--silk-line); border-radius:3px; cursor:pointer; font-size:12px; color:var(--text); background:rgba(7,9,12,0.55);';
+      row.innerHTML = res.name.split(',').slice(0, 3).join(',')
+                    + '<div class="mm-mono" style="font-size:10.5px; color:var(--muted); margin-top:2px;">' + res.category + '/' + res.type + '</div>';
+      row.addEventListener('mouseover', () => { row.style.background = 'rgba(46,230,214,0.06)'; row.style.borderColor = 'rgba(46,230,214,0.5)'; });
+      row.addEventListener('mouseout',  () => { row.style.background = 'rgba(7,9,12,0.55)'; row.style.borderColor = 'var(--silk-line)'; });
       row.addEventListener('click', () => {
         applyBboxToMap(res.bbox, res.name.split(',')[0]);
-        box.innerHTML = '<div style="color:lime; font-size:0.85em;">▸ ' + res.name.split(',')[0] + ' — bbox set</div>';
+        box.innerHTML = '<div class="mm-note" style="color:var(--green);">▸ ' + res.name.split(',')[0] + ' — bbox set</div>';
       });
       box.appendChild(row);
     });
   } catch (e) {
-    box.innerHTML = '<div style="color:#ff5555; font-size:0.85em;">geocode failed: ' + e + '</div>';
+    box.innerHTML = '<div class="mm-note" style="color:var(--red);">geocode failed: ' + e + '</div>';
   }
 }
 document.getElementById('geoGoBtn').addEventListener('click', (ev) =>
@@ -9280,19 +11315,20 @@ function renderImportJobs() {
   c.innerHTML = '';
   Object.values(importJobs).forEach(j => {
     const pct = j.total > 0 ? (100 * j.done / j.total) : 0;
-    const sc = ({running:'#ff00ff', queued:'#00ffff', done:'#00ff88', cancelled:'#ff8800', error:'#ff5555'})[j.status] || '#ff00ff';
+    const sc = ({running:'#a78bfa', queued:'#5cc8ff', done:'#2ee6d6', cancelled:'#ff9447', error:'#ff4d5e'})[j.status] || '#a78bfa';
     const div = document.createElement('div');
-    div.style.cssText = 'margin-top:4px; padding:4px; border:1px solid ' + sc + '; background:rgba(0,0,0,0.5);';
+    div.className = 'mm-card';
+    div.style.cssText = 'margin-top:8px; padding:8px 10px; border-color:' + sc + '55;';
     const mb = (j.done/1048576).toFixed(1);
     const totalMb = j.total > 0 ? (j.total/1048576).toFixed(1) : '?';
     div.innerHTML =
-      '<div style="display:flex; justify-content:space-between; color:' + sc + ';">'
-      + '<span>' + j.name + '</span><span>' + j.status.toUpperCase() + '</span></div>'
-      + '<div style="height:6px; border:1px solid ' + sc + '; margin-top:3px; background:#000; position:relative;">'
-        + '<div style="position:absolute; left:0; top:0; bottom:0; width:' + pct.toFixed(1) + '%; background:' + sc + '; box-shadow:0 0 6px ' + sc + ';"></div>'
+      '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:12px;">'
+      + '<span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text);">' + j.name + '</span><span class="mm-tag" style="--c:' + sc + ';">' + j.status.toUpperCase() + '</span></div>'
+      + '<div style="height:4px; margin-top:8px; background:var(--line2); border-radius:2px; position:relative; overflow:hidden;">'
+        + '<div style="position:absolute; left:0; top:0; bottom:0; width:' + pct.toFixed(1) + '%; background:' + sc + ';"></div>'
       + '</div>'
-      + '<div style="font-size:0.9em; color:#aaffaa; margin-top:2px;">' + mb + ' / ' + totalMb + ' MB'
-      + (j.error_msg ? ' · <span style="color:#ff5555;">' + j.error_msg + '</span>' : '')
+      + '<div class="mm-mono" style="font-size:11px; color:var(--muted); margin-top:6px;">' + mb + ' / ' + totalMb + ' MB'
+      + (j.error_msg ? ' · <span style="color:var(--red);">' + j.error_msg + '</span>' : '')
       + '</div>';
     c.appendChild(div);
   });
@@ -9415,13 +11451,13 @@ var _persistPathColors = window._persistPathColors;
 
 // Altitude colors (feet) — quick visual band
 function adsbAltColor(altFt) {
-  if (altFt === null || altFt === undefined || altFt === 'ground') return '#666';
-  if (altFt < 1000)   return '#ff5555';
-  if (altFt < 5000)   return '#ff9933';
-  if (altFt < 15000)  return '#ffcc33';
-  if (altFt < 25000)  return '#33ddff';
-  if (altFt < 35000)  return '#3399ff';
-  return '#aa66ff';
+  if (altFt === null || altFt === undefined || altFt === 'ground') return '#55606f';
+  if (altFt < 1000)   return '#ff4d5e';
+  if (altFt < 5000)   return '#ff9447';
+  if (altFt < 15000)  return '#ffb547';
+  if (altFt < 25000)  return '#38d5ff';
+  if (altFt < 35000)  return '#4da3ff';
+  return '#a78bfa';
 }
 
 // ---------- Lock indicator rings (aircraft + drone) ----------
@@ -9470,7 +11506,7 @@ function _refreshLockRings() {
     const ll = (typeof _drCurrentLatLon === 'function') ? _drCurrentLatLon(lockedAircraft) : null;
     const fallback = _lastAdsbSnapshot[lockedAircraft];
     const at = ll || (fallback ? [fallback.lat, fallback.lon] : null);
-    if (at) _aircraftLockRing = _ensureLockRing(_aircraftLockRing, at, '#00ffff');
+    if (at) _aircraftLockRing = _ensureLockRing(_aircraftLockRing, at, '#2ee6d6');
   } else {
     _aircraftLockRing = _clearLockRing(_aircraftLockRing);
   }
@@ -9522,16 +11558,16 @@ window.unlockAircraft = unlockAircraft;
 // OSINT tag styling — tags drive both the filter chips AND the marker outline
 const ADSB_TAGS = [
   // ordered by priority for primary-tag selection
-  {id: 'hijack',      label: 'HIJACK',     color: '#ff0033'},
-  {id: 'emergency',   label: 'EMERGENCY',  color: '#ff5555'},
-  {id: 'military',    label: 'MIL',        color: '#ff8800'},
-  {id: 'government',  label: 'GOV',        color: '#ffcc00'},
-  {id: 'police',      label: 'LEO',        color: '#33aaff'},
-  {id: 'rotorcraft',  label: 'ROTOR',      color: '#aa88ff'},
-  {id: 'uav',         label: 'UAV',        color: '#ff44ff'},
-  {id: 'commercial',  label: 'COMM',       color: '#88ff88'},
-  {id: 'private',     label: 'PVT',        color: '#cccccc'},
-  {id: 'unknown',     label: 'UNK',        color: '#888888'},
+  {id: 'hijack',      label: 'HIJACK',     color: '#ff4d5e'},
+  {id: 'emergency',   label: 'EMERGENCY',  color: '#ff3da8'},
+  {id: 'military',    label: 'MIL',        color: '#ff9447'},
+  {id: 'government',  label: 'GOV',        color: '#ffb547'},
+  {id: 'police',      label: 'LEO',        color: '#2f7dff'},
+  {id: 'rotorcraft',  label: 'ROTOR',      color: '#a78bfa'},
+  {id: 'uav',         label: 'UAV',        color: '#ff8ad0'},
+  {id: 'commercial',  label: 'COMM',       color: '#a6f04a'},
+  {id: 'private',     label: 'PVT',        color: '#b4c0ce'},
+  {id: 'unknown',     label: 'UNK',        color: '#7d8999'},
 ];
 const adsbTagById = Object.fromEntries(ADSB_TAGS.map(t => [t.id, t]));
 // Filter set: which tags are currently visible. Default = all on.
@@ -9755,38 +11791,29 @@ function adsbPopup(a) {
   const emergSq = (sq === '7500' || sq === '7600' || sq === '7700');
   // Single-color tag (primary tag only) keeps the header restrained.
   const pTag = primaryTag(a.tags);
-  const tagMeta = adsbTagById[pTag] || {label: pTag.toUpperCase(), color: '#88aaff'};
-  const accent = '#88c8ff';   // unified popup accent (matches AIR TRAFFIC panel)
-  const muted  = '#7a8b9a';
+  const tagMeta = adsbTagById[pTag] || {label: pTag.toUpperCase(), color: '#5cc8ff'};
   const icao = (a.icao || '').toLowerCase();
   const isLocked = (lockedAircraft === icao);
 
-  // Compact stat row builder — label / value pairs render uniformly.
+  // Key / value row: the key printed in silk, the value in mono
   const stat = (label, value, color) =>
-      '<div style="display:flex; justify-content:space-between; padding:2px 0;">'
-    + '<span style="color:' + muted + ';">' + label + '</span>'
-    + '<span style="color:' + (color || '#dde6ee') + '; font-weight:600;">' + value + '</span>'
+      '<div class="mm-kv"><span class="k">' + label + '</span>'
+    + '<span class="v mono"' + (color ? ' style="color:' + color + ';"' : '') + '>' + value + '</span>'
     + '</div>';
 
-  // TRACK — single pill button. Active state inverts (filled accent, dark text)
-  // so it reads as "engaged" without neon glow gymnastics.
+  // TRACK: one button; engaged it is filled in the accent
   const trackBtn = isLocked
-    ? '<button onclick="event.stopPropagation(); unlockAircraft();" '
-      + 'style="flex:1; padding:7px 0; border:0; border-radius:5px; cursor:pointer; '
-      + 'background:' + accent + '; color:#001828; font-family:inherit; font-weight:700; letter-spacing:1.5px; font-size:0.85em;">'
+    ? '<button onclick="event.stopPropagation(); unlockAircraft();" class="mm-on" style="flex:1;">'
       + 'TRACKING · TAP TO RELEASE</button>'
-    : '<button onclick="event.stopPropagation(); lockAircraft(\\'' + icao + '\\');" '
-      + 'style="flex:1; padding:7px 0; border:1px solid ' + accent + '; border-radius:5px; cursor:pointer; '
-      + 'background:transparent; color:' + accent + '; font-family:inherit; font-weight:600; letter-spacing:1.5px; font-size:0.85em;">'
+    : '<button onclick="event.stopPropagation(); lockAircraft(\\'' + icao + '\\');" class="mm-accent" style="flex:1;">'
       + 'TRACK</button>';
 
-  // PATH — pure-CSS toggle (animates via input:checked sibling selectors).
+  // PATH: pure-CSS switch (animates via input:checked sibling selectors).
   // Works while the popup is open even though the popup HTML never re-renders.
   const pathOn = shownAircraftPaths.has(icao);
   const pathSwitch =
-      '<label style="display:flex; align-items:center; justify-content:space-between; '
-    + 'padding:6px 2px; cursor:pointer;" onclick="event.stopPropagation();">'
-    + '<span style="color:' + muted + '; font-size:0.85em; letter-spacing:1px;">FLIGHT PATH</span>'
+      '<label class="mm-toggle" onclick="event.stopPropagation();">'
+    + '<span class="mm-label">Flight path</span>'
     + '<span class="pop-toggle">'
     +   '<input type="checkbox"' + (pathOn ? ' checked' : '')
     +   ' onchange="event.stopPropagation(); _adsbTogglePath(\\'' + icao + '\\', this.checked);">'
@@ -9795,56 +11822,39 @@ function adsbPopup(a) {
     + '</span>'
     + '</label>';
 
-  // Color slider — sits under the toggle; drag to recolor THIS plane's trail.
+  // Color slider: drag to recolor THIS plane's trail.
   const pathHue = _adsbPathHue(icao);
   const colorSlider =
-      '<div style="display:flex; align-items:center; gap:8px; padding:0 2px 4px 2px;" onclick="event.stopPropagation();">'
-    + '<span style="color:' + muted + '; font-size:0.72em; letter-spacing:1px;">COLOR</span>'
-    + '<input type="range" min="0" max="359" value="' + pathHue + '"'
+      '<div class="mm-row" style="gap:10px; padding:2px 0;" onclick="event.stopPropagation();">'
+    + '<span class="mm-label" style="min-width:40px;">Color</span>'
+    + '<input type="range" min="0" max="359" value="' + pathHue + '" class="mm-hue mm-grow"'
     +   ' oninput="event.stopPropagation(); _adsbSetPathColor(\\'' + icao + '\\', this.value);"'
     +   ' onmousedown="event.stopPropagation();" onpointerdown="event.stopPropagation();"'
-    +   ' ontouchstart="event.stopPropagation();"'
-    +   ' style="flex:1; height:10px; -webkit-appearance:none; appearance:none; border-radius:5px; cursor:pointer;'
-    +   ' background:linear-gradient(to right, hsl(0,85%,55%), hsl(60,85%,55%), hsl(120,85%,55%), hsl(180,85%,55%), hsl(240,85%,55%), hsl(300,85%,55%), hsl(360,85%,55%));">'
+    +   ' ontouchstart="event.stopPropagation();">'
     + '</div>';
 
   return ''
-    // Outer card — single dark surface, single subtle border, comfortable padding
-    + '<div style="font-family:\\'Inter\\',-apple-system,BlinkMacSystemFont,\\'Segoe UI\\',sans-serif; '
-    +   'min-width:220px; color:#dde6ee; padding:2px 2px 2px 2px;">'
-    // Header — callsign large, ICAO + tag chip on a quiet second line
-    + '<div style="font-size:1.1em; font-weight:700; color:#fff; letter-spacing:0.5px;">' + cs + '</div>'
-    + '<div style="display:flex; align-items:center; gap:6px; margin-top:1px;">'
-    +   '<span style="color:' + muted + '; font-size:0.78em; letter-spacing:1px;">'
-    +     (a.icao || '?').toUpperCase() + '</span>'
-    +   '<span style="font-size:0.7em; padding:1px 6px; border-radius:9px; '
-    +     'background:' + tagMeta.color + '22; color:' + tagMeta.color + '; '
-    +     'border:1px solid ' + tagMeta.color + '55; letter-spacing:1px; font-weight:600;">'
-    +     tagMeta.label + '</span>'
-    +   (emergSq
-        ? '<span style="margin-left:auto; font-size:0.7em; padding:1px 6px; border-radius:9px; '
-          + 'background:#ff334422; color:#ff6677; border:1px solid #ff556688; letter-spacing:1px; font-weight:700;">SQ ' + sq + '</span>'
-        : '')
+    + '<div class="mm-pop" style="min-width:220px;">'
+    // Header: callsign, then ICAO + tag on a quiet second line
+    + '<div class="mm-pop-title">' + cs + '</div>'
+    + '<div class="mm-pop-sub">'
+    +   '<span class="mm-mac">' + (a.icao || '?').toUpperCase() + '</span>'
+    +   '<span class="mm-tag" style="--c:' + tagMeta.color + ';">' + tagMeta.label + '</span>'
+    +   (emergSq ? '<span class="mm-tag" style="--c:var(--red); margin-left:4px;">SQ ' + sq + '</span>' : '')
     + '</div>'
-    // Divider
-    + '<div style="height:1px; background:rgba(255,255,255,0.07); margin:8px 0;"></div>'
-    // Stats grid
-    + '<div style="font-size:0.85em; line-height:1.45;">'
-    +   stat('ALT',  alt, adsbAltColor(a.alt_baro))
-    +   stat('SPD',  vel)
-    +   stat('HDG',  hdg)
-    +   stat('V/S',  vr, (a.vert_rate > 64 ? '#88dd88' : a.vert_rate < -64 ? '#dd8888' : '#dde6ee'))
-    +   (sq && !emergSq ? stat('SQUAWK', sq) : '')
+    + '<div class="mm-rule"></div>'
+    + '<div>'
+    +   stat('Alt',  alt, adsbAltColor(a.alt_baro))
+    +   stat('Spd',  vel)
+    +   stat('Hdg',  hdg)
+    +   stat('V/S',  vr, (a.vert_rate > 64 ? 'var(--green)' : a.vert_rate < -64 ? 'var(--red)' : ''))
+    +   (sq && !emergSq ? stat('Squawk', sq) : '')
     + '</div>'
-    // Divider
-    + '<div style="height:1px; background:rgba(255,255,255,0.07); margin:8px 0 4px 0;"></div>'
-    // Actions
-    + '<div style="display:flex; gap:6px;">' + trackBtn + '</div>'
+    + '<div class="mm-rule" style="margin-bottom:8px;"></div>'
+    + '<div class="mm-row">' + trackBtn + '</div>'
     + pathSwitch
     + colorSlider
-    + (isLocked
-        ? '<div style="font-size:0.72em; color:' + muted + '; text-align:center; margin-top:2px; letter-spacing:0.5px;">drag map to release</div>'
-        : '')
+    + (isLocked ? '<div class="mm-hint">drag map to release</div>' : '')
     + '</div>';
 }
 
@@ -10074,7 +12084,7 @@ function _adsbTagColorFor(icao) {
 }
 function _adsbPathColorFor(icao) {
   const h = pathColors[icao];
-  return (h != null) ? ('hsl(' + h + ', 85%, 55%)') : _adsbTagColorFor(icao);
+  return (h != null) ? ('hsl(' + h + ', 90%, 62%)') : _adsbTagColorFor(icao);
 }
 // hex -> hue (0-359), to seed the slider at the plane's current tag color.
 function _hexToHue(hex) {
@@ -10186,11 +12196,8 @@ function renderAdsbPathTagChips() {
     chip.title = matching.length
       ? ('Toggle flight paths for ' + matching.length + ' ' + t.label + ' in view')
       : ('No ' + t.label + ' in view');
-    chip.style.cssText = 'display:inline-block; padding:2px 6px; cursor:pointer; user-select:none; '
-      + 'border-radius:3px; border:1px solid ' + t.color + '; letter-spacing:0.5px;'
-      + (active ? ('background:' + t.color + '; color:#000; font-weight:700;')
-                : ('background:transparent; color:' + t.color + ';'))
-      + (matching.length ? '' : ' opacity:0.35;');
+    chip.className = 'mm-chip' + (active ? ' on' : '');
+    chip.style.cssText = '--c:' + t.color + ';' + (matching.length ? '' : ' opacity:0.35;');
     chip.addEventListener('click', () => { _adsbToggleTagPathsInView(t.id); renderAdsbPathTagChips(); });
     c.appendChild(chip);
   });
@@ -10324,6 +12331,7 @@ function _droneUpdateOpenPopupStats(mac, det) {
     const want = fmt(label, det[label]);
     if (want != null && cells[1].textContent !== want) cells[1].textContent = want;
   });
+  _faaRefreshOpenPopup(mac, det);
 }
 
 // Cache last-rendered icon params per ICAO so we can skip the expensive
@@ -10685,7 +12693,7 @@ socket.on('adsb', (msg) => {
   const detail = document.getElementById('adsbStatus');
   if (main) main.textContent = (msg.count != null) ? (msg.count + ' ac') : 'on';
   if (detail) {
-    if (msg.error) detail.textContent = '⚠ ' + msg.error;
+    if (msg.error) detail.textContent = 'error: ' + msg.error;
     else detail.textContent = (msg.fetched || 0) + ' fetched · ' + (msg.count || 0) + ' tracked · ' + (msg.source || '?');
   }
   // Realtime aircraft-list + counts (counts reflect what's in current map view).
@@ -10755,7 +12763,7 @@ function renderAdsbAircraftList(snapshot) {
     ? (visible.length + ' in view · ' + (_lastAdsbSourceId || '?'))
     : '— off —';
   if (visible.length === 0) {
-    c.innerHTML = '<div style="color:#446666; font-style:italic; text-align:center; padding:6px;">no aircraft</div>';
+    c.innerHTML = '<div class="mm-empty">no aircraft</div>';
     return;
   }
   // Sort: emergencies first, then by alt desc; cap to keep DOM light
@@ -10788,19 +12796,19 @@ function renderAdsbAircraftList(snapshot) {
     let vrGlyph = '';
     if (a.vert_rate != null && Math.abs(a.vert_rate) >= 64) {
       vrGlyph = a.vert_rate > 0
-        ? '<span style="color:#88ff88;">▲</span>'
-        : '<span style="color:#ff8888;">▼</span>';
+        ? '<span style="color:var(--green);">▲</span>'
+        : '<span style="color:var(--red);">▼</span>';
     }
     // Emergency / squawk highlight (7500 hijack, 7600 nordo, 7700 emergency)
     const sq = (a.squawk || '').toString();
     const emergSq = (sq === '7500' || sq === '7600' || sq === '7700');
     const sqCell = sq
-      ? ('<span style="color:' + (emergSq ? '#ff4444' : '#669988') + (emergSq ? '; font-weight:bold' : '') + ';">sq ' + sq + '</span>')
+      ? ('<span style="color:' + (emergSq ? 'var(--red)' : 'var(--muted)') + (emergSq ? '; font-weight:bold' : '') + ';">sq ' + sq + '</span>')
       : '';
     const pTag = primaryTag(a.tags);
-    const tagMeta = adsbTagById[pTag] || {label: pTag.toUpperCase(), color:'#888'};
+    const tagMeta = adsbTagById[pTag] || {label: pTag.toUpperCase(), color:'#7d8999'};
     const isLocked = (lockedAircraft === a.icao);
-    const bg = isLocked ? 'rgba(0,80,120,0.5)' : 'rgba(0,20,30,0.4)';
+    const bg = isLocked ? 'rgba(46,230,214,0.12)' : 'transparent';
     // Heading rotation arrow — small SVG that spins to match the aircraft
     const arrow = (a.heading != null)
       ? '<span style="display:inline-block; transform:rotate(' + Math.round(a.heading) + 'deg); color:' + tagMeta.color + '; font-weight:bold;">▲</span>'
@@ -10812,37 +12820,37 @@ function renderAdsbAircraftList(snapshot) {
                   + '; font-weight:600; letter-spacing:0.5px;">' + tagMeta.label + '</span>';
     const altText = '<span style="color:' + adsbAltColor(a.alt_baro)
                   + '; font-weight:600;">' + alt + '</span>';
-    const velText = vel ? '<span style="color:#7a8b9a;">· ' + vel + '</span>' : '';
+    const velText = vel ? '<span style="color:var(--muted);">· ' + vel + '</span>' : '';
     const sqText = sqCell ? '<span> · ' + sqCell + '</span>' : '';
     const dirText = (hdg && a.heading != null)
-      ? ' · <span style="color:#7a8b9a;">' + arrow + ' ' + hdg + '</span>'
-      : (onGnd ? ' · <span style="color:#776644;">GND</span>' : '');
+      ? ' · <span style="color:var(--muted);">' + arrow + ' ' + hdg + '</span>'
+      : (onGnd ? ' · <span style="color:var(--amber);">GND</span>' : '');
     // Compact row — 20% smaller fonts/padding than the previous pass to fit
     // ~25% more aircraft per panel without losing legibility.
     return '<div data-icao="' + a.icao + '" class="adsbRow"'
       + ' style="display:flex; justify-content:space-between; align-items:center;'
-      +   ' padding:2px 7px 2px 6px; margin-bottom:1px;'
-      +   ' border-left:2px solid ' + tagMeta.color + '; border-radius:0 3px 3px 0;'
-      +   ' background:' + bg + '; cursor:pointer; line-height:1.2;'
-      +   (emergSq ? ' box-shadow: inset 0 0 0 1px #ff4444;' : '') + '">'
+      +   ' padding:4px 8px 4px 8px; margin-bottom:2px;'
+      +   ' border-left:2px solid ' + tagMeta.color + '; border-radius:0 2px 2px 0;'
+      +   ' background:' + bg + '; cursor:pointer; line-height:1.25;'
+      +   (emergSq ? ' box-shadow: inset 0 0 0 1px var(--red);' : '') + '">'
       + '<div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:1;">'
-        + '<div style="display:flex; gap:5px; align-items:baseline;">'
-          + '<span style="color:#dde6ee; font-weight:600; font-size:0.78em; letter-spacing:0.2px; overflow:hidden; text-overflow:ellipsis;">' + cs + '</span>'
-          + '<span style="color:' + tagMeta.color + '; font-weight:600; font-size:0.62em; letter-spacing:0.5px;">' + tagMeta.label + '</span>'
+        + '<div style="display:flex; gap:6px; align-items:baseline;">'
+          + '<span style="color:var(--text); font:600 12px/1.3 var(--mono); overflow:hidden; text-overflow:ellipsis;">' + cs + '</span>'
+          + '<span style="color:' + tagMeta.color + '; font:600 9.5px/1.3 var(--mono); letter-spacing:0.06em;">' + tagMeta.label + '</span>'
         + '</div>'
-        + '<div style="color:#7a8b9a; font-size:0.62em; letter-spacing:0.2px; overflow:hidden; text-overflow:ellipsis;">'
+        + '<div style="color:var(--muted); font:500 10.5px/1.35 var(--mono); overflow:hidden; text-overflow:ellipsis;">'
           + (a.icao || '?').toUpperCase()
           + sqText
           + dirText
         + '</div>'
       + '</div>'
-      + '<div style="text-align:right; flex-shrink:0; padding-left:6px; font-size:0.62em; line-height:1.2;">'
+      + '<div style="text-align:right; flex-shrink:0; padding-left:8px; font:500 11px/1.35 var(--mono);">'
         + altText + ' ' + velText
         + (vrGlyph ? '<div style="font-size:0.85em;">' + vrGlyph + '</div>' : '')
       + '</div>'
       + '</div>';
   });
-  c.innerHTML = rows.join('') + (truncated ? '<div style="color:#666; text-align:center; padding:4px;">+ ' + (visible.length - max) + ' more</div>' : '');
+  c.innerHTML = rows.join('') + (truncated ? '<div class="mm-empty" style="padding:6px;">+ ' + (visible.length - max) + ' more</div>' : '');
   // Click row → pan to aircraft AND open its popup so the user gets the same
   // info card as clicking the icon on the map. Shift-click locks/tracks without
   // popping the popup. Click an already-locked row to unlock.
@@ -10888,13 +12896,13 @@ document.getElementById('adsbBoxHeader').addEventListener('click', (e) => {
     _collapseMobileSiblings(box);
   }
   content.style.display = open ? 'none' : 'block';
-  toggle.textContent = open ? '[+]' : '[-]';
+  toggle.textContent = open ? '+' : '−';
   box.classList.toggle('open', !open);
   localStorage.setItem('adsbBoxCollapsed', open ? '1' : '0');
 });
 if (localStorage.getItem('adsbBoxCollapsed') === '1') {
   document.getElementById('adsbBoxContent').style.display = 'none';
-  document.getElementById('adsbBoxToggle').textContent = '[+]';
+  document.getElementById('adsbBoxToggle').textContent = '+';
 }
 
 // Settings sub-section collapse
@@ -10903,7 +12911,7 @@ document.getElementById('adsbBoxSettingsToggle').addEventListener('click', () =>
   const t = document.getElementById('adsbBoxSettingsToggle');
   const open = s.style.display !== 'none';
   s.style.display = open ? 'none' : 'block';
-  t.textContent = (open ? '▸' : '▾') + ' SETTINGS';
+  t.innerHTML = '<span id="adsbBoxSettingsCaret">' + (open ? '▸' : '▾') + '</span>Settings';
 });
 
 // Bidirectional enable: top-left toggle <-> setAdsbEnabled (which also syncs the hidden #adsbEnabled)
@@ -11011,12 +13019,8 @@ function renderAdsbBoxFilterChips() {
   ADSB_TAGS.forEach(t => {
     const on = adsbVisible.has(t.id);
     const chip = document.createElement('span');
-    chip.style.cssText =
-      'display:inline-block; padding:1px 5px; cursor:pointer; user-select:none;'
-      + 'border:1px solid ' + t.color + ';'
-      + 'color:' + (on ? '#000' : t.color) + ';'
-      + 'background:' + (on ? t.color : 'transparent') + ';'
-      + 'font-size:0.85em; letter-spacing:0.5px; border-radius:3px;';
+    chip.className = 'mm-chip' + (on ? ' on' : '');
+    chip.style.setProperty('--c', t.color);
     chip.textContent = t.label;
     chip.addEventListener('click', () => {
       if (adsbVisible.has(t.id)) adsbVisible.delete(t.id);
@@ -11060,22 +13064,21 @@ renderAdsbBoxFilterChips();
     // BASEMAP: walk up from the layerSelect to the bordered container
     const basemapSelect = document.getElementById('layerSelect');
     if (basemapSelect) {
-      let bm = basemapSelect.parentElement;
-      while (bm && !(bm.style && bm.style.border && /lime/.test(bm.style.border))) {
-        if (!bm.parentElement) break;
-        bm = bm.parentElement;
+      let bm = document.getElementById('basemapBlock');
+      if (!bm) {
+        bm = basemapSelect.parentElement;
+        while (bm && !(bm.style && bm.style.border && /lime/.test(bm.style.border))) {
+          if (!bm.parentElement) break;
+          bm = bm.parentElement;
+        }
       }
       if (bm) {
-        bm.style.margin = '0 0 8px 0';
-        bm.style.borderColor = '#225522';
         mapDst.appendChild(bm);
       }
     }
     // OFFLINE MAPPING (cache panel)
     const offPanel = document.getElementById('offlineMappingPanel');
     if (offPanel) {
-      offPanel.style.margin = '0';
-      offPanel.style.border = '1px dashed #225522';
       mapDst.appendChild(offPanel);
     }
   }
@@ -11091,18 +13094,14 @@ renderAdsbBoxFilterChips();
     if (usbPill) {
       // Tag it so we can hide it from filterHeader CSS that pulled it inline
       usbPill.classList.remove('alwaysVisible');
-      usbPill.style.margin = '0 0 6px 0';
       usbPill.style.maxWidth = '100%';
       setDst.appendChild(usbPill);
     }
     // USB port config block
     const portBtn = document.getElementById('portRefreshBtn');
     if (portBtn) {
-      const section = portBtn.closest('div[style*="border-top:1px dashed"]');
+      const section = portBtn.closest('#usbPortsBlock') || portBtn.closest('div[style*="border-top:1px dashed"]');
       if (section) {
-        section.style.borderTop = 'none';
-        section.style.paddingTop = '0';
-        section.style.marginTop = '0';
         setDst.appendChild(section);
       }
     }
@@ -11113,18 +13112,18 @@ renderAdsbBoxFilterChips();
     // ---- Add a parallel SDR section for ADS-B receivers ----
     const sdrSection = document.createElement('div');
     sdrSection.id = 'sdrConfigSection';
-    sdrSection.style.cssText = 'margin-top:10px; padding-top:8px; border-top:1px dashed #225522;';
+    sdrSection.className = 'mm-section';
     sdrSection.innerHTML = (
-      '<div style="font-size:0.95em; color:#aaeeff; margin-bottom:3px; font-weight:bold; letter-spacing:1px;">SDR · ADS-B RECEIVERS</div>'
-      + '<div style="font-size:0.85em; color:#5588aa; margin-bottom:6px;">Network feed or local HackRF/RTL-SDR/AirSpy via dump1090, readsb, or Beast.</div>'
-      // Big binary mode toggle: ONLINE (network sources) vs LOCAL SDR. Sets default
-      // network source to adsb.lol when toggled to ONLINE.
-      + '<div style="display:flex; gap:0; margin-bottom:6px; border:1px solid #00aaff; border-radius:3px; overflow:hidden;">'
-      + '  <button data-mode="online" id="sdrModeOnline" style="flex:1; padding:5px; background:#001a2a; border:none; color:#aaeeff; font-family:monospace; font-size:0.95em; cursor:pointer;">⌒ ONLINE</button>'
-      + '  <button data-mode="local"  id="sdrModeLocal"  style="flex:1; padding:5px; background:#001a2a; border:none; color:#aaeeff; font-family:monospace; font-size:0.95em; cursor:pointer; border-left:1px solid #00aaff;">⎘ LOCAL SDR</button>'
+      '<div class="mm-sec"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12v8.5M9 20.5h6"/><circle cx="12" cy="10" r="1.6"/><path d="M8.6 6.6a4.8 4.8 0 0 0 0 6.8M15.4 6.6a4.8 4.8 0 0 1 0 6.8M5.8 3.8a8.8 8.8 0 0 0 0 12.4M18.2 3.8a8.8 8.8 0 0 1 0 12.4"/></svg>SDR · ADS-B receivers</div>'
+      + '<div class="mm-note" style="margin-bottom:8px;">Network feed or local HackRF/RTL-SDR/AirSpy via dump1090, readsb, or Beast.</div>'
+      // Binary mode switch: ONLINE (network sources) vs LOCAL SDR. Sets default
+      // network source to adsb.lol when switched to ONLINE.
+      + '<div class="mm-seg" style="margin-bottom:8px;">'
+      + '  <button data-mode="online" id="sdrModeOnline">ONLINE</button>'
+      + '  <button data-mode="local"  id="sdrModeLocal">LOCAL SDR</button>'
       + '</div>'
-      + '<label id="sdrOnlineSourceLabel" style="display:none; font-size:0.85em; color:#88aaff;">Network source:'
-      + '  <select id="sdrOnlineSourceSelect" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;">'
+      + '<label id="sdrOnlineSourceLabel" class="mm-field" style="display:none;"><span class="mm-label mm-field-label">Network source</span>'
+      + '  <select id="sdrOnlineSourceSelect">'
       + '    <option value="adsblol">adsb.lol (free, no key)</option>'
       + '    <option value="adsbfi">adsb.fi (free, no key)</option>'
       + '    <option value="airplaneslive">airplanes.live (free, no key)</option>'
@@ -11132,36 +13131,33 @@ renderAdsbBoxFilterChips();
       + '    <option value="adsbexchange">ADS-B Exchange (RapidAPI key)</option>'
       + '  </select>'
       + '</label>'
-      + '<label id="sdrModeSelectLabel" style="display:none; font-size:0.85em; color:#88aaff; margin-top:4px;">Local mode:'
-      + '  <select id="sdrModeSelect" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;">'
+      + '<label id="sdrModeSelectLabel" class="mm-field" style="display:none;"><span class="mm-label mm-field-label">Local mode</span>'
+      + '  <select id="sdrModeSelect">'
       + '    <option value="dump1090">Local SDR · dump1090 / readsb / tar1090 / PiAware</option>'
       + '    <option value="beast">Beast TCP raw feed (pyModeS)</option>'
       + '  </select>'
       + '</label>'
-      + '<div id="sdrDump1090Fields" style="margin-top:4px;">'
-      + '  <label style="display:block; font-size:0.85em; color:#88aaff;">Preset:'
-      + '    <select id="sdrDump1090Preset" style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"></select>'
+      + '<div id="sdrDump1090Fields" style="margin-top:8px;">'
+      + '  <label class="mm-field"><span class="mm-label mm-field-label">Preset</span>'
+      + '    <select id="sdrDump1090Preset"></select>'
       + '  </label>'
-      + '  <label style="display:block; font-size:0.85em; color:#88aaff; margin-top:3px;">JSON URL:'
-      + '    <input id="sdrDump1090Url" type="text" placeholder="http://localhost:8080/data/aircraft.json"'
-      + '           style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>'
+      + '  <label class="mm-field"><span class="mm-label mm-field-label">JSON URL</span>'
+      + '    <input id="sdrDump1090Url" class="mm-mono" type="text" placeholder="http://localhost:8080/data/aircraft.json"/>'
       + '  </label>'
       + '</div>'
-      + '<div id="sdrBeastFields" style="display:none; margin-top:4px;">'
-      + '  <div style="display:flex; gap:4px;">'
-      + '    <label style="flex:2; min-width:0; font-size:0.85em; color:#88aaff;">Host'
-      + '      <input id="sdrBeastHost" type="text" placeholder="localhost"'
-      + '             style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>'
+      + '<div id="sdrBeastFields" style="display:none; margin-top:8px;">'
+      + '  <div class="mm-row">'
+      + '    <label class="mm-field" style="flex:2;"><span class="mm-label mm-field-label">Host</span>'
+      + '      <input id="sdrBeastHost" class="mm-mono" type="text" placeholder="localhost"/>'
       + '    </label>'
-      + '    <label style="flex:1; min-width:0; font-size:0.85em; color:#88aaff;">Port'
-      + '      <input id="sdrBeastPort" type="number" placeholder="30005" min="1" max="65535"'
-      + '             style="width:100%; box-sizing:border-box; background:rgba(51,51,51,0.7); color:#aaeeff; border:1px solid #00aaff; font-family:monospace; font-size:0.95em; padding:2px;"/>'
+      + '    <label class="mm-field" style="flex:1; margin-top:0;"><span class="mm-label mm-field-label">Port</span>'
+      + '      <input id="sdrBeastPort" class="mm-mono" type="number" placeholder="30005" min="1" max="65535"/>'
       + '    </label>'
       + '  </div>'
-      + '  <div style="font-size:0.85em; color:#ffaa44; margin-top:2px;">Requires <code>pip install pyModeS</code>.</div>'
+      + '  <div class="mm-note" style="color:var(--amber); margin-top:4px;">Requires <code>pip install pyModeS</code>.</div>'
       + '</div>'
-      + '<div id="sdrStatus" style="margin-top:4px; font-size:0.85em; color:#88aaff; text-align:center; min-height:1.2em;"></div>'
-      + '<button id="sdrApplyBtn" style="margin-top:4px; width:100%; padding:4px; background:#001a2a; border:1px solid #00aaff; color:#aaeeff; font-family:monospace; font-size:0.95em; border-radius:3px; cursor:pointer;">APPLY SDR CONFIG</button>'
+      + '<div id="sdrStatus" class="mm-status"></div>'
+      + '<button id="sdrApplyBtn" class="mm-primary mm-block" style="margin-top:6px;">APPLY SDR CONFIG</button>'
     );
     setDst.appendChild(sdrSection);
 
@@ -11175,10 +13171,8 @@ renderAdsbBoxFilterChips();
       _sdrModeKind = kind;
       const onlineBtn = document.getElementById('sdrModeOnline');
       const localBtn  = document.getElementById('sdrModeLocal');
-      onlineBtn.style.background = (kind === 'online') ? '#003355' : '#001a2a';
-      onlineBtn.style.color      = (kind === 'online') ? '#fff'    : '#aaeeff';
-      localBtn.style.background  = (kind === 'local')  ? '#003355' : '#001a2a';
-      localBtn.style.color       = (kind === 'local')  ? '#fff'    : '#aaeeff';
+      onlineBtn.classList.toggle('on', kind === 'online');
+      localBtn.classList.toggle('on', kind === 'local');
       document.getElementById('sdrOnlineSourceLabel').style.display = (kind === 'online') ? 'block' : 'none';
       document.getElementById('sdrModeSelectLabel').style.display   = (kind === 'local')  ? 'block' : 'none';
       _sdrSyncFields();
@@ -11252,13 +13246,20 @@ renderAdsbBoxFilterChips();
         });
         const j = await r.json();
         const st = document.getElementById('sdrStatus');
-        if (!r.ok) { st.textContent = '⚠ ' + (j.error || 'failed'); st.style.color = '#ff8888'; }
-        else { st.textContent = 'saved · ' + body.source; st.style.color = '#88ff88'; }
+        if (!r.ok) { st.textContent = 'failed: ' + (j.error || 'failed'); st.style.color = 'var(--red)'; }
+        else { st.textContent = 'saved · ' + body.source; st.style.color = 'var(--green)'; }
       } catch (e) {
-        document.getElementById('sdrStatus').textContent = '⚠ ' + e;
+        document.getElementById('sdrStatus').textContent = 'failed: ' + e;
       } finally {
         btn.disabled = false; btn.textContent = 'APPLY SDR CONFIG';
       }
+    });
+    // After the receivers: the FAA registry lookup, then the connectors: the
+    // webhooks (unreachable before: they stayed behind in the hidden sidebar
+    // expansion) and the TAK server.
+    ['faaAutoSection', 'webhooksSection', 'takSection'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) setDst.appendChild(el);
     });
     // Hide the now-empty Settings expansion in the right sidebar
     const setToggle = document.getElementById('settingsToggle');
@@ -11279,8 +13280,8 @@ renderAdsbBoxFilterChips();
     if (dlSection) {
       // Wrap with a header so it has its own visual section
       const wrap = document.createElement('div');
-      wrap.style.cssText = 'margin:10px 8px 0 8px; padding:6px; border:1px solid lime; background:rgba(0,0,0,0.5); border-radius:4px; box-sizing:border-box; font-family:monospace; font-size:0.75em; color:lime;';
-      wrap.innerHTML = '<div style="color:#aaffaa; font-weight:bold; letter-spacing:1px; text-align:center; margin-bottom:4px;">DRONE EXPORTS</div>';
+      wrap.className = 'mm-section';
+      wrap.innerHTML = '<div class="mm-sec"><svg class="mm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></svg>Drone exports</div>';
       filterContent.appendChild(wrap);
       wrap.appendChild(dlSection);
       dlSection.style.background = 'transparent';
@@ -11335,7 +13336,7 @@ function _collapseMobileSiblings(exceptBox) {
     if (!c || !t || box === exceptBox) continue;
     if (c.style.display !== 'none') {
       c.style.display = 'none';
-      t.textContent = '[+]';
+      t.textContent = '+';
       box.classList.remove('open');
       localStorage.setItem(key, '0');
     }
@@ -11346,7 +13347,7 @@ function _collapseMobileSiblings(exceptBox) {
   if (adsbBox && adsbContent && adsbBox !== exceptBox && adsbContent.style.display !== 'none') {
     adsbContent.style.display = 'none';
     const t = document.getElementById('adsbBoxToggle');
-    if (t) t.textContent = '[+]';
+    if (t) t.textContent = '+';
     adsbBox.classList.remove('open');
     localStorage.setItem('adsbBoxCollapsed', '1');
   }
@@ -11355,13 +13356,13 @@ function _collapseMobileSiblings(exceptBox) {
   if (filterBox && filterBox !== exceptBox && !filterBox.classList.contains('collapsed')) {
     filterBox.classList.add('collapsed');
     const t = document.getElementById('filterToggle');
-    if (t) t.textContent = '[+]';
+    if (t) t.textContent = '+';
     localStorage.setItem('filterCollapsed', 'true');
   }
 }
-_wireFloat('geofenceFloatHeader', 'geofenceFloatContent', 'geofenceFloatToggle', 'geofenceFloatOpen', '[-]', '[+]');
-_wireFloat('settingsFloatHeader', 'settingsFloatContent', 'settingsFloatToggle', 'settingsFloatOpen', '[-]', '[+]');
-_wireFloat('mapLayerFloatHeader', 'mapLayerFloatContent', 'mapLayerFloatToggle', 'mapLayerFloatOpen', '[-]', '[+]');
+_wireFloat('geofenceFloatHeader', 'geofenceFloatContent', 'geofenceFloatToggle', 'geofenceFloatOpen', '−', '+');
+_wireFloat('settingsFloatHeader', 'settingsFloatContent', 'settingsFloatToggle', 'settingsFloatOpen', '−', '+');
+_wireFloat('mapLayerFloatHeader', 'mapLayerFloatContent', 'mapLayerFloatToggle', 'mapLayerFloatOpen', '−', '+');
 
 // ---------- Header status descriptors — give every collapsed panel a glanceable summary ----------
 function updatePanelDescriptions() {
@@ -11395,10 +13396,10 @@ function updatePanelDescriptions() {
       const total = Object.keys(statuses).length;
       if (total === 0) {
         setStatus.textContent = 'no usb';
-        setStatus.style.color = '#888';
+        setStatus.style.color = 'var(--muted)';
       } else {
         setStatus.textContent = connected + '/' + total + ' usb';
-        setStatus.style.color = (connected > 0) ? '#88ff88' : '#ff8888';
+        setStatus.style.color = (connected > 0) ? 'var(--green)' : 'var(--red)';
       }
     }).catch(() => {});
   }
@@ -11411,7 +13412,9 @@ function updatePanelDescriptions() {
     if (sel && sel.selectedOptions[0]) label = sel.selectedOptions[0].textContent.trim();
     if (label.length > 24) label = label.slice(0, 22) + '..';
     const offline = v.indexOf('offline:') === 0 ? 'OFFLINE' : 'ONLINE';
-    mapStatus.textContent = label + ' · ' + offline;
+    mapStatus.innerHTML = '<span class="mm-ml-name"></span><span class="mm-ml-mode" style="color:'
+      + (offline === 'OFFLINE' ? 'var(--lime)' : 'var(--green)') + ';">' + offline + '</span>';
+    mapStatus.firstChild.textContent = label;
   }
 }
 // Refresh descriptions every 2s + on key events
@@ -11438,15 +13441,15 @@ function _adsbSetUiEnabled(enabled) {
   if (settings) settings.checked = enabled;
   if (mainStatus) {
     mainStatus.textContent = enabled ? 'on' : 'off';
-    mainStatus.style.color = enabled ? '#00ffaa' : '#88aaff';
+    mainStatus.style.color = enabled ? 'var(--green)' : 'var(--muted)';
   }
   if (detailStatus) detailStatus.textContent = enabled ? '— enabled, polling —' : '— off —';
   if (stateLbl) {
     stateLbl.textContent = enabled ? 'ON' : 'OFF';
-    // Cyan accent for ADS-B (matches the AIR TRAFFIC panel border + popup card).
-    stateLbl.style.color = enabled ? '#88c8ff' : '#586978';
-    stateLbl.style.borderColor = enabled ? 'rgba(136,200,255,0.55)' : 'rgba(255,255,255,0.10)';
-    stateLbl.style.background = enabled ? 'rgba(136,200,255,0.10)' : 'transparent';
+    // Lit in the accent while the layer is on, red while off, like the switch.
+    stateLbl.style.color = enabled ? 'var(--accent)' : 'var(--red)';
+    stateLbl.style.borderColor = enabled ? 'rgba(46,230,214,0.55)' : 'rgba(255,77,94,0.55)';
+    stateLbl.style.background = enabled ? 'rgba(46,230,214,0.08)' : 'rgba(255,77,94,0.08)';
   }
 }
 
@@ -11687,12 +13690,8 @@ function renderAdsbFilterChips() {
     const on = adsbVisible.has(t.id);
     const chip = document.createElement('span');
     chip.dataset.tag = t.id;
-    chip.style.cssText =
-      'display:inline-block; padding:2px 6px; cursor:pointer; user-select:none;'
-      + 'border:1px solid ' + t.color + ';'
-      + 'color:' + (on ? '#000' : t.color) + ';'
-      + 'background:' + (on ? t.color : 'transparent') + ';'
-      + 'font-size:0.85em; letter-spacing:0.5px; border-radius:3px;';
+    chip.className = 'mm-chip' + (on ? ' on' : '');
+    chip.style.setProperty('--c', t.color);
     chip.textContent = t.label;
     chip.addEventListener('click', () => {
       if (adsbVisible.has(t.id)) adsbVisible.delete(t.id);
@@ -11918,9 +13917,7 @@ if (navigator.geolocation) {
   navigator.geolocation.watchPosition(function(position) {
     const lat = position.coords.latitude;
     const lng = position.coords.longitude;
-    // Use stored observer emoji or default to "😎"
-    const storedObserverEmoji = localStorage.getItem('observerEmoji') || "😎";
-    const observerIcon = createObserverIcon('blue');
+    const observerIcon = createObserverIcon('#4da3ff');
     if (!observerMarker) {
       observerMarker = L.marker([lat, lng], {icon: observerIcon})
                         .bindPopup(generateObserverPopup())
@@ -12037,11 +14034,11 @@ function colorFromMac(mac) {
   let hash = 0;
   for (let i = 0; i < mac.length; i++) { hash = mac.charCodeAt(i) + ((hash << 5) - hash); }
   let h = Math.abs(hash) % 360;
-  return 'hsl(' + h + ', 70%, 50%)';
+  return 'hsl(' + h + ', 90%, 62%)';
 }
 
 function get_color_for_mac(mac) {
-  if (colorOverrides.hasOwnProperty(mac)) { return "hsl(" + colorOverrides[mac] + ", 70%, 50%)"; }
+  if (colorOverrides.hasOwnProperty(mac)) { return "hsl(" + colorOverrides[mac] + ", 90%, 62%)"; }
   return colorFromMac(mac);
 }
 
@@ -12145,7 +14142,7 @@ function _refreshDronesHeaderCount() {
     totalActive++;
   }
   el.textContent = totalActive + ' active';
-  el.style.color = totalActive > 0 ? '#00ff88' : '#666';
+  el.style.color = totalActive > 0 ? 'var(--hot)' : 'var(--muted)';
 }
 // Hook the map move/zoom so counts (and any other view-dependent state) update
 // instantly without waiting for the next 1s detection poll.
@@ -12268,8 +14265,9 @@ async function updateData() {
       if (isNoGpsDrone) {
         // Ensure this MAC is in the persistent list for display
         if (!persistentMACs.includes(mac)) { persistentMACs.push(mac); }
-      } else if (!hasRecentTransmission) {
-        // Reset alert state when transmission stops
+      } else if ((currentTime - det.last_update) > STALE_THRESHOLD) {
+        // Reset alert state only when the drone has fully staled out.
+        // Clearing on any gap >5s made once-per-minute beacons re-alert every cycle.
         alertedNoGpsDrones.delete(mac);
       }
       
@@ -12348,6 +14346,7 @@ async function updateData() {
         if (pilotMarkers[mac]) {
           pilotMarkers[mac].setLatLng([pilotLat, pilotLng]);
           if (!pilotMarkers[mac].isPopupOpen()) { pilotMarkers[mac].setPopupContent(generatePopupContent(det, 'pilot')); }
+          else { _faaRefreshOpenPopup(mac, det); }
         } else {
           pilotMarkers[mac] = L.marker([pilotLat, pilotLng], {
             icon: createPilotIcon(color),
@@ -12407,9 +14406,10 @@ async function updateData() {
           alertedNoGpsDrones.add(det.mac);
         }
       } else {
-        // Remove no-GPS styling and reset alert state when GPS is acquired or transmission stops
+        // Remove no-GPS styling and reset alert state when GPS is acquired or the
+        // drone fully stales out (not merely quiet >5s, or 1/min beacons re-alert)
         droneElem.classList.remove('no-gps');
-        if (!hasRecentTransmission) {
+        if ((currentTime - det.last_update) > STALE_THRESHOLD) {
           alertedNoGpsDrones.delete(det.mac);
         }
       }
@@ -12420,7 +14420,7 @@ async function updateData() {
 function createIcon(emoji, color) {
   // Compute a dynamic size based on zoom
   const size = getDynamicSize();
-  const actualSize = emoji === '👤' ? Math.round(size * 0.7) : Math.round(size);
+  const actualSize = Math.round(size);
   const isize = actualSize;
   const half = Math.round(actualSize / 2);
   return L.divIcon({
@@ -12506,8 +14506,9 @@ async function updateSerialStatus() {
       for (const port in data.statuses) {
         const div = document.createElement("div");
         // Device name in neon pink and status color accordingly.
-        div.innerHTML = '<span class="usb-name">' + port + '</span>: ' +
-          (data.statuses[port] ? '<span style="color: lime;">Connected</span>' : '<span style="color: red;">Disconnected</span>');
+        div.innerHTML = '<span class="mm-dot' + (data.statuses[port] ? ' live' : '') + '" style="--c:' + (data.statuses[port] ? 'var(--green)' : 'var(--red)') + '; margin-right:7px;"></span>'
+          + '<span class="usb-name">' + port + '</span>: ' +
+          (data.statuses[port] ? '<span style="color: var(--green);">Connected</span>' : '<span style="color: var(--red);">Disconnected</span>');
         statusDiv.appendChild(div);
       }
     }
@@ -12574,7 +14575,7 @@ function updateColor(mac, hue) {
   hue = parseInt(hue);
   colorOverrides[mac] = hue;
   localStorage.setItem('colorOverrides', JSON.stringify(colorOverrides));
-  var newColor = "hsl(" + hue + ", 70%, 50%)";
+  var newColor = "hsl(" + hue + ", 90%, 62%)";
   if (droneMarkers[mac]) { droneMarkers[mac].setIcon(createDroneIcon(newColor)); droneMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'drone')); }
   if (pilotMarkers[mac]) { pilotMarkers[mac].setIcon(createPilotIcon(newColor)); pilotMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'pilot')); }
   if (droneCircles[mac]) { droneCircles[mac].setStyle({ color: newColor, fillColor: newColor }); }
@@ -12590,18 +14591,18 @@ function updateColor(mac, hue) {
 <script>
   // Download buttons click handlers with purple flash
   document.getElementById('downloadCsv').addEventListener('click', function() {
-    this.style.backgroundColor = 'purple';
-    setTimeout(() => { this.style.backgroundColor = '#333'; }, 300);
+    this.style.backgroundColor = 'rgba(46,230,214,0.25)';
+    setTimeout(() => { this.style.backgroundColor = ''; }, 300);
     window.location.href = '/download/csv';
   });
   document.getElementById('downloadKml').addEventListener('click', function() {
-    this.style.backgroundColor = 'purple';
-    setTimeout(() => { this.style.backgroundColor = '#333'; }, 300);
+    this.style.backgroundColor = 'rgba(46,230,214,0.25)';
+    setTimeout(() => { this.style.backgroundColor = ''; }, 300);
     window.location.href = '/download/kml';
   });
   document.getElementById('downloadAliases').addEventListener('click', function() {
-    this.style.backgroundColor = 'purple';
-    setTimeout(() => { this.style.backgroundColor = '#333'; }, 300);
+    this.style.backgroundColor = 'rgba(46,230,214,0.25)';
+    setTimeout(() => { this.style.backgroundColor = ''; }, 300);
     window.location.href = '/download/aliases';
   });
   document.getElementById('downloadCumulativeCsv').addEventListener('click', function() {
@@ -12615,6 +14616,384 @@ function updateColor(mac, hue) {
       .then(reg => console.log('Service Worker registered', reg))
       .catch(err => console.error('Service Worker registration failed', err));
   }
+</script>
+<script>
+// ---------- TAK server connector (SETTINGS > TAK SERVER) ----------
+// Drones and their pilots as Cursor-on-Target on a TAK server's map. The
+// server side owns the link (its own thread, a bounded queue, reconnect with
+// backoff); this page only edits the settings and shows the link's state.
+(function () {
+  const $ = (id) => document.getElementById(id);
+  if (!$('takSection')) return;
+  let cfg = null;          // the last config the server sent
+  let proto = 'tcp';
+  const dirty = {};        // secret fields the user has typed into
+  let pollTimer = null;
+  let lastStatus = null;
+  let skew = 0;            // browser clock minus the mapper's clock, seconds
+
+  const esc = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const nowS = () => Date.now() / 1000 - skew;     // in the mapper's clock
+  const day = (t) => { try { return new Date(t * 1000).toISOString().slice(0, 10); } catch (e) { return ''; } };
+
+  // state -> [label, color, live]
+  const STATE = {
+    connected:  ['Connected',  'var(--green)', true],
+    connecting: ['Connecting', 'var(--amber)', false],
+    retrying:   ['Retrying',   'var(--amber)', false],
+    error:      ['Error',      'var(--red)',   false],
+    off:        ['Off',        'var(--red)',   false],
+  };
+
+  function setProto(p) {
+    proto = (p === 'udp' || p === 'tls') ? p : 'tcp';
+    document.querySelectorAll('#takProto button').forEach(b => b.classList.toggle('on', b.dataset.proto === proto));
+    $('takTlsBox').style.display = (proto === 'tls') ? 'block' : 'none';
+    $('takLoginBox').style.display = (proto === 'udp') ? 'none' : 'block';
+    $('takPort').placeholder = (proto === 'tls') ? '8089' : '8087';
+  }
+
+  function certInfo(infoId, btnId, c, none) {
+    const el = $(infoId), btn = $(btnId);
+    if (!c) { el.innerHTML = esc(none); btn.style.display = 'none'; return; }
+    btn.style.display = '';
+    if (c.ok === false) {
+      el.innerHTML = '<span style="color:var(--red);">' + esc(c.filename || 'stored file') + ': ' + esc(c.problem || 'unreadable') + '</span>';
+      return;
+    }
+    const parts = [];
+    if (c.subject) parts.push('<span style="color:var(--text);">' + esc(c.subject) + '</span>');
+    else if (c.filename) parts.push('<span style="color:var(--text);">' + esc(c.filename) + '</span>');
+    if (c.issuer) parts.push('issued by ' + esc(c.issuer));
+    if (c.expires) parts.push(c.expired
+      ? '<span style="color:var(--red);">expired ' + day(c.expires) + '</span>'
+      : 'expires ' + day(c.expires));
+    if (c.has_ca === true) parts.push('carries its CA');
+    else if (c.has_ca === false) parts.push('<span style="color:var(--amber);">no CA inside</span>');
+    if (Array.isArray(c.ca) && c.has_ca === undefined) parts.push(c.ca.length + ' CA cert' + (c.ca.length === 1 ? '' : 's') + (c.ca[0] ? ': ' + esc(c.ca[0]) : ''));
+    el.innerHTML = parts.join(' · ');
+  }
+
+  function fill(c) {
+    cfg = c || {};
+    $('takEnabled').checked = !!cfg.enabled;
+    $('takHost').value = cfg.host || '';
+    $('takPort').value = cfg.port || '';
+    setProto(cfg.protocol || 'tcp');
+    $('takUser').value = cfg.username || '';
+    $('takVerify').checked = (cfg.verify !== false);
+    $('takTimeout').value = cfg.timeout_s || '';
+    $('takRefresh').value = cfg.refresh_s || '';
+    $('takPass').placeholder = cfg.has_password ? 'saved, type to change' : 'none';
+    $('takCertPass').placeholder = cfg.has_cert_password ? 'saved, type to change' : 'none';
+    $('takTrustPass').placeholder = cfg.has_truststore_password ? 'saved, type to change' : 'same as the .p12';
+    ['takPass', 'takCertPass', 'takTrustPass'].forEach(id => { $(id).value = ''; delete dirty[id]; });
+    certInfo('takCertInfo', 'takCertRemove', cfg.cert, 'none');
+    certInfo('takTrustInfo', 'takTrustRemove', cfg.truststore, 'none: the CA inside the .p12 is used');
+  }
+
+  function ago(t) {
+    if (!t) return 'never';
+    const s = Math.max(0, Math.round(nowS() - t));
+    if (s < 60) return s + ' s ago';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    return Math.round(s / 3600) + ' h ago';
+  }
+
+  function render(st) {
+    st = st || {};
+    lastStatus = st;
+    const meta = STATE[st.state] || STATE.off;
+    let label = meta[0];
+    if ((st.state === 'retrying' || st.state === 'error') && st.next_retry) {
+      const s = Math.max(0, Math.round(st.next_retry - nowS()));
+      label += ', next try in ' + s + ' s';
+    }
+    // the readout on the section head
+    const dot = $('takHeadDot');
+    dot.style.setProperty('--c', meta[1]);
+    dot.classList.toggle('live', meta[2]);
+    $('takHeadText').textContent = meta[0].toLowerCase();
+    $('takHeadText').style.color = meta[1];
+    // the status card
+    const rows = [];
+    const kv = (k, v, color, mono) => rows.push(
+      '<div class="mm-kv"><span class="k">' + k + '</span><span class="v' + (mono ? ' mono' : '') + '"'
+      + (color ? ' style="color:' + color + ';"' : '') + '>' + v + '</span></div>');
+    kv('Link', '<span class="mm-dot' + (meta[2] ? ' live' : '') + '" style="--c:' + meta[1] + '; margin-right:7px;"></span>' + esc(label), meta[1]);
+    if (st.reason && st.state !== 'connected' && st.state !== 'off') kv('Why', esc(st.reason), meta[1]);
+    if (st.state === 'connecting' && st.attempt > 1 && st.last_error) kv('Last try', esc(st.last_error), 'var(--amber)');
+    if (st.state === 'connected' && st.note) kv('Note', esc(st.note), 'var(--amber)');
+    if (st.host) kv('Server', esc(String(st.protocol || proto).toUpperCase() + '  ' + st.host + ':' + st.port), '', true);
+    if (st.tls) {
+      kv('Server cert', st.tls.verified
+        ? 'checked' + (st.tls.peer ? ', ' + esc(st.tls.peer) : '')
+        : 'not checked' + (st.tls.peer ? ', ' + esc(st.tls.peer) : ''), st.tls.verified ? 'var(--green)' : 'var(--amber)');
+      if (st.tls.client) kv('Our cert', esc(st.tls.client) + (st.tls.client_expires ? ', expires ' + day(st.tls.client_expires) : ''), '');
+    }
+    if (st.state === 'connected' && st.ping) kv('Server', 'answers pings', 'var(--green)');
+    kv('Tracks', String(st.tracks || 0), (st.tracks ? 'var(--hot)' : ''), true);
+    kv('Sent', String(st.sent || 0) + (st.last_sent ? ', last ' + ago(st.last_sent) : ''), '', true);
+    if (st.dropped) kv('Dropped', String(st.dropped) + ' (queue full)', 'var(--amber)', true);
+    if (st.state === 'connected' && st.last_error && st.last_error_at) kv('Last problem', esc(st.last_error) + ', ' + ago(st.last_error_at), 'var(--muted)');
+    const card = $('takStatus');
+    card.innerHTML = rows.join('');
+    card.style.borderColor = st.state === 'error' ? 'rgba(255,77,94,0.45)'
+      : (st.state === 'retrying' || st.state === 'connecting') ? 'rgba(255,181,71,0.4)'
+      : st.state === 'connected' ? 'rgba(61,255,154,0.3)' : '';
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/api/tak', {cache: 'no-store'});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      if (d.status && d.status.now) skew = Date.now() / 1000 - d.status.now;
+      if (!cfg) fill(d.config);
+      render(d.status);
+    } catch (e) {
+      render({state: 'error', reason: 'the mapper did not answer: ' + e.message});
+    }
+  }
+  function schedule() {
+    clearTimeout(pollTimer);
+    const settingsOpen = $('settingsFloatContent') && $('settingsFloatContent').style.display !== 'none';
+    const panelOpen = $('takPanel').style.display !== 'none';
+    const fast = settingsOpen && panelOpen && !document.hidden;
+    pollTimer = setTimeout(async () => { await poll(); schedule(); }, fast ? 2000 : 15000);
+  }
+
+  const problem = (j, r) => (Array.isArray(j.errors) && j.errors.length ? j.errors.join('; ') : '') || j.reason || j.error || ('HTTP ' + r.status);
+
+  async function postJson(url, body) {
+    const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.ok === false) throw new Error(problem(j, r));
+    return j;
+  }
+
+  function note(text, color) {
+    const n = $('takSaveResult');
+    n.textContent = text;
+    n.style.color = color || 'var(--muted)';
+  }
+
+  async function uploadCert(fileId, kind, passId) {
+    const f = $(fileId).files[0];
+    if (!f) return;
+    const fd = new FormData();
+    fd.append('kind', kind);
+    fd.append('file', f);
+    // the password typed here; left out, the mapper uses the one it has saved
+    let pw = dirty[passId] ? $(passId).value : null;
+    if (pw === null && kind === 'truststore' && dirty.takCertPass) pw = $('takCertPass').value;
+    if (pw !== null) fd.append('password', pw);
+    const r = await fetch('/api/tak/cert', {method: 'POST', body: fd});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.ok === false) throw new Error((kind === 'client' ? 'certificate: ' : 'server CA: ') + problem(j, r));
+    $(fileId).value = '';
+    delete dirty[passId];
+  }
+
+  async function save() {
+    const btn = $('takSaveBtn');
+    btn.disabled = true;
+    note('saving...');
+    try {
+      // a newly picked certificate goes up first, checked with its password
+      if (proto === 'tls') {
+        await uploadCert('takCertFile', 'client', 'takCertPass');
+        await uploadCert('takTrustFile', 'truststore', 'takTrustPass');
+      }
+      const num = (id) => { const v = parseInt($(id).value || $(id).placeholder, 10); return isNaN(v) ? undefined : v; };
+      const body = {
+        enabled: $('takEnabled').checked,
+        host: $('takHost').value.trim(),
+        port: num('takPort'),
+        protocol: proto,
+        username: $('takUser').value.trim(),
+        verify: $('takVerify').checked,
+        timeout_s: num('takTimeout'),
+        refresh_s: num('takRefresh'),
+      };
+      if (dirty.takPass) body.password = $('takPass').value;
+      if (dirty.takCertPass) body.cert_password = $('takCertPass').value;
+      if (dirty.takTrustPass) body.truststore_password = $('takTrustPass').value;
+      const j = await postJson('/api/tak', body);
+      if (j.status && j.status.now) skew = Date.now() / 1000 - j.status.now;
+      fill(j.config);
+      render(j.status);
+      note(body.enabled ? 'saved, connecting' : 'saved', 'var(--green)');
+    } catch (e) {
+      note(e.message, 'var(--red)');
+    } finally {
+      btn.disabled = false;
+      schedule();
+    }
+  }
+
+  async function removeCert(kind) {
+    try {
+      const r = await fetch('/api/tak/cert/' + kind, {method: 'DELETE'});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j.ok === false) throw new Error(problem(j, r));
+      cfg = null;
+      await poll();
+      note(kind === 'client' ? 'certificate removed' : 'server CA removed', 'var(--muted)');
+    } catch (e) { note(e.message, 'var(--red)'); }
+  }
+
+  // wiring
+  $('takToggle').addEventListener('click', () => {
+    const p = $('takPanel');
+    const open = p.style.display === 'none';
+    p.style.display = open ? 'block' : 'none';
+    $('takArrow').innerHTML = open ? '&#9662;' : '&#9656;';
+    if (open) { cfg = null; poll(); }
+    schedule();
+  });
+  document.querySelectorAll('#takProto button').forEach(b => b.addEventListener('click', () => setProto(b.dataset.proto)));
+  ['takPass', 'takCertPass', 'takTrustPass'].forEach(id => $(id).addEventListener('input', () => { dirty[id] = true; }));
+  // The switch applies at once, like the app's connector switches
+  $('takEnabled').addEventListener('change', async (ev) => {
+    const box = ev.currentTarget;
+    const on = box.checked;
+    try {
+      const j = await postJson('/api/tak', {enabled: on});
+      render(j.status);
+      note(on ? 'on, connecting' : 'off', on ? 'var(--green)' : 'var(--muted)');
+    } catch (e) {
+      box.checked = !on;
+      note(e.message, 'var(--red)');
+    }
+    schedule();
+  });
+  $('takSaveBtn').addEventListener('click', save);
+  $('takCertRemove').addEventListener('click', () => removeCert('client'));
+  $('takTrustRemove').addEventListener('click', () => removeCert('truststore'));
+  document.addEventListener('visibilitychange', schedule);
+  // count the retry down between polls
+  setInterval(() => {
+    if (lastStatus && (lastStatus.state === 'retrying' || lastStatus.state === 'error') && $('takPanel').style.display !== 'none') render(lastStatus);
+  }, 1000);
+  setProto('tcp');
+  poll();
+  schedule();
+})();
+</script>
+<script>
+// ---------- FAA registry: automatic lookups (SETTINGS > FAA REGISTRY) ----------
+// The server looks each new drone serial up once, in the background, and
+// keeps a record it finds for good; this page only flips the switch and
+// shows how the lookups stand.
+(function () {
+  const $ = (id) => document.getElementById(id);
+  if (!$('faaAutoSection')) return;
+  let skew = 0;          // browser clock minus the mapper's clock, seconds
+  let saving = false;    // a switch change on its way: the poll leaves the switch alone
+
+  const esc = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const ago = (t) => {
+    const s = Math.max(0, Math.round(Date.now() / 1000 - skew - t));
+    if (s < 60) return s + ' s ago';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    return Math.round(s / 86400) + ' d ago';
+  };
+  const wait = (s) => (s < 60 ? s + ' s' : Math.ceil(s / 60) + ' min');
+  // a short part of the line never breaks inside; the line wraps at the dots
+  const nw = (s) => '<span style="white-space:nowrap;">' + s + '</span>';
+
+  function head(text, color, live) {
+    const dot = $('faaAutoDot'), h = $('faaAutoHead');
+    dot.className = 'mm-dot' + (live ? ' live' : '');
+    dot.style.setProperty('--c', color);
+    h.textContent = text;
+    h.style.color = color;
+  }
+
+  function show(st) {
+    if (!st || typeof st.enabled !== 'boolean') return;
+    if (!saving) $('faaAutoToggle').checked = st.enabled;
+    const n = st.saved || 0;
+    const saved = nw(n + (n === 1 ? ' record' : ' records') + ' saved');
+    let line;
+    if (!st.enabled) {
+      head('off', 'var(--red)', false);
+      line = 'Off: a drone is looked up only with QUERY FAA in its popup · ' + saved;
+    } else if (st.paused_s > 0) {
+      head('paused', 'var(--amber)', false);
+      line = '<span style="color:var(--amber);">' + esc((st.last && st.last.text) || 'FAA not reachable') + '</span>'
+           + ' · ' + nw('next try in ' + wait(st.paused_s)) + ' · ' + saved;
+    } else if (st.busy) {
+      head('looking up', 'var(--cyan)', true);
+      const more = Math.max(0, (st.queued || 0) - 1);
+      line = 'Looking up <span class="mm-mono" style="color:var(--text);">' + esc(st.busy) + '</span>'
+           + (more ? ' · ' + nw(more + ' more queued') : '') + ' · ' + saved;
+    } else {
+      head('auto', 'var(--green)', true);
+      line = saved;
+    }
+    const L = st.last;
+    if (L && L.serial && !(st.enabled && st.paused_s > 0)) {
+      const ser = '<span class="mm-mono" style="color:var(--soft);">' + esc(L.serial) + '</span>';
+      if (L.result === 'found') {
+        line += '<br>Last: <span style="color:var(--green);">' + esc(L.text) + '</span> · ' + ser + ' · ' + nw(ago(L.ts));
+      } else if (L.result === 'missing') {
+        line += '<br>Last: ' + ser + ' <span style="color:var(--amber);">not in the FAA registry</span> · ' + nw(ago(L.ts));
+      } else {
+        line += '<br>Last: ' + ser + ' <span style="color:var(--red);">' + esc(L.text) + '</span> · ' + nw(ago(L.ts));
+      }
+    }
+    $('faaAutoStatus').innerHTML = line;
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/api/faa_auto', {cache: 'no-store'});
+      if (!r.ok) return;
+      const st = await r.json();
+      if (typeof st.now === 'number') skew = Date.now() / 1000 - st.now;
+      show(st);
+    } catch (e) {
+      // the mapper restarting: the next poll shows it
+    }
+  }
+
+  $('faaAutoToggle').addEventListener('change', async (ev) => {
+    const want = ev.target.checked;
+    saving = true;
+    try {
+      const r = await fetch('/api/faa_auto', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: want}),
+      });
+      const st = await r.json().catch(() => ({}));
+      if (!r.ok || st.ok === false) throw new Error(st.error || ('HTTP ' + r.status));
+      saving = false;
+      show(st);
+    } catch (e) {
+      saving = false;
+      ev.target.checked = !want;
+      $('faaAutoStatus').innerHTML = '<span style="color:var(--red);">Not saved: ' + esc(e.message || e) + '</span>';
+    }
+  });
+
+  // every 3 s while SETTINGS is open, every 20 s otherwise, and right away
+  // when it opens
+  const settingsOpen = () => {
+    const c = $('settingsFloatContent');
+    return !!c && c.style.display !== 'none';
+  };
+  const hdr = $('settingsFloatHeader');
+  if (hdr) hdr.addEventListener('click', () => setTimeout(poll, 60));
+  (function tick() {
+    poll().finally(() => setTimeout(tick, settingsOpen() ? 3000 : 20000));
+  })();
+})();
 </script>
 </body>
 </html>
@@ -13087,7 +15466,19 @@ def api_ports():
 # Updated status endpoint: returns a dict of statuses for each selected USB.
 @app.route('/api/serial_status', methods=['GET'])
 def api_serial_status():
-    return jsonify({"statuses": serial_connected_status})
+    return jsonify({"statuses": combined_connection_status()})
+
+# Heartbeat endpoint for non-serial receivers (e.g. tools/ds110_bridge.py).
+# They show up alongside USB ports in the connection status UI.
+@app.route('/api/receiver_status', methods=['POST'])
+def api_receiver_status():
+    data = request.get_json(force=True, silent=True) or {}
+    name = data.get("name")
+    if not name:
+        return jsonify({"status": "error", "reason": "no receiver name"}), 400
+    receiver_status[name] = {"last_seen": time.time(), "stats": data.get("stats", {})}
+    emit_serial_status()
+    return jsonify({"status": "ok"})
 
 # New endpoint to get currently selected ports
 @app.route('/api/selected_ports', methods=['GET'])
@@ -13178,12 +15569,21 @@ def serial_reader(port):
                     
                 # Broadcast the updated status immediately
                 emit_serial_status()
-                    
+
+                # ESP32-S3 native USB re-enumerates its CDC interface while the
+                # firmware boots (~0.5s after any reset), which shows up as a
+                # SerialException on the first reads. Settle through that window
+                # before parsing JSON; reopening any sooner can land a DTR pulse
+                # inside the boot-strap sampling and wedge the chip in
+                # flash-download mode. Do NOT drain the input buffer here - the
+                # download-mode banner ("waiting for download") must reach the
+                # reader below so the node can be reset out of download mode.
+                time.sleep(2.5)
+
                 # Send a test command to wake up the device (reduce frequency to prevent disconnects)
                 try:
                     # Only send watchdog reset once, not continuously
                     if connection_attempts == 0:  # Only on first successful connection
-                        time.sleep(0.5)  # Small delay before sending command
                         ser.write(b'WATCHDOG_RESET\n')
                         logger.debug(f"Sent initial watchdog reset to {port}")
                 except Exception as e:
@@ -13213,7 +15613,30 @@ def serial_reader(port):
             if line:
                 data_received_count += 1
                 last_data_time = time.time()
-                
+
+                # Boot-ROM noise and flash-download mode need handling before
+                # JSON parsing: 'waiting for download' means a reopen pulsed
+                # DTR inside boot-strap sampling; a clean RTS toggle resets the
+                # chip with BOOT released, so it comes back in firmware mode.
+                if 'waiting for download' in line:
+                    logger.warning(f"{port}: node is in flash-download mode - attempting RTS reset to recover")
+                    try:
+                        # esptool-style reset with BOOT (DTR) released: pulsing
+                        # RTS alone reboots the chip into normal firmware mode.
+                        ser.dtr = False
+                        time.sleep(0.1)
+                        ser.rts = True
+                        time.sleep(0.2)
+                        ser.rts = False
+                        time.sleep(2.5)
+                        ser.reset_input_buffer()
+                    except Exception as e:
+                        logger.error(f"RTS reset failed on {port}: {e}")
+                    continue
+                if line.startswith(('rst:', 'ESP-ROM:', 'Build:')):
+                    logger.debug(f"Boot noise from {port}: {line[:80]}")
+                    continue
+
                 # Log all received data for debugging (limit length to avoid spam)
                 if data_received_count <= 10 or data_received_count % 50 == 0:
                     logger.info(f"Data from {port} (#{data_received_count}): {line[:200]}")
@@ -13238,11 +15661,17 @@ def serial_reader(port):
                     if 'mac' in detection:
                         last_mac_by_port[port] = detection['mac']
                         logger.debug(f"Found MAC in detection: {detection['mac']}")
-                    elif port in last_mac_by_port:
+                    elif port in last_mac_by_port and any(
+                            k in detection for k in ('drone_lat', 'pilot_lat', 'basic_id', 'remote_id', 'rssi')):
+                        # Multi-part telemetry continuation of the last detection:
+                        # the frame carries real data but no MAC, so borrow it.
                         detection['mac'] = last_mac_by_port[port]
                         logger.debug(f"Using cached MAC for {port}: {detection['mac']}")
-                    else:
-                        logger.warning(f"No MAC found in detection from {port}: {detection}")
+                    # Frames with no MAC and no telemetry ({"status":"scanning"},
+                    # "Detection complete", heartbeats) must NOT get the cached MAC
+                    # stamped on them: they are status, not fresh sightings, and
+                    # refreshing last_update from them pinned every tracked MAC
+                    # active forever (status frames arrive on a timer).
                     
                     # Skip status messages without detection data
                     if not any(key in detection for key in ['mac', 'drone_lat', 'pilot_lat', 'basic_id', 'remote_id']):
@@ -13284,10 +15713,10 @@ def serial_reader(port):
         except (serial.SerialException, OSError) as e:
             serial_connected_status[port] = False
             logger.error(f"SerialException/OSError on {port}: {e}")
-            
+
             # Broadcast the updated status immediately
             emit_serial_status()
-            
+
             try:
                 if ser and ser.is_open:
                     ser.close()
@@ -13296,15 +15725,17 @@ def serial_reader(port):
             ser = None
             with serial_objs_lock:
                 serial_objs.pop(port, None)
-            time.sleep(1)
-            
+            # The ESP32-S3 needs >1s after a reset before USB is stable again;
+            # reopening inside that window straps it into download mode.
+            time.sleep(4)
+
         except Exception as e:
             serial_connected_status[port] = False
             logger.error(f"Unexpected error on {port}: {e}")
-            
+
             # Broadcast the updated status immediately
             emit_serial_status()
-            
+
             try:
                 if ser and ser.is_open:
                     ser.close()
@@ -13313,7 +15744,7 @@ def serial_reader(port):
             ser = None
             with serial_objs_lock:
                 serial_objs.pop(port, None)
-            time.sleep(1)
+            time.sleep(4)
     
     with SERIAL_THREADS_LOCK:
         if SERIAL_THREADS.get(port) is threading.current_thread():
@@ -13521,6 +15952,12 @@ def main():
     
     # Start cleanup timer to prevent memory leaks
     start_cleanup_timer()
+
+    # TAK connector worker (idle until it is switched on in Settings)
+    tak_connector.start()
+
+    # FAA registry lookups (on unless switched off in Settings)
+    faa_auto.start()
     
     if HEADLESS_MODE:
         logger.info("Running in headless mode - press Ctrl+C to stop")
@@ -13568,7 +16005,7 @@ def api_diagnostics():
     diagnostics = {
         "timestamp": datetime.now().isoformat(),
         "selected_ports": SELECTED_PORTS,
-        "serial_status": serial_connected_status,
+        "serial_status": combined_connection_status(),
         "tracked_pairs": len(tracked_pairs),
         "detection_history_count": len(detection_history),
         "last_mac_by_port": last_mac_by_port,
@@ -13650,7 +16087,7 @@ def handle_connect():
 
 def emit_serial_status():
     try:
-        socketio.emit('serial_status', serial_connected_status, )
+        socketio.emit('serial_status', combined_connection_status(), )
     except Exception as e:
         logger.debug(f"Error emitting serial status: {e}")
         pass  # Ignore if no clients connected or serialization error
@@ -13693,7 +16130,7 @@ def emit_faa_cache():
     try:
         # Convert FAA_CACHE to JSON-serializable format
         serializable_cache = {}
-        for key, value in FAA_CACHE.items():
+        for key, value in list(FAA_CACHE.items()):
             # Convert tuple keys to strings
             str_key = str(key) if isinstance(key, tuple) else key
             serializable_cache[str_key] = value

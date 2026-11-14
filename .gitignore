@@ -30,6 +30,11 @@ geofences.json
 webhook_url.json
 adsb_config.json
 cache_jobs.json
+tak_config.json
+tak_config.json.tmp
+tak_certs/
+faa_auto.json
+faa_auto.json.tmp
 
 # ── Session detections / exports (per-run, contain positions) ─
 detections_*.csv
