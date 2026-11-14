@@ -9,3 +9,6 @@ pyserial>=3.5
 
 # Optional: only needed by tools/ds110_bridge.py (DroneScout Bridge ds110 BLE relay ingest)
 bleak>=0.21
+
+# Optional: reads TAK client certificates (.p12) natively; without it the openssl command is used
+# pip install cryptography
