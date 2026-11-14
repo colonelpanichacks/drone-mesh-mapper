@@ -1788,6 +1788,18 @@ def api_faa_auto_set():
 # ----------------------
 # KML Generation (including FAA data)
 # ----------------------
+import re as _kml_re
+from xml.sax.saxutils import escape as _kml_xml_escape
+
+_KML_BAD = _kml_re.compile(u'[^\t\n\r\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]')
+
+
+def _kml_esc(s):
+    """An alias or MAC as KML text: characters XML cannot hold dropped,
+    & < > escaped."""
+    return _kml_xml_escape(_KML_BAD.sub('', str(s)))
+
+
 def generate_kml():
     # Build sorted list of all MACs seen so far
     macs = sorted({d['mac'] for d in detection_history})
@@ -1807,7 +1819,7 @@ def generate_kml():
 
     for mac in macs:
         alias = ALIASES.get(mac, "")
-        aliasStr = f"{alias} " if alias else ""
+        aliasStr = f"{_kml_esc(alias)} " if alias else ""
         color    = mac_colors[mac]
 
         # --- Flights grouped by staleThreshold, each in its own Folder ---
@@ -1829,24 +1841,24 @@ def generate_kml():
                         # include start timestamp for this flight
                         start_dt  = datetime.fromtimestamp(current_flight[0][2])
                         start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-                        kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
+                        kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{_kml_esc(mac)} ({start_str})</name>')
                         # drone path
                         coords = " ".join(f"{x[0]},{x[1]},0" for x in current_flight)
                         kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
                         # drone start icon
                         start_lon, start_lat, start_ts = current_flight[0]
-                        kml_lines.append(f'<Placemark><name>Drone Start {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle></Style><Point><coordinates>{start_lon},{start_lat},0</coordinates></Point></Placemark>')
+                        kml_lines.append(f'<Placemark><name>Drone Start {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle></Style><Point><coordinates>{start_lon},{start_lat},0</coordinates></Point></Placemark>')
                         # drone end icon
                         end_lon, end_lat, end_ts = current_flight[-1]
-                        kml_lines.append(f'<Placemark><name>Drone End {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style><Point><coordinates>{end_lon},{end_lat},0</coordinates></Point></Placemark>')
+                        kml_lines.append(f'<Placemark><name>Drone End {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style><Point><coordinates>{end_lon},{end_lat},0</coordinates></Point></Placemark>')
                         # pilot path inside same flight
                         start_ts = current_flight[0][2]
                         pilot_pts = [(d['pilot_long'], d['pilot_lat']) for d in detection_history if d.get('mac')==mac and d.get('pilot_lat') and d.get('pilot_long') and d.get('last_update')>=start_ts and d.get('last_update')<=end_ts]
                         if len(pilot_pts) >= 1:
                             pc = " ".join(f"{p[0]},{p[1]},0" for p in pilot_pts)
-                            kml_lines.append(f'<Placemark><name>Pilot Path {flight_idx} {aliasStr}{mac}</name><Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{pc}</coordinates></LineString></Placemark>')
+                            kml_lines.append(f'<Placemark><name>Pilot Path {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{pc}</coordinates></LineString></Placemark>')
                             plon, plat = pilot_pts[-1]
-                            kml_lines.append(f'<Placemark><name>Pilot End {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon></IconStyle></Style><Point><coordinates>{plon},{plat},0</coordinates></Point></Placemark>')
+                            kml_lines.append(f'<Placemark><name>Pilot End {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon></IconStyle></Style><Point><coordinates>{plon},{plat},0</coordinates></Point></Placemark>')
                         kml_lines.append('</Folder>')
                         flight_idx += 1
                     current_flight = []
@@ -1859,20 +1871,20 @@ def generate_kml():
             # include start timestamp for this flight
             start_dt  = datetime.fromtimestamp(current_flight[0][2])
             start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-            kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
+            kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{_kml_esc(mac)} ({start_str})</name>')
             coords = " ".join(f"{x[0]},{x[1]},0" for x in current_flight)
             kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
             # drone start icon
             start_lon, start_lat, start_ts = current_flight[0]
-            kml_lines.append(f'<Placemark><name>Drone Start {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle></Style><Point><coordinates>{start_lon},{start_lat},0</coordinates></Point></Placemark>')
+            kml_lines.append(f'<Placemark><name>Drone Start {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle></Style><Point><coordinates>{start_lon},{start_lat},0</coordinates></Point></Placemark>')
             end_lon, end_lat, end_ts = current_flight[-1]
-            kml_lines.append(f'<Placemark><name>Drone End {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style><Point><coordinates>{end_lon},{end_lat},0</coordinates></Point></Placemark>')
+            kml_lines.append(f'<Placemark><name>Drone End {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style><Point><coordinates>{end_lon},{end_lat},0</coordinates></Point></Placemark>')
             pilot_pts = [(d['pilot_long'], d['pilot_lat']) for d in detection_history if d.get('mac')==mac and d.get('pilot_lat') and d.get('pilot_long') and d.get('last_update')>=current_flight[0][2] and d.get('last_update')<=end_ts]
             if pilot_pts:
                 pc = " ".join(f"{p[0]},{p[1]},0" for p in pilot_pts)
-                kml_lines.append(f'<Placemark><name>Pilot Path {flight_idx} {aliasStr}{mac}</name><Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{pc}</coordinates></LineString></Placemark>')
+                kml_lines.append(f'<Placemark><name>Pilot Path {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{pc}</coordinates></LineString></Placemark>')
                 plon, plat = pilot_pts[-1]
-                kml_lines.append(f'<Placemark><name>Pilot End {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon></IconStyle></Style><Point><coordinates>{plon},{plat},0</coordinates></Point></Placemark>')
+                kml_lines.append(f'<Placemark><name>Pilot End {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon></IconStyle></Style><Point><coordinates>{plon},{plat},0</coordinates></Point></Placemark>')
             kml_lines.append('</Folder>')
     # Close document
     kml_lines.append('</Document></kml>')
@@ -1946,7 +1958,7 @@ def generate_cumulative_kml():
     # For each MAC, group history into flights with staleThreshold
     for mac in macs:
         alias = ALIASES.get(mac, "")
-        aliasStr = f"{alias} " if alias else ""
+        aliasStr = f"{_kml_esc(alias)} " if alias else ""
         color = mac_colors[mac]
 
         flight_idx = 1
@@ -1968,24 +1980,24 @@ def generate_cumulative_kml():
                         # include start timestamp for this flight
                         start_dt  = current_flight[0][2]  # already a datetime
                         start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-                        kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
+                        kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{_kml_esc(mac)} ({start_str})</name>')
                         # drone path
                         coords = " ".join(f"{lo},{la},0" for lo, la, _ in current_flight)
                         kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
                         # drone start icon
                         start_lo, start_la, start_ts = current_flight[0]
-                        kml_lines.append(f'<Placemark><name>Drone Start {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle></Style><Point><coordinates>{start_lo},{start_la},0</coordinates></Point></Placemark>')
+                        kml_lines.append(f'<Placemark><name>Drone Start {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle></Style><Point><coordinates>{start_lo},{start_la},0</coordinates></Point></Placemark>')
                         # drone end icon
                         end_lo, end_la, end_ts = current_flight[-1]
-                        kml_lines.append(f'<Placemark><name>Drone End {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style><Point><coordinates>{end_lo},{end_la},0</coordinates></Point></Placemark>')
+                        kml_lines.append(f'<Placemark><name>Drone End {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style><Point><coordinates>{end_lo},{end_la},0</coordinates></Point></Placemark>')
                         # pilot path
                         start_ts = current_flight[0][2]
                         pilot_pts = [(d['pilot_long'], d['pilot_lat']) for d in history if d.get('mac')==mac and d.get('pilot_lat') and d.get('pilot_long') and start_ts <= d['last_update'] <= end_ts]
                         if pilot_pts:
                             pc = " ".join(f"{plo},{pla},0" for plo, pla in pilot_pts)
-                            kml_lines.append(f'<Placemark><name>Pilot Path {flight_idx} {aliasStr}{mac}</name><Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{pc}</coordinates></LineString></Placemark>')
+                            kml_lines.append(f'<Placemark><name>Pilot Path {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{pc}</coordinates></LineString></Placemark>')
                             plon, plat = pilot_pts[-1]
-                            kml_lines.append(f'<Placemark><name>Pilot End {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon></IconStyle></Style><Point><coordinates>{plon},{plat},0</coordinates></Point></Placemark>')
+                            kml_lines.append(f'<Placemark><name>Pilot End {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon></IconStyle></Style><Point><coordinates>{plon},{plat},0</coordinates></Point></Placemark>')
                         # close folder
                         kml_lines.append('</Folder>')
                         flight_idx += 1
@@ -2000,21 +2012,21 @@ def generate_cumulative_kml():
             # include start timestamp for this flight
             start_dt  = current_flight[0][2]  # already a datetime
             start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-            kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{mac} ({start_str})</name>')
+            kml_lines.append(f'<name>Flight {flight_idx} {aliasStr}{_kml_esc(mac)} ({start_str})</name>')
             coords = " ".join(f"{lo},{la},0" for lo, la, _ in current_flight)
             kml_lines.append(f'<Placemark><Style><LineStyle><color>{color}</color><width>2</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{coords}</coordinates></LineString></Placemark>')
             # drone start icon
             start_lo, start_la, start_ts = current_flight[0]
-            kml_lines.append(f'<Placemark><name>Drone Start {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle></Style><Point><coordinates>{start_lo},{start_la},0</coordinates></Point></Placemark>')
+            kml_lines.append(f'<Placemark><name>Drone Start {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/airports.png</href></Icon></IconStyle></Style><Point><coordinates>{start_lo},{start_la},0</coordinates></Point></Placemark>')
             end_lo, end_la, end_ts = current_flight[-1]
-            kml_lines.append(f'<Placemark><name>Drone End {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style><Point><coordinates>{end_lo},{end_la},0</coordinates></Point></Placemark>')
+            kml_lines.append(f'<Placemark><name>Drone End {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style><Point><coordinates>{end_lo},{end_la},0</coordinates></Point></Placemark>')
             start_ts = current_flight[0][2]
             pilot_pts = [(d['pilot_long'], d['pilot_lat']) for d in history if d.get('mac')==mac and d.get('pilot_lat') and d.get('pilot_long') and start_ts <= d['last_update'] <= end_ts]
             if pilot_pts:
                 pc = " ".join(f"{plo},{pla},0" for plo, pla in pilot_pts)
-                kml_lines.append(f'<Placemark><name>Pilot Path {flight_idx} {aliasStr}{mac}</name><Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{pc}</coordinates></LineString></Placemark>')
+                kml_lines.append(f'<Placemark><name>Pilot Path {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><LineStyle><color>{color}</color><width>2</width><gx:dash/></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>{pc}</coordinates></LineString></Placemark>')
                 plon, plat = pilot_pts[-1]
-                kml_lines.append(f'<Placemark><name>Pilot End {flight_idx} {aliasStr}{mac}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon></IconStyle></Style><Point><coordinates>{plon},{plat},0</coordinates></Point></Placemark>')
+                kml_lines.append(f'<Placemark><name>Pilot End {flight_idx} {aliasStr}{_kml_esc(mac)}</name><Style><IconStyle><color>{color}</color><scale>1.2</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/man.png</href></Icon></IconStyle></Style><Point><coordinates>{plon},{plat},0</coordinates></Point></Placemark>')
             kml_lines.append('</Folder>')
 
     # Close document
@@ -8891,7 +8903,7 @@ socket.on('serial_status', function(statuses) {
     for (const port in statuses) {
       const div = document.createElement("div");
       div.innerHTML = '<span class="mm-dot' + (statuses[port] ? ' live' : '') + '" style="--c:' + (statuses[port] ? 'var(--green)' : 'var(--red)') + '; margin-right:7px;"></span>'
-        + '<span class="usb-name">' + port + '</span>: ' +
+        + '<span class="usb-name">' + mmEsc(port) + '</span>: ' +
         (statuses[port] ? '<span style="color: var(--green);">Connected</span>' : '<span style="color: var(--red);">Disconnected</span>');
       statusDiv.appendChild(div);
     }
@@ -9301,8 +9313,8 @@ function showTerminalPopup(det, isNew) {
   // Build popup HTML and button using new logic
   // Build popup text
   const isMobileBtn = window.innerWidth <= 600;
-  const headerDiv = `<div class="mm-banner-head"><span class="mm-dot live" style="--c:var(--hot);"></span><span>${header}</span></div>`
-    + `<div class="mm-banner-id">RID ${rid}  ·  MAC ${det.mac}</div>`;
+  const headerDiv = `<div class="mm-banner-head"><span class="mm-dot live" style="--c:var(--hot);"></span><span>${mmEsc(header)}</span></div>`
+    + `<div class="mm-banner-id">RID ${mmEsc(rid)}  ·  MAC ${mmEsc(det.mac)}</div>`;
   let buttonDiv = '';
   if (det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0) {
     const btnStyle = [
@@ -9395,10 +9407,31 @@ if (window.L && L.Popup && L.Popup.mergeOptions) {
   L.Popup.mergeOptions({autoPanPaddingTopLeft: L.point(10, 62), autoPanPaddingBottomRight: L.point(10, 118)});
 }
 
-function _faaEsc(s) {
+// Text from radios, aircraft feeds, other clients and outside services goes
+// into HTML only through these: mmEsc for text and attribute values, mmJsArg
+// for a value inside an inline handler, mmColor for a color in a style.
+function mmEsc(s) {
   return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
+// A value as a JS expression for an inline handler: a plain quoted literal
+// when it is plain text (a MAC, an ICAO, a fence id), else its character
+// codes - nothing in it can end the string or the attribute.
+function mmJsArg(s) {
+  s = String(s == null ? '' : s);
+  if (/^[A-Za-z0-9 _:.,@#+=-]*$/.test(s)) return "'" + s + "'";
+  const codes = [];
+  for (let i = 0; i < s.length; i++) codes.push(s.charCodeAt(i));
+  return 'String.fromCharCode(' + codes.join(',') + ')';
+}
+// A color for a style: #hex, a name, rgb()/hsl() or var(--x), else the fallback.
+function mmColor(c, fallback) {
+  const s = String(c == null ? '' : c).trim();
+  return /^(#[0-9a-fA-F]{3,8}|[a-zA-Z]{1,24}|(rgb|rgba|hsl|hsla)[(][0-9., %]{1,48}[)]|var[(]--[a-z0-9-]{1,32}[)])$/.test(s)
+    ? s : (fallback || 'var(--muted)');
+}
+const _faaEsc = mmEsc;
 
 // The FAA part of a drone popup: the record's fields; "Not in the FAA
 // registry" when the FAA answered without one; nothing before it is asked.
@@ -9452,18 +9485,18 @@ function generatePopupContent(detection, markerType) {
   const mac = detection.mac;
   const aliasText = aliases[mac] ? aliases[mac] : '';
   const curTag = (window.droneTags && droneTags[mac.toLowerCase()]) || 'unknown';
-  const tagColor = DRONE_TAG_COLORS[curTag] || '#7d8999';
+  const tagColor = mmColor(DRONE_TAG_COLORS[curTag], '#7d8999');
   const safeMac = mac.replace(/[^A-Za-z0-9]/g, '');
 
   // Key / value row: the key printed in silk, numbers and IDs in mono
   const stat = (label, value, color, mono) =>
-      '<div class="mm-kv"><span class="k">' + label + '</span>'
+      '<div class="mm-kv"><span class="k">' + mmEsc(label) + '</span>'
     + '<span class="v' + (mono ? ' mono' : '') + '"' + (color ? ' style="color:' + color + ';"' : '') + '>'
-    + value + '</span></div>';
+    + mmEsc(value) + '</span></div>';
 
   // Accent button; an engaged one is filled
   const pillBtn = (id, label, onclick, active, kind) =>
-      '<button id="' + id + '" onclick="event.stopPropagation(); ' + onclick + '" '
+      '<button id="' + mmEsc(id) + '" onclick="event.stopPropagation(); ' + onclick + '" '
     + 'class="' + (active ? 'mm-on' : (kind === undefined ? 'mm-accent' : kind)) + '" style="flex:1;">'
     + label + '</button>';
 
@@ -9475,7 +9508,7 @@ function generatePopupContent(detection, markerType) {
     + '<span class="mm-label" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">'
     + label + '</span>'
     + '<span class="pop-toggle">'
-    +   '<input id="' + id + '" type="checkbox"' + (on ? ' checked' : '')
+    +   '<input id="' + mmEsc(id) + '" type="checkbox"' + (on ? ' checked' : '')
     +   ' onchange="event.stopPropagation(); ' + onchange + '">'
     +   '<span class="pop-track"></span>'
     +   '<span class="pop-knob"></span>'
@@ -9485,11 +9518,11 @@ function generatePopupContent(detection, markerType) {
 
   // Header: alias (or MAC), the MAC and the tag
   const headTitle = aliasText || mac;
-  html += '<div class="mm-pop-title">' + headTitle + '</div>';
+  html += '<div class="mm-pop-title">' + mmEsc(headTitle) + '</div>';
   html += '<div class="mm-pop-sub">'
-       +    '<span class="mm-mac">' + mac + '</span>'
+       +    '<span class="mm-mac">' + mmEsc(mac) + '</span>'
        +    '<span id="droneTagPill_' + safeMac + '" class="mm-tag" style="--c:' + tagColor + ';">'
-       +      curTag.toUpperCase() + '</span>'
+       +      mmEsc(String(curTag).toUpperCase()) + '</span>'
        + '</div>';
 
   // FAA RemoteID + lookup (automatic for a new serial, unless switched off
@@ -9499,10 +9532,10 @@ function generatePopupContent(detection, markerType) {
     html += '<div class="mm-sec">FAA Remote ID</div>';
     if (detection.basic_id) {
       html += stat('Serial', detection.basic_id, '', true);
-      html += '<button onclick="event.stopPropagation(); queryFaaAPI(\\'' + mac + '\\', \\'' + detection.basic_id + '\\')" '
-           +  'id="queryFaaButton_' + mac + '" class="mm-accent mm-block" style="margin-top:7px;">QUERY FAA</button>';
+      html += '<button onclick="event.stopPropagation(); queryFaaAPI(' + mmJsArg(mac) + ', ' + mmJsArg(detection.basic_id) + ')" '
+           +  'id="queryFaaButton_' + mmEsc(mac) + '" class="mm-accent mm-block" style="margin-top:7px;">QUERY FAA</button>';
     }
-    html += '<div id="faaResult_' + mac + '" class="mm-faa-slot" data-faa="' + _faaEsc(faaKey(detection.faa_data)) + '" style="margin-top:7px;">'
+    html += '<div id="faaResult_' + mmEsc(mac) + '" class="mm-faa-slot" data-faa="' + _faaEsc(faaKey(detection.faa_data)) + '" style="margin-top:7px;">'
          +  faaBlockHtml(detection.faa_data) + '</div>';
   }
 
@@ -9550,11 +9583,11 @@ function generatePopupContent(detection, markerType) {
     html += '<div class="mm-row">';
     if (validDrone) {
       html += '<a target="_blank" rel="noopener" class="mm-link" '
-           +  'href="https://www.google.com/maps/search/?api=1&query=' + detection.drone_lat + ',' + detection.drone_long + '">GMAPS · DRONE</a>';
+           +  'href="https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(detection.drone_lat) + ',' + encodeURIComponent(detection.drone_long) + '">GMAPS · DRONE</a>';
     }
     if (validPilot) {
       html += '<a target="_blank" rel="noopener" class="mm-link" '
-           +  'href="https://www.google.com/maps/search/?api=1&query=' + detection.pilot_lat + ',' + detection.pilot_long + '">GMAPS · PILOT</a>';
+           +  'href="https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(detection.pilot_lat) + ',' + encodeURIComponent(detection.pilot_long) + '">GMAPS · PILOT</a>';
     }
     html += '</div>';
   }
@@ -9564,19 +9597,19 @@ function generatePopupContent(detection, markerType) {
   html += '<div class="mm-sec">Identity</div>';
   html += '<input type="text" id="aliasInput" placeholder="Alias…" '
        +  'onclick="event.stopPropagation();" ontouchstart="event.stopPropagation();" '
-       +  'value="' + (aliasText || '').replace(/"/g, '&quot;') + '" '
+       +  'value="' + mmEsc(aliasText || '') + '" '
        +  'style="width:100%;">';
   html += '<div class="mm-row" style="margin-top:7px;">';
   html += pillBtn('saveAliasBtn_' + safeMac, 'SAVE ALIAS',
-                  'saveAlias(\\'' + mac + '\\');', false);
+                  'saveAlias(' + mmJsArg(mac) + ');', false);
   html += pillBtn('clearAliasBtn_' + safeMac, 'CLEAR',
-                  'clearAlias(\\'' + mac + '\\');', false, '');
+                  'clearAlias(' + mmJsArg(mac) + ');', false, '');
   html += '</div>';
   html += '<div class="mm-row" style="margin-top:8px; gap:10px;">';
   html += '<span class="mm-label" style="min-width:34px;">Tag</span>';
   html += '<select id="droneTagSelect_' + safeMac + '" '
        +  'onclick="event.stopPropagation();" '
-       +  'onchange="saveDroneTag(\\'' + mac + '\\', this.value)" '
+       +  'onchange="saveDroneTag(' + mmJsArg(mac) + ', this.value)" '
        +  'class="mm-grow" style="color:' + tagColor + '; border-color:' + tagColor + '66; font-weight:600;">';
   DRONE_TAG_VALUES.forEach(v => {
     html += '<option value="' + v + '"' + (v === curTag ? ' selected' : '') + '>' + v.toUpperCase() + '</option>';
@@ -9591,15 +9624,15 @@ function generatePopupContent(detection, markerType) {
   html += pillBtn('lock-drone-' + mac,
                   isDroneLocked ? 'TRACKING DRONE' : 'TRACK DRONE',
                   (isDroneLocked
-                    ? 'unlockMarker(\\'drone\\', \\'' + mac + '\\');'
-                    : 'lockMarker(\\'drone\\', \\'' + mac + '\\');'),
+                    ? 'unlockMarker(\\'drone\\', ' + mmJsArg(mac) + ');'
+                    : 'lockMarker(\\'drone\\', ' + mmJsArg(mac) + ');'),
                   isDroneLocked);
   if (validPilot) {
     html += pillBtn('lock-pilot-' + mac,
                     isPilotLocked ? 'TRACKING PILOT' : 'TRACK PILOT',
                     (isPilotLocked
-                      ? 'unlockMarker(\\'pilot\\', \\'' + mac + '\\');'
-                      : 'lockMarker(\\'pilot\\', \\'' + mac + '\\');'),
+                      ? 'unlockMarker(\\'pilot\\', ' + mmJsArg(mac) + ');'
+                      : 'lockMarker(\\'pilot\\', ' + mmJsArg(mac) + ');'),
                     isPilotLocked);
   }
   html += '</div>';
@@ -9609,10 +9642,10 @@ function generatePopupContent(detection, markerType) {
   const pilotPathOn = !hiddenPaths.has('pilot:' + mac);
   html += '<div style="margin-top:4px;">';
   html += toggleSwitch('drone-path-' + safeMac, 'Drone path', dronePathOn,
-                       'setPathHidden(\\'drone:' + mac + '\\', !this.checked);');
+                       'setPathHidden(' + mmJsArg('drone:' + mac) + ', !this.checked);');
   if (validPilot) {
     html += toggleSwitch('pilot-path-' + safeMac, 'Pilot path', pilotPathOn,
-                         'setPathHidden(\\'pilot:' + mac + '\\', !this.checked);');
+                         'setPathHidden(' + mmJsArg('pilot:' + mac) + ', !this.checked);');
   }
   html += '</div>';
 
@@ -9625,9 +9658,9 @@ function generatePopupContent(detection, markerType) {
   html += '<div class="mm-rule"></div>';
   html += '<div class="mm-row" style="gap:10px;">';
   html += '<span class="mm-label" style="min-width:40px;">Color</span>';
-  html += '<input type="range" id="colorSlider_' + mac + '" min="0" max="360" value="' + defaultHue + '" '
+  html += '<input type="range" id="colorSlider_' + mmEsc(mac) + '" min="0" max="360" value="' + (Number(defaultHue) || 0) + '" '
        +  'onclick="event.stopPropagation();" '
-       +  'onchange="updateColor(\\'' + mac + '\\', this.value)" '
+       +  'onchange="updateColor(' + mmJsArg(mac) + ', this.value)" '
        +  'class="mm-hue mm-grow">';
   html += '</div>';
   html += '</div>';
@@ -10176,10 +10209,10 @@ async function refreshOfflineLayers() {
       row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; gap:8px; padding:7px 0; border-top:1px solid var(--line);';
       const tagColor = lyr.kind === 'vector' ? 'var(--sky)' : 'var(--lime)';
       row.innerHTML = '<span style="min-width:0; font-size:12px; color:var(--text);"><span class="mm-tag" style="--c:' + tagColor + '; margin-right:6px;">'
-                    + (lyr.kind === 'vector' ? 'VECTOR' : 'RASTER') + '</span>' + lyr.label
+                    + (lyr.kind === 'vector' ? 'VECTOR' : 'RASTER') + '</span>' + mmEsc(lyr.label)
                     + '<span class="mm-mono" style="display:block; margin-top:3px; font-size:11px; color:var(--muted);">'
                     + lyr.tile_count + ' tiles · ' + (lyr.size_bytes/1048576).toFixed(1) + ' MB</span></span>'
-                    + '<button data-name="' + lyr.name + '" class="cacheDelBtn mm-danger" style="padding:4px 8px; font-size:11px;">DEL</button>';
+                    + '<button data-name="' + mmEsc(lyr.name) + '" class="cacheDelBtn mm-danger" style="padding:4px 8px; font-size:11px;">DEL</button>';
       list.appendChild(row);
     }
   }
@@ -10292,7 +10325,7 @@ const geofences = {};         // id -> fence dict (server canonical)
 
 function showGeofenceToast(payload) {
   const t = document.createElement('div');
-  const accent = payload.fence_color || '#ff4d5e';
+  const accent = mmColor(payload.fence_color, '#ff4d5e');
   t.style.cssText =
     'pointer-events:auto; min-width:240px; padding:10px 12px; border:1px solid ' + accent + ';'
     + 'border-left-width:3px; background:rgba(9,11,15,0.96); color:var(--text); font-family:var(--sans); font-size:13px;'
@@ -10301,13 +10334,13 @@ function showGeofenceToast(payload) {
   const dt = new Date((payload.ts || 0) * 1000);
   const tagColor = (DRONE_TAG_COLORS[payload.drone_tag] || '#888');
   const tagPill = '<span class="mm-tag" style="--c:' + tagColor + ';">'
-    + (payload.drone_tag || 'unknown').toUpperCase() + '</span>';
+    + mmEsc((payload.drone_tag || 'unknown').toUpperCase()) + '</span>';
   t.innerHTML =
     '<div style="display:flex; align-items:center; gap:8px; font:600 11px/1.3 var(--mono); letter-spacing:0.1em;">'
     + '<span style="color:' + (payload.transition === 'enter' ? 'var(--green)' : 'var(--red)') + ';">'
     + (payload.transition === 'enter' ? '▶ ENTERED' : '◀ LEFT') + '</span>'
-    + ' <span style="color:' + accent + '; font-family:var(--sans); font-size:13px; letter-spacing:0;">· ' + payload.fence_name + '</span></div>'
-    + '<div style="margin-top:5px; display:flex; align-items:center; gap:8px; color:var(--soft);">' + (payload.alias || payload.mac) + ' ' + tagPill + '</div>'
+    + ' <span style="color:' + accent + '; font-family:var(--sans); font-size:13px; letter-spacing:0;">· ' + mmEsc(payload.fence_name) + '</span></div>'
+    + '<div style="margin-top:5px; display:flex; align-items:center; gap:8px; color:var(--soft);">' + mmEsc(payload.alias || payload.mac) + ' ' + tagPill + '</div>'
     + '<div class="mm-mono" style="font-size:11px; color:var(--muted); margin-top:4px;">' + dt.toLocaleTimeString() + '</div>';
   document.getElementById('geofenceToasts').appendChild(t);
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.5s'; }, 8000);
@@ -10352,17 +10385,17 @@ function _gfWatchLabel(f) {
 function geofencePopup(f) {
   const watch = _gfWatchLabel(f);
   return '<div class="mm-pop" style="min-width:200px;">'
-    + '<div class="mm-pop-title" style="display:flex; align-items:center; gap:8px;"><span class="mm-dot" style="--c:' + (f.color || '#ff4d5e') + ';"></span>' + f.name + '</div>'
-    + '<div class="mm-row" style="margin-top:6px;"><span class="mm-tag">' + f.type.toUpperCase() + '</span>'
+    + '<div class="mm-pop-title" style="display:flex; align-items:center; gap:8px;"><span class="mm-dot" style="--c:' + mmColor(f.color, '#ff4d5e') + ';"></span>' + mmEsc(f.name) + '</div>'
+    + '<div class="mm-row" style="margin-top:6px;"><span class="mm-tag">' + mmEsc(String(f.type).toUpperCase()) + '</span>'
     + '<span class="mm-tag" style="--c:' + (f.enabled ? 'var(--green)' : 'var(--muted)') + ';">' + (f.enabled ? 'enabled' : 'disabled') + '</span></div>'
     + '<div class="mm-rule"></div>'
     + '<div class="mm-kv"><span class="k">Enter alert</span><span class="v">' + (f.alert_on_enter ? 'on' : 'off') + '</span></div>'
     + '<div class="mm-kv"><span class="k">Exit alert</span><span class="v">' + (f.alert_on_exit ? 'on' : 'off') + '</span></div>'
-    + '<div class="mm-kv"><span class="k">Watching</span><span class="v" style="color:var(--amber);">' + watch + '</span></div>'
+    + '<div class="mm-kv"><span class="k">Watching</span><span class="v" style="color:var(--amber);">' + mmEsc(watch) + '</span></div>'
     + '<div class="mm-row" style="margin-top:10px;">'
-    + '<button onclick="event.stopPropagation(); editGeofence(\\'' + f.id + '\\')" class="mm-info" style="flex:1; padding:6px 4px;">EDIT</button>'
-    + '<button onclick="event.stopPropagation(); toggleGeofenceEnabled(\\'' + f.id + '\\')" class="mm-warn" style="flex:1; padding:6px 4px;">' + (f.enabled ? 'DISABLE' : 'ENABLE') + '</button>'
-    + '<button onclick="event.stopPropagation(); deleteGeofence(\\'' + f.id + '\\')" class="mm-danger" style="flex:1; padding:6px 4px;">DEL</button>'
+    + '<button onclick="event.stopPropagation(); editGeofence(' + mmJsArg(f.id) + ')" class="mm-info" style="flex:1; padding:6px 4px;">EDIT</button>'
+    + '<button onclick="event.stopPropagation(); toggleGeofenceEnabled(' + mmJsArg(f.id) + ')" class="mm-warn" style="flex:1; padding:6px 4px;">' + (f.enabled ? 'DISABLE' : 'ENABLE') + '</button>'
+    + '<button onclick="event.stopPropagation(); deleteGeofence(' + mmJsArg(f.id) + ')" class="mm-danger" style="flex:1; padding:6px 4px;">DEL</button>'
     + '</div></div>';
 }
 window.editGeofence = editGeofence;
@@ -10402,22 +10435,22 @@ function renderGeofenceList() {
     const watch = _gfWatchLabel(f);
     const row = document.createElement('div');
     row.className = 'gf-row';
-    row.style.cssText = 'border-left:3px solid ' + (f.enabled ? f.color : 'var(--line3)')
+    row.style.cssText = 'border-left:3px solid ' + (f.enabled ? mmColor(f.color, '#ff4d5e') : 'var(--line3)')
       + '; opacity:' + (f.enabled ? '1' : '0.55') + ';';
     // Header row — click to fly-to + toggle expansion
     const head = document.createElement('div');
     head.className = 'gf-row-head';
     head.innerHTML =
-      '<span class="mm-dot" style="--c:' + f.color + ';"></span>'
-      + '<span style="color:var(--text); font-weight:500; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + f.name + '</span>'
-      + '<span class="mm-tag">' + f.type + '</span>'
+      '<span class="mm-dot" style="--c:' + mmColor(f.color, '#ff4d5e') + ';"></span>'
+      + '<span style="color:var(--text); font-weight:500; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + mmEsc(f.name) + '</span>'
+      + '<span class="mm-tag">' + mmEsc(f.type) + '</span>'
       + '<span class="gfRowToggle" style="color:var(--silk); font-size:11px; padding-left:2px;">▸</span>';
     // Detail block — hidden by default, shows tag/alert info + actions
     const detail = document.createElement('div');
     detail.className = 'gf-row-detail';
     detail.style.cssText = 'display:none;';
     detail.innerHTML =
-      '<div class="mm-kv"><span class="k">Watching</span><span class="v" style="color:var(--amber);">' + watch + '</span></div>'
+      '<div class="mm-kv"><span class="k">Watching</span><span class="v" style="color:var(--amber);">' + mmEsc(watch) + '</span></div>'
       + '<div class="mm-kv"><span class="k">Alerts</span><span class="v">' + (f.alert_on_enter ? '<span style="color:var(--green);">enter</span>' : 'enter:off')
       + ' · ' + (f.alert_on_exit ? '<span style="color:var(--green);">exit</span>' : 'exit:off') + '</span></div>'
       + '<div class="mm-row" style="margin-top:8px;">'
@@ -10786,15 +10819,15 @@ function renderGeofenceAlertList(alerts) {
     const tagColor = DRONE_TAG_COLORS[p.drone_tag] || '#888';
     const div = document.createElement('div');
     div.className = 'gf-alert';
-    div.style.setProperty('--c', p.fence_color || '#ff4d5e');
+    div.style.setProperty('--c', mmColor(p.fence_color, '#ff4d5e'));
     div.innerHTML =
       '<div style="display:flex; align-items:center; gap:6px; font:600 10.5px/1.3 var(--mono); letter-spacing:0.1em;">'
       + '<span style="color:' + (p.transition === 'enter' ? 'var(--green)' : 'var(--red)') + ';">'
       + (p.transition === 'enter' ? '▶ ENTER' : '◀ EXIT') + '</span>'
-      + '<span style="color:' + (p.fence_color || '#ff4d5e') + '; font-family:var(--sans); font-size:12px; letter-spacing:0;">· ' + p.fence_name + '</span>'
+      + '<span style="color:' + mmColor(p.fence_color, '#ff4d5e') + '; font-family:var(--sans); font-size:12px; letter-spacing:0;">· ' + mmEsc(p.fence_name) + '</span>'
       + '<span style="margin-left:auto; color:var(--muted); letter-spacing:0;">' + dt.toLocaleTimeString() + '</span></div>'
-      + '<div style="margin-top:4px; display:flex; align-items:center; gap:6px; color:var(--soft);">' + (p.alias || p.mac) + ' '
-      + '<span class="mm-tag" style="--c:' + tagColor + ';">' + (p.drone_tag || 'unknown') + '</span></div>';
+      + '<div style="margin-top:4px; display:flex; align-items:center; gap:6px; color:var(--soft);">' + mmEsc(p.alias || p.mac) + ' '
+      + '<span class="mm-tag" style="--c:' + tagColor + ';">' + mmEsc(p.drone_tag || 'unknown') + '</span></div>';
     c.appendChild(div);
   });
 }
@@ -11137,23 +11170,23 @@ function renderJobs() {
       running:'#3dff9a', queued:'#5cc8ff', done:'#2ee6d6',
       paused:'#ffb547', cancelled:'#ff9447', error:'#ff4d5e'
     })[j.status] || '#3dff9a';
-    const reason = j.pause_reason ? '<div class="mm-note" style="color:var(--amber); margin-top:4px;">paused: ' + j.pause_reason + '</div>' : '';
+    const reason = j.pause_reason ? '<div class="mm-note" style="color:var(--amber); margin-top:4px;">paused: ' + mmEsc(j.pause_reason) + '</div>' : '';
     const wrap = document.createElement('div');
     wrap.className = 'mm-card';
     wrap.style.cssText = 'margin-top:8px; padding:8px 10px; border-color:' + statusColor + '55;';
     let buttons = '';
     if (j.status === 'running' || j.status === 'queued') {
-      buttons = '<button data-id="' + j.id + '" class="cacheCancelBtn mm-danger" style="margin-top:8px; margin-right:4px; padding:4px 9px; font-size:11px;">CANCEL</button>';
+      buttons = '<button data-id="' + mmEsc(j.id) + '" class="cacheCancelBtn mm-danger" style="margin-top:8px; margin-right:4px; padding:4px 9px; font-size:11px;">CANCEL</button>';
     } else if (j.status === 'paused' || j.status === 'error' || j.status === 'cancelled') {
-      buttons = '<button data-id="' + j.id + '" class="cacheResumeBtn mm-accent" style="margin-top:8px; margin-right:4px; padding:4px 9px; font-size:11px;">RESUME</button>'
-              + '<button data-id="' + j.id + '" class="cacheForgetBtn mm-danger" style="margin-top:8px; padding:4px 9px; font-size:11px;">FORGET</button>';
+      buttons = '<button data-id="' + mmEsc(j.id) + '" class="cacheResumeBtn mm-accent" style="margin-top:8px; margin-right:4px; padding:4px 9px; font-size:11px;">RESUME</button>'
+              + '<button data-id="' + mmEsc(j.id) + '" class="cacheForgetBtn mm-danger" style="margin-top:8px; padding:4px 9px; font-size:11px;">FORGET</button>';
     } else if (j.status === 'done') {
-      buttons = '<button data-id="' + j.id + '" class="cacheForgetBtn" style="margin-top:8px; padding:4px 9px; font-size:11px;">DISMISS</button>';
+      buttons = '<button data-id="' + mmEsc(j.id) + '" class="cacheForgetBtn" style="margin-top:8px; padding:4px 9px; font-size:11px;">DISMISS</button>';
     }
     wrap.innerHTML =
       '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:12px;">'
-      + '<span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text);">' + j.name + ' · ' + j.source + '</span>'
-      + '<span class="mm-tag" style="--c:' + statusColor + ';">' + j.status.toUpperCase() + '</span></div>'
+      + '<span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text);">' + mmEsc(j.name + ' · ' + j.source) + '</span>'
+      + '<span class="mm-tag" style="--c:' + statusColor + ';">' + mmEsc(String(j.status).toUpperCase()) + '</span></div>'
       + '<div style="height:4px; margin-top:8px; background:var(--line2); border-radius:2px; position:relative; overflow:hidden;">'
         + '<div style="position:absolute; left:0; top:0; bottom:0; width:' + pct.toFixed(1) + '%; background:' + statusColor + ';"></div>'
       + '</div>'
@@ -11274,18 +11307,18 @@ async function runGeocode() {
     d.results.forEach(res => {
       const row = document.createElement('div');
       row.style.cssText = 'padding:7px 9px; margin-top:4px; border:1px solid var(--silk-line); border-radius:3px; cursor:pointer; font-size:12px; color:var(--text); background:rgba(7,9,12,0.55);';
-      row.innerHTML = res.name.split(',').slice(0, 3).join(',')
-                    + '<div class="mm-mono" style="font-size:10.5px; color:var(--muted); margin-top:2px;">' + res.category + '/' + res.type + '</div>';
+      row.innerHTML = mmEsc(res.name.split(',').slice(0, 3).join(','))
+                    + '<div class="mm-mono" style="font-size:10.5px; color:var(--muted); margin-top:2px;">' + mmEsc(res.category + '/' + res.type) + '</div>';
       row.addEventListener('mouseover', () => { row.style.background = 'rgba(46,230,214,0.06)'; row.style.borderColor = 'rgba(46,230,214,0.5)'; });
       row.addEventListener('mouseout',  () => { row.style.background = 'rgba(7,9,12,0.55)'; row.style.borderColor = 'var(--silk-line)'; });
       row.addEventListener('click', () => {
         applyBboxToMap(res.bbox, res.name.split(',')[0]);
-        box.innerHTML = '<div class="mm-note" style="color:var(--green);">▸ ' + res.name.split(',')[0] + ' — bbox set</div>';
+        box.innerHTML = '<div class="mm-note" style="color:var(--green);">▸ ' + mmEsc(res.name.split(',')[0]) + ' — bbox set</div>';
       });
       box.appendChild(row);
     });
   } catch (e) {
-    box.innerHTML = '<div class="mm-note" style="color:var(--red);">geocode failed: ' + e + '</div>';
+    box.innerHTML = '<div class="mm-note" style="color:var(--red);">geocode failed: ' + mmEsc(e) + '</div>';
   }
 }
 document.getElementById('geoGoBtn').addEventListener('click', (ev) =>
@@ -11323,12 +11356,12 @@ function renderImportJobs() {
     const totalMb = j.total > 0 ? (j.total/1048576).toFixed(1) : '?';
     div.innerHTML =
       '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:12px;">'
-      + '<span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text);">' + j.name + '</span><span class="mm-tag" style="--c:' + sc + ';">' + j.status.toUpperCase() + '</span></div>'
+      + '<span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text);">' + mmEsc(j.name) + '</span><span class="mm-tag" style="--c:' + sc + ';">' + mmEsc(String(j.status).toUpperCase()) + '</span></div>'
       + '<div style="height:4px; margin-top:8px; background:var(--line2); border-radius:2px; position:relative; overflow:hidden;">'
         + '<div style="position:absolute; left:0; top:0; bottom:0; width:' + pct.toFixed(1) + '%; background:' + sc + ';"></div>'
       + '</div>'
       + '<div class="mm-mono" style="font-size:11px; color:var(--muted); margin-top:6px;">' + mb + ' / ' + totalMb + ' MB'
-      + (j.error_msg ? ' · <span style="color:var(--red);">' + j.error_msg + '</span>' : '')
+      + (j.error_msg ? ' · <span style="color:var(--red);">' + mmEsc(j.error_msg) + '</span>' : '')
       + '</div>';
     c.appendChild(div);
   });
@@ -11737,7 +11770,7 @@ setTimeout(() => {
 function adsbIcon(heading, fillColor, tagColor, category) {
   // Shape rotated along heading (0 deg = north, clockwise).
   // fillColor = altitude band; tagColor = OSINT category outline (or black).
-  const h = (heading == null) ? 0 : heading;
+  const h = Number(heading) || 0;
   const stroke = tagColor || '#000';
   const sw = tagColor ? 1.5 : 0.8;
   const shapeKey = shapeForCategory(category);
@@ -11781,7 +11814,7 @@ function adsbIcon(heading, fillColor, tagColor, category) {
 }
 
 function adsbPopup(a) {
-  const cs = a.callsign || '—';
+  const cs = mmEsc(a.callsign || '—');
   const alt = (a.alt_baro === 'ground') ? 'GND'
             : (a.alt_baro != null ? Math.round(a.alt_baro).toLocaleString() + ' ft' : '—');
   const vel = (a.velocity != null ? Math.round(a.velocity) + ' kt' : '—');
@@ -11791,21 +11824,21 @@ function adsbPopup(a) {
   const emergSq = (sq === '7500' || sq === '7600' || sq === '7700');
   // Single-color tag (primary tag only) keeps the header restrained.
   const pTag = primaryTag(a.tags);
-  const tagMeta = adsbTagById[pTag] || {label: pTag.toUpperCase(), color: '#5cc8ff'};
+  const tagMeta = adsbTagById[pTag] || {label: mmEsc(String(pTag).toUpperCase()), color: '#5cc8ff'};
   const icao = (a.icao || '').toLowerCase();
   const isLocked = (lockedAircraft === icao);
 
   // Key / value row: the key printed in silk, the value in mono
   const stat = (label, value, color) =>
-      '<div class="mm-kv"><span class="k">' + label + '</span>'
-    + '<span class="v mono"' + (color ? ' style="color:' + color + ';"' : '') + '>' + value + '</span>'
+      '<div class="mm-kv"><span class="k">' + mmEsc(label) + '</span>'
+    + '<span class="v mono"' + (color ? ' style="color:' + color + ';"' : '') + '>' + mmEsc(value) + '</span>'
     + '</div>';
 
   // TRACK: one button; engaged it is filled in the accent
   const trackBtn = isLocked
     ? '<button onclick="event.stopPropagation(); unlockAircraft();" class="mm-on" style="flex:1;">'
       + 'TRACKING · TAP TO RELEASE</button>'
-    : '<button onclick="event.stopPropagation(); lockAircraft(\\'' + icao + '\\');" class="mm-accent" style="flex:1;">'
+    : '<button onclick="event.stopPropagation(); lockAircraft(' + mmJsArg(icao) + ');" class="mm-accent" style="flex:1;">'
       + 'TRACK</button>';
 
   // PATH: pure-CSS switch (animates via input:checked sibling selectors).
@@ -11816,7 +11849,7 @@ function adsbPopup(a) {
     + '<span class="mm-label">Flight path</span>'
     + '<span class="pop-toggle">'
     +   '<input type="checkbox"' + (pathOn ? ' checked' : '')
-    +   ' onchange="event.stopPropagation(); _adsbTogglePath(\\'' + icao + '\\', this.checked);">'
+    +   ' onchange="event.stopPropagation(); _adsbTogglePath(' + mmJsArg(icao) + ', this.checked);">'
     +   '<span class="pop-track"></span>'
     +   '<span class="pop-knob"></span>'
     + '</span>'
@@ -11827,8 +11860,8 @@ function adsbPopup(a) {
   const colorSlider =
       '<div class="mm-row" style="gap:10px; padding:2px 0;" onclick="event.stopPropagation();">'
     + '<span class="mm-label" style="min-width:40px;">Color</span>'
-    + '<input type="range" min="0" max="359" value="' + pathHue + '" class="mm-hue mm-grow"'
-    +   ' oninput="event.stopPropagation(); _adsbSetPathColor(\\'' + icao + '\\', this.value);"'
+    + '<input type="range" min="0" max="359" value="' + (Number(pathHue) || 0) + '" class="mm-hue mm-grow"'
+    +   ' oninput="event.stopPropagation(); _adsbSetPathColor(' + mmJsArg(icao) + ', this.value);"'
     +   ' onmousedown="event.stopPropagation();" onpointerdown="event.stopPropagation();"'
     +   ' ontouchstart="event.stopPropagation();">'
     + '</div>';
@@ -11838,9 +11871,9 @@ function adsbPopup(a) {
     // Header: callsign, then ICAO + tag on a quiet second line
     + '<div class="mm-pop-title">' + cs + '</div>'
     + '<div class="mm-pop-sub">'
-    +   '<span class="mm-mac">' + (a.icao || '?').toUpperCase() + '</span>'
+    +   '<span class="mm-mac">' + mmEsc((a.icao || '?').toUpperCase()) + '</span>'
     +   '<span class="mm-tag" style="--c:' + tagMeta.color + ';">' + tagMeta.label + '</span>'
-    +   (emergSq ? '<span class="mm-tag" style="--c:var(--red); margin-left:4px;">SQ ' + sq + '</span>' : '')
+    +   (emergSq ? '<span class="mm-tag" style="--c:var(--red); margin-left:4px;">SQ ' + mmEsc(sq) + '</span>' : '')
     + '</div>'
     + '<div class="mm-rule"></div>'
     + '<div>'
@@ -12785,7 +12818,7 @@ function renderAdsbAircraftList(snapshot) {
     return dirs[Math.round(((h % 360) / 45)) % 8];
   };
   const rows = visible.slice(0, max).map(a => {
-    const cs = a.callsign || '(no cs)';
+    const cs = mmEsc(a.callsign || '(no cs)');
     const onGnd = (a.alt_baro === 'ground') || a.on_ground;
     const alt = onGnd ? 'GND'
               : (a.alt_baro != null ? Math.round(a.alt_baro).toLocaleString() + 'ft' : '—');
@@ -12803,10 +12836,10 @@ function renderAdsbAircraftList(snapshot) {
     const sq = (a.squawk || '').toString();
     const emergSq = (sq === '7500' || sq === '7600' || sq === '7700');
     const sqCell = sq
-      ? ('<span style="color:' + (emergSq ? 'var(--red)' : 'var(--muted)') + (emergSq ? '; font-weight:bold' : '') + ';">sq ' + sq + '</span>')
+      ? ('<span style="color:' + (emergSq ? 'var(--red)' : 'var(--muted)') + (emergSq ? '; font-weight:bold' : '') + ';">sq ' + mmEsc(sq) + '</span>')
       : '';
     const pTag = primaryTag(a.tags);
-    const tagMeta = adsbTagById[pTag] || {label: pTag.toUpperCase(), color:'#7d8999'};
+    const tagMeta = adsbTagById[pTag] || {label: mmEsc(String(pTag).toUpperCase()), color:'#7d8999'};
     const isLocked = (lockedAircraft === a.icao);
     const bg = isLocked ? 'rgba(46,230,214,0.12)' : 'transparent';
     // Heading rotation arrow — small SVG that spins to match the aircraft
@@ -12827,7 +12860,7 @@ function renderAdsbAircraftList(snapshot) {
       : (onGnd ? ' · <span style="color:var(--amber);">GND</span>' : '');
     // Compact row — 20% smaller fonts/padding than the previous pass to fit
     // ~25% more aircraft per panel without losing legibility.
-    return '<div data-icao="' + a.icao + '" class="adsbRow"'
+    return '<div data-icao="' + mmEsc(a.icao) + '" class="adsbRow"'
       + ' style="display:flex; justify-content:space-between; align-items:center;'
       +   ' padding:4px 8px 4px 8px; margin-bottom:2px;'
       +   ' border-left:2px solid ' + tagMeta.color + '; border-radius:0 2px 2px 0;'
@@ -12839,7 +12872,7 @@ function renderAdsbAircraftList(snapshot) {
           + '<span style="color:' + tagMeta.color + '; font:600 9.5px/1.3 var(--mono); letter-spacing:0.06em;">' + tagMeta.label + '</span>'
         + '</div>'
         + '<div style="color:var(--muted); font:500 10.5px/1.35 var(--mono); overflow:hidden; text-overflow:ellipsis;">'
-          + (a.icao || '?').toUpperCase()
+          + mmEsc((a.icao || '?').toUpperCase())
           + sqText
           + dirText
         + '</div>'
@@ -13195,7 +13228,7 @@ renderAdsbBoxFilterChips();
     fetch('/api/adsb/sources').then(r => r.json()).then(d => {
       const sel = document.getElementById('sdrDump1090Preset');
       if (sel && d.dump1090_presets) {
-        sel.innerHTML = d.dump1090_presets.map(p => '<option value="' + p.url + '">' + p.label + '</option>').join('');
+        sel.innerHTML = d.dump1090_presets.map(p => '<option value="' + mmEsc(p.url) + '">' + mmEsc(p.label) + '</option>').join('');
       }
     }).catch(() => {});
     fetch('/api/adsb/config').then(r => r.json()).then(cfg => {
@@ -14038,7 +14071,7 @@ function colorFromMac(mac) {
 }
 
 function get_color_for_mac(mac) {
-  if (colorOverrides.hasOwnProperty(mac)) { return "hsl(" + colorOverrides[mac] + ", 90%, 62%)"; }
+  if (colorOverrides.hasOwnProperty(mac)) { return "hsl(" + (Number(colorOverrides[mac]) || 0) + ", 90%, 62%)"; }
   return colorFromMac(mac);
 }
 
@@ -14507,7 +14540,7 @@ async function updateSerialStatus() {
         const div = document.createElement("div");
         // Device name in neon pink and status color accordingly.
         div.innerHTML = '<span class="mm-dot' + (data.statuses[port] ? ' live' : '') + '" style="--c:' + (data.statuses[port] ? 'var(--green)' : 'var(--red)') + '; margin-right:7px;"></span>'
-          + '<span class="usb-name">' + port + '</span>: ' +
+          + '<span class="usb-name">' + mmEsc(port) + '</span>: ' +
           (data.statuses[port] ? '<span style="color: var(--green);">Connected</span>' : '<span style="color: var(--red);">Disconnected</span>');
         statusDiv.appendChild(div);
       }
