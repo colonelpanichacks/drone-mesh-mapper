@@ -450,6 +450,17 @@ GND           | GND           |
 
 > Every firmware here uses pads **D4 TX / D5 RX**, matching the Mesh Detect PCB. The GPIO behind those pads depends on the chip: S3 = GPIO5/6, C3 = GPIO6/7, C5 = GPIO23/24.
 
+### What goes over the mesh
+
+| Firmware | Over USB | Over the Heltec / LoRa | Shows on the map over LoRa |
+|---|---|---|---|
+| Standard Dualcore (`remoteid-mesh-dualcore`) | JSON | Chat text: `Drone: <mac> RSSI:<n> <map link>` + `Pilot: <map link>` | No |
+| C5 5 GHz (`remoteid-c5-5g`) | JSON | Chat text, same style | No |
+| Node Mode Remote (`node-mode-dualcore`, `remote_node`) | JSON | JSON with `node_id` | Yes, through a Home node |
+| Node Mode Home (`node-mode-dualcore`, `home_node`) | JSON (deduped) to `mesh-mapper.py` | Receives only | — |
+
+The chat text is meant to be read in the Meshtastic app. `mesh-mapper.py` only plots JSON. **To get field detections onto the map over LoRa, put Node Mode Remote on every scanner and Node Mode Home on the board plugged into the mapper.** No custom firmware is needed.
+
 ### Heltec V3 Meshtastic Config (one-time)
 ```
 serial.enabled  true
@@ -494,6 +505,7 @@ tail -f mapper.log             # what's it saying?
 - Confirm firmware is flashed and running (`pio device monitor`)
 - Verify the WiFi channel matches what your local drones broadcast on (default ch 6)
 - Check that the Heltec is in serial mode at 115200, RX=19, TX=20
+- Detections arrive on the mesh as chat messages but never reach the map: the scanner is running the Standard build, which sends readable text. Flash Node Mode Remote on the scanner and Node Mode Home on the base (see [What goes over the mesh](#what-goes-over-the-mesh))
 - Some drones don't broadcast Remote ID — required in many jurisdictions but not universal
 
 ### Tile cache job stuck

@@ -374,7 +374,7 @@
     <div class="step">
       <div class="n">3</div>
       <h3>Wire it to a Heltec V3</h3>
-      <p>All three builds send Remote ID JSON out UART on pad <b>D4 (GPIO5) TX</b> / pad <b>D5 (GPIO6) RX</b>, the same pins as the Mesh Detect PCB. Wire that to a Heltec V3 running Meshtastic in serial TEXTMSG mode at 115200. See the <a href="https://github.com/colonelpanichacks/drone-mesh-mapper#hardware-setup">wiring diagram</a>.</p>
+      <p>All three builds talk to the Heltec on pad <b>D4 (GPIO5) TX</b> / pad <b>D5 (GPIO6) RX</b>, the same pins as the Mesh Detect PCB. <b>Standard</b> sends readable chat text over the mesh (drone MAC, RSSI, map links); only <b>Node Mode Remote</b> sends the JSON the mapper plots. To get detections onto the map over LoRa, use Node Mode. Wire that to a Heltec V3 running Meshtastic in serial TEXTMSG mode at 115200. See the <a href="https://github.com/colonelpanichacks/drone-mesh-mapper#hardware-setup">wiring diagram</a>.</p>
     </div>
 
   </div>
@@ -390,12 +390,13 @@
     <div class="mode">
       <span class="tag">[ MAIN ]</span>
       <h3>RemoteID Mesh — Dualcore</h3>
-      <p>Single-board build. Core 0 sniffs WiFi (Open Drone ID NAN + beacon vendor IEs), Core 1 scans BLE for ODID advertisements. Every detection goes straight out USB and out UART to your Heltec. <b>Use this if you have one detector and one Heltec mesh</b> — no multi-node dedup needed.</p>
+      <p>Single-board build. Core 0 sniffs WiFi (Open Drone ID NAN + beacon vendor IEs), Core 1 scans BLE for ODID advertisements. Detections go out USB as JSON (for a mapper plugged straight into this board) and out UART to your Heltec as readable Meshtastic chat messages: <span class="kbd">Drone: &lt;mac&gt; RSSI:&lt;n&gt; &lt;map link&gt;</span> and <span class="kbd">Pilot: &lt;map link&gt;</span>, at most one every 5 s. <b>Use this to get alerts on your phone over the mesh.</b> The mapper does not plot these chat messages: to get drones on the map over LoRa, use <b>Node Mode</b> below.</p>
       <dl class="specs">
         <dt>Target</dt><dd class="val">XIAO ESP32-S3</dd>
         <dt>Mode</dt><dd class="val">WiFi + BLE, concurrent</dd>
         <dt>UART Out</dt><dd class="val">D4 (GPIO5) TX / D5 (GPIO6) RX @ 115200</dd>
-        <dt>JSON</dt><dd class="val">to USB Serial + Heltec V3</dd>
+        <dt>USB</dt><dd class="val">JSON (mapper)</dd>
+        <dt>Mesh</dt><dd class="val">chat text (not mapped)</dd>
       </dl>
       <esp-web-install-button id="flashMain" manifest="./manifest-main.json">
         <button slot="activate">&gt;&gt; CONNECT &amp; FLASH MAIN &lt;&lt;</button>
