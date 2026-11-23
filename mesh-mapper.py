@@ -3,6 +3,7 @@ import time
 import json
 import csv
 import logging
+import logging.handlers
 import colorsys
 import threading
 import requests
@@ -26,14 +27,14 @@ from flask_socketio import SocketIO, emit
 from collections import deque
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ----------------------
-# Enhanced Logging Setup
-# ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
     handlers=[
-        logging.FileHandler('mapper.log'),
+        # Rotate the logs to prevent crashes
+        logging.handlers.RotatingFileHandler(
+            'mapper.log', maxBytes=5 * 1024 * 1024, backupCount=5,
+            encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
